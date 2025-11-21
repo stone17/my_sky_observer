@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+pandas
+astropy
+pydantic
+python-multipart
+pywebview
+requests
+Pillow
+astroplan
+httpx
+pytest
+pytest-asyncio
