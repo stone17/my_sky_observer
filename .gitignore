@@ -3,3 +3,4 @@ __pycache__/
 image_cache/
 frontend/node_modules/
 .pytest_cache/
+frontend/dist/
