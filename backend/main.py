@@ -75,8 +75,11 @@ def get_sky_survey_url(ra_hms: str, dec_dms: str, fov_in_degrees: float) -> str:
     # print(f"    -> get_sky_survey_url: Calling SkyCoord with RA='{ra_hms}', Dec='{dec_dms}'")
     coords = SkyCoord(ra_hms, dec_dms, unit=(u.hourangle, u.deg))
     # print("    -> get_sky_survey_url: SkyCoord parsing successful.")
-    download_fov = max(fov_in_degrees, 0.25) * 1.5
+    # Ensure we download a large enough area to cover rotation and aspect ratio differences.
+    # 2.0 multiplier ensures we have plenty of context.
+    download_fov = max(fov_in_degrees, 0.25) * 2.0
     base_url = "https://skyview.gsfc.nasa.gov/current/cgi/runquery.pl"
+    # We request a square image (one Size parameter) which maps to square pixels if the survey is isotropic.
     params = f"Survey=dss2r&Position={coords.ra.deg:.5f},{coords.dec.deg:.5f}&Size={download_fov:.4f}&Pixels=512&Return=JPG"
     return f"{base_url}?{params}"
 

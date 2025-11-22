@@ -104,6 +104,7 @@ const sendToNina = async () => {
     </header>
     
     <div class="framing-container" @mousemove="onDrag" @mouseup="stopDrag" @mouseleave="stopDrag">
+        <!-- Container ensures aspect ratio is maintained and image is square -->
         <img :src="object.image_url || 'https://via.placeholder.com/500?text=Loading...'" class="framing-image" />
         
         <!-- FOV Overlay -->

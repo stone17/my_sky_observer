@@ -90,8 +90,12 @@ header {
 }
 
 .framing-image {
-  max-width: 100%;
-  max-height: 100%;
+  /* Ensure the image is square and respects aspect ratio. */
+  /* max-width/height might distort if container isn't square, but object-fit: contain helps. */
+  /* However, user asked for axis=equal. We want the image to be rendered square. */
+  /* Since the container is 600px fixed height, and flexible width... */
+  height: 100%;
+  aspect-ratio: 1 / 1;
   object-fit: contain;
-  pointer-events: none; /* Let events pass to overlay if needed, but we handle overlay separately */
+  pointer-events: none;
 }
