@@ -9,6 +9,7 @@ const objects = ref([]);
 const selectedObject = ref(null);
 const streamStatus = ref('Idle');
 const totalObjects = ref(0);
+const isSettingsCollapsed = ref(false);
 
 const fetchSettings = async () => {
   try {
@@ -55,6 +56,7 @@ const startStream = () => {
   if (settings.value.catalogs) params.append('catalogs', settings.value.catalogs.join(','));
   params.append('sort_key', settings.value.sort_key || 'time');
   params.append('min_altitude', settings.value.min_altitude || 30.0);
+  params.append('image_padding', settings.value.image_padding || 1.05);
 
   eventSource = new EventSource(`/api/stream-objects?${params.toString()}`);
 
@@ -128,10 +130,15 @@ onMounted(() => {
       </nav>
     </header>
 
-    <div class="layout-grid">
+    <div class="layout-grid" :class="{ 'collapsed-settings': isSettingsCollapsed }">
       <aside>
-        <Settings :settings="settings" @update="saveSettings" @start="startStream" />
-        <hr />
+        <div v-if="!isSettingsCollapsed">
+            <Settings :settings="settings" @update="saveSettings" @start="startStream" @collapse="isSettingsCollapsed = true" />
+            <hr />
+        </div>
+        <div v-else style="margin-bottom: 10px;">
+             <button class="outline secondary" @click="isSettingsCollapsed = false" style="width: 100%">Show Settings</button>
+        </div>
         <ObjectList :objects="objects" :selectedId="selectedObject?.name" @select="selectedObject = $event" />
       </aside>
 
@@ -157,5 +164,8 @@ onMounted(() => {
   align-items: center;
   height: 100%;
   text-align: center;
+}
+.collapsed-settings {
+    /* Adjust grid if sidebar needs to be smaller, though standard sidebar is fine */
 }
 </style>

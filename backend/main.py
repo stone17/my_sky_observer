@@ -38,14 +38,19 @@ catalogs = CatalogManager()
 
 def load_settings() -> dict:
     if os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, 'r') as f: return json.load(f)
-    return {"telescope": {"focal_length": 1000}, "camera": {"sensor_width": 23.5, "sensor_height": 15.7}, "location": {"latitude": 55.70, "longitude": 13.19}, "catalogs": ["messier"], "min_altitude": 30.0}
+        with open(SETTINGS_FILE, 'r') as f:
+            settings = json.load(f)
+            # Ensure new fields exist
+            if 'image_padding' not in settings: settings['image_padding'] = 1.05
+            return settings
+    return {"telescope": {"focal_length": 1000}, "camera": {"sensor_width": 23.5, "sensor_height": 15.7}, "location": {"latitude": 55.70, "longitude": 13.19}, "catalogs": ["messier"], "min_altitude": 30.0, "image_padding": 1.05}
 
 def save_settings(settings: dict):
     with open(SETTINGS_FILE, 'w') as f: json.dump(settings, f, indent=2)
 
-def get_setup_hash(telescope: Telescope, camera: Camera) -> str:
-    s = f"f{telescope.focal_length}_w{camera.sensor_width}_h{camera.sensor_height}"
+def get_setup_hash(telescope: Telescope, camera: Camera, image_padding: float) -> str:
+    # Include image_padding in hash so that changing it forces new downloads (or crop logic, but redownload is safer for now)
+    s = f"f{telescope.focal_length}_w{camera.sensor_width}_h{camera.sensor_height}_p{image_padding}"
     return hashlib.md5(s.encode()).hexdigest()[:12]
 
 def get_cache_info(object_name: str, setup_hash: str) -> Tuple[str, str, str]:
@@ -202,7 +207,9 @@ async def event_stream(request: Request, settings: dict):
         camera = Camera(**settings['camera'])
         location = Location(**settings['location'])
         min_altitude = settings.get('min_altitude', 30.0)
-        setup_hash = get_setup_hash(telescope, camera)
+        image_padding = settings.get('image_padding', 1.05) # Percentage (e.g., 1.05 = +5%)
+
+        setup_hash = get_setup_hash(telescope, camera, image_padding)
         
         # 1. Get Sorted Objects
         processed_objects = await asyncio.to_thread(get_sorted_objects, settings, telescope, camera, location)
@@ -223,8 +230,31 @@ async def event_stream(request: Request, settings: dict):
         fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
         fov_w_deg, fov_h_deg = fov_w_arcmin / 60.0, fov_h_arcmin / 60.0
         largest_fov_dim_deg = max(fov_w_deg, fov_h_deg)
-        download_fov = largest_fov_dim_deg * 1.5
         
+        # User requested +5% (configurable).
+        # If image_padding is e.g. 5 (entered as integer 5%), we convert.
+        # Let's assume the input is a float multiplier, but user asks for "5% larger".
+        # We'll interpret "1.05" as 5% padding.
+        # Download FOV needs to cover the rotation (diagonal) + padding.
+        # Diagonal of the sensor FOV:
+        # sqrt(w^2 + h^2) is the minimum diameter needed to rotate fully without cropping.
+        # So let's calculate diagonal.
+        import math
+        fov_diag_deg = math.sqrt(fov_w_deg**2 + fov_h_deg**2)
+
+        # Apply user padding to the diagonal.
+        # Note: User asked "downloaded images need to be 5% larger so we can do framing".
+        # The previous code used `max(w,h) * 2.0`.
+        # If we just use diagonal * padding, it might be tight if padding is small.
+        # But user explicitly asked for 5%.
+        # To be safe for framing (rotation), we need the diagonal.
+        download_fov = fov_diag_deg * image_padding
+
+        # Ensure a minimum size (0.25 deg)
+        download_fov = max(download_fov, 0.25)
+
+        # Recalculate percentages for the FOV rectangle overlay on this new image size.
+        # The image size corresponds to download_fov (width and height, since square).
         fov_rect = FOVRectangle(
             width_percent=(fov_w_deg / download_fov) * 100.0, 
             height_percent=(fov_h_deg / download_fov) * 100.0
@@ -323,9 +353,46 @@ async def geocode_city(city: str):
         return JSONResponse(content={"error": f"Geocoding API error: {e}"}, status_code=500)
 
 @app.get("/api/stream-objects")
-async def stream_objects(request: Request, focal_length: float, sensor_width: float, sensor_height: float, latitude: float, longitude: float, catalogs: str, sort_key: str, min_altitude: float = 30.0):
-    settings = { "telescope": {"focal_length": focal_length}, "camera": {"sensor_width": sensor_width, "sensor_height": sensor_height}, "location": {"latitude": latitude, "longitude": longitude}, "catalogs": catalogs.split(',') if catalogs else [], "min_altitude": min_altitude, "sort_key": sort_key }
+async def stream_objects(request: Request, focal_length: float, sensor_width: float, sensor_height: float, latitude: float, longitude: float, catalogs: str, sort_key: str, min_altitude: float = 30.0, image_padding: float = 1.1):
+    settings = {
+        "telescope": {"focal_length": focal_length},
+        "camera": {"sensor_width": sensor_width, "sensor_height": sensor_height},
+        "location": {"latitude": latitude, "longitude": longitude},
+        "catalogs": catalogs.split(',') if catalogs else [],
+        "min_altitude": min_altitude,
+        "sort_key": sort_key,
+        "image_padding": image_padding
+    }
     return StreamingResponse(event_stream(request, settings), media_type="text/event-stream")
+
+# Profile Management
+PROFILES_FILE = "profiles.json"
+
+@app.get("/api/profiles")
+def get_profiles():
+    if os.path.exists(PROFILES_FILE):
+        with open(PROFILES_FILE, 'r') as f: return json.load(f)
+    return {}
+
+@app.post("/api/profiles/{name}")
+async def save_profile(name: str, request: Request):
+    data = await request.json()
+    profiles = {}
+    if os.path.exists(PROFILES_FILE):
+        with open(PROFILES_FILE, 'r') as f: profiles = json.load(f)
+    profiles[name] = data
+    with open(PROFILES_FILE, 'w') as f: json.dump(profiles, f, indent=2)
+    return {"status": "saved"}
+
+@app.delete("/api/profiles/{name}")
+def delete_profile(name: str):
+    if os.path.exists(PROFILES_FILE):
+        with open(PROFILES_FILE, 'r') as f: profiles = json.load(f)
+        if name in profiles:
+            del profiles[name]
+            with open(PROFILES_FILE, 'w') as f: json.dump(profiles, f, indent=2)
+            return {"status": "deleted"}
+    return JSONResponse(content={"error": "Profile not found"}, status_code=404)
 
 @app.get("/api/presets")
 def get_presets(): return EQUIPMENT_PRESETS
