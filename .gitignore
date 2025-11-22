@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+image_cache/
+frontend/node_modules/
+.pytest_cache/

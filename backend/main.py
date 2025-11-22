@@ -335,6 +335,9 @@ async def get_cached_image(setup_hash: str, image_filename: str):
     if not os.path.exists(filepath): return JSONResponse(content={"error": "File not found"}, status_code=404)
     return FileResponse(filepath, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
-app.mount("/", StaticFiles(directory="frontend", html=True), name="static")
+# Serve static files from dist if it exists (production build), otherwise fallback to frontend (likely broken for Vue without build)
+# User environment seems to have issues building, so we prefer dist if we built it.
+static_dir = "frontend/dist" if os.path.exists("frontend/dist") else "frontend"
+app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
 
 import httpx # Ensure httpx is imported for the NINA client
