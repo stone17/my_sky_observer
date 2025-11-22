@@ -99,6 +99,26 @@ def test_geocode_city_invalid():
     assert response.status_code == 400
     assert "error" in response.json()
 
+def test_nina_framing_endpoint():
+    """Tests the /api/nina/framing endpoint validation."""
+    # Test invalid request (missing fields)
+    response = client.post("/api/nina/framing", json={})
+    assert response.status_code == 422
+
+    # Test valid request structure but likely fails connection (since NINA isn't running)
+    # We expect a 502 Bad Gateway or similar if it tries to connect and fails
+    payload = {
+        "ra": "05h 34m 31.9s",
+        "dec": "+22d 00m 52.2s",
+        "rotation": 45.0
+    }
+    
+    # The endpoint is async and attempts to contact localhost:1888.
+    # In this test environment, nothing is listening on 1888.
+    response = client.post("/api/nina/framing", json=payload)
+    assert response.status_code == 502
+    assert "Could not connect to N.I.N.A" in response.json()['detail']
+
 # This is the most complex test. We need to run the server in a separate process
 # because the streaming endpoint uses asyncio.to_thread which can cause issues
 # with the TestClient's event loop management in some complex async scenarios.

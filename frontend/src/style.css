@@ -1,0 +1,97 @@
+/* Custom styles to override or augment Pico */
+:root {
+  --pico-font-size: 16px;
+}
+
+body {
+  padding: 20px;
+}
+
+header {
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+  padding-bottom: 10px;
+}
+
+/* Make the main layout a grid if screen is wide */
+.layout-grid {
+  display: grid;
+  grid-template-columns: 350px 1fr;
+  gap: 20px;
+}
+
+@media (max-width: 992px) {
+  .layout-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.scrollable-list {
+  max-height: 80vh;
+  overflow-y: auto;
+  border: 1px solid var(--pico-muted-border-color);
+  padding: 10px;
+  border-radius: 5px;
+}
+
+.object-card {
+  cursor: pointer;
+  padding: 10px;
+  margin-bottom: 10px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.object-card:hover {
+  background-color: var(--pico-card-background-color);
+  border-color: var(--pico-primary-border);
+}
+
+.object-card.active {
+  background-color: var(--pico-primary-background);
+  color: var(--pico-primary-inverse);
+}
+
+.object-card h4 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.object-card small {
+  font-size: 0.8rem;
+  opacity: 0.8;
+}
+
+.status-badge {
+  font-size: 0.7rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background-color: var(--pico-secondary-background);
+  color: var(--pico-secondary-inverse);
+  float: right;
+}
+
+.status-cached { background-color: #2d6f34; color: white; }
+.status-downloading { background-color: #b8860b; color: white; }
+.status-queued { background-color: #555; color: #ccc; }
+.status-error { background-color: #8b0000; color: white; }
+
+.framing-container {
+  width: 100%;
+  height: 600px;
+  background-color: #000;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #333;
+}
+
+.framing-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  pointer-events: none; /* Let events pass to overlay if needed, but we handle overlay separately */
+}

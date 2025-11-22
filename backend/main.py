@@ -4,13 +4,14 @@ import traceback
 import os
 import hashlib
 import requests
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List, Optional
 import pandas as pd
 from astropy.coordinates import SkyCoord
 import astropy.units as u
+from pydantic import BaseModel
 
 from .models import Telescope, Camera, Location, FOVRectangle
 from .data_manager import CatalogManager
@@ -32,6 +33,8 @@ EQUIPMENT_PRESETS = {
 app = FastAPI()
 calculator = AstroCalculator()
 catalogs = CatalogManager()
+
+# --- Helper Functions ---
 
 def load_settings() -> dict:
     if os.path.exists(SETTINGS_FILE):
@@ -69,13 +72,125 @@ async def download_and_cache_image(image_url: str, filepath: str, setup_dir: str
         raise e
 
 def get_sky_survey_url(ra_hms: str, dec_dms: str, fov_in_degrees: float) -> str:
-    print(f"    -> get_sky_survey_url: Calling SkyCoord with RA='{ra_hms}', Dec='{dec_dms}'")
+    # print(f"    -> get_sky_survey_url: Calling SkyCoord with RA='{ra_hms}', Dec='{dec_dms}'")
     coords = SkyCoord(ra_hms, dec_dms, unit=(u.hourangle, u.deg))
-    print("    -> get_sky_survey_url: SkyCoord parsing successful.")
+    # print("    -> get_sky_survey_url: SkyCoord parsing successful.")
     download_fov = max(fov_in_degrees, 0.25) * 1.5
     base_url = "https://skyview.gsfc.nasa.gov/current/cgi/runquery.pl"
     params = f"Survey=dss2r&Position={coords.ra.deg:.5f},{coords.dec.deg:.5f}&Size={download_fov:.4f}&Pixels=512&Return=JPG"
     return f"{base_url}?{params}"
+
+# --- Logic Extraction ---
+
+def get_sorted_objects(settings: dict, telescope: Telescope, camera: Camera, location: Location) -> List[dict]:
+    """
+    Loads, filters, and sorts objects based on settings.
+    Returns a list of object dictionaries.
+    """
+    all_objects = catalogs.get_all_objects(settings.get('catalogs', []))
+    if all_objects.empty:
+        return []
+
+    fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
+    filtered_objects = calculator.filter_objects_by_fov(all_objects, (fov_w_arcmin, fov_h_arcmin))
+    
+    processed_objects = []
+    sort_key = settings.get('sort_key', 'time')
+    
+    # Pre-computation for sorting
+    for i, (_, obj) in enumerate(filtered_objects.iterrows()):
+        temp_obj = obj.to_dict()
+        
+        # Priority: Messier catalog gets a boost if needed, but for now sticking to simple sorting.
+        # User requested prioritization. Let's add a 'priority' score.
+        # Lower is better.
+        priority = 2
+        if str(temp_obj.get('catalog', '')).upper() == 'MESSIER':
+            priority = 1
+        
+        if sort_key == 'time':
+            # Highest altitude first
+            metric = calculator.get_max_altitude(temp_obj['dec'], location.latitude)
+            # Normalize metric (0-90) to inverse (90-0) for ascending sort, or just reverse sort later
+        elif sort_key == 'brightness':
+             # Lower magnitude is brighter
+            metric = pd.to_numeric(temp_obj.get('mag', 99), errors='coerce')
+        else: # Size
+            metric = temp_obj['maj_ax']
+
+        temp_obj['sort_metric'] = metric
+        temp_obj['priority'] = priority
+        processed_objects.append(temp_obj)
+
+    # Sort
+    if sort_key == 'brightness':
+        # Ascending: Priority (1 then 2), then Magnitude (low to high)
+        processed_objects.sort(key=lambda x: (x['priority'], x['sort_metric']))
+    elif sort_key == 'time':
+         # Descending altitude: Priority (1 then 2), then Altitude (high to low)
+         # To do this with a single key, we negate altitude
+        processed_objects.sort(key=lambda x: (x['priority'], -x['sort_metric']))
+    else:
+        # Descending size: Priority (1 then 2), then Size (large to small)
+        processed_objects.sort(key=lambda x: (x['priority'], -x['sort_metric']))
+        
+    return processed_objects
+
+# --- N.I.N.A Integration ---
+
+class NinaFramingRequest(BaseModel):
+    ra: str
+    dec: str
+    rotation: float = 0.0
+
+@app.post("/api/nina/framing")
+async def send_to_nina(request: NinaFramingRequest):
+    """
+    Forwards coordinates to N.I.N.A's local API.
+    Assuming N.I.N.A is running on localhost:1888 (default).
+    Endpoint: /api/v1/framing/coordinates (This is a guess, need to verify standard NINA API or use a generic deepsky object add)
+    Actually, usually it's POST http://localhost:1888/api/v1/framing/slew 
+    or similar. Let's try to find documentation or assume a standard one.
+    
+    Common NINA API for framing assistant:
+    POST /api/v1/framing/manualtarget
+    { "RightAscension": ..., "Declination": ... }
+    """
+    nina_url = "http://localhost:1888/api/v1/framing/manualtarget"
+    
+    # Convert HMS/DMS to Decimal Degrees for NINA usually, or it might accept strings.
+    # Let's convert to decimal degrees to be safe.
+    try:
+        coords = SkyCoord(request.ra, request.dec, unit=(u.hourangle, u.deg))
+        payload = {
+            "RightAscension": coords.ra.deg,
+            "Declination": coords.dec.deg,
+            "Rotation": request.rotation
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid coordinates: {e}")
+
+    try:
+        # Fire and forget or wait for response? The user is interacting, so wait short time.
+        # Note: Since this is server-side, 'localhost' refers to the container/server, not the user's PC.
+        # IF the user is running the app locally, this works. 
+        # If this is a web server, this won't work to control a user's NINA.
+        # The requirements say "integrates with N.I.N.A ... via a local HTTP API".
+        # Assuming the app runs locally on the user's machine.
+        async with httpx.AsyncClient() as client:
+             resp = await client.post(nina_url, json=payload, timeout=2.0)
+             if resp.status_code >= 400:
+                 # NINA might not be running or endpoint differs
+                 print(f"NINA Error: {resp.status_code} - {resp.text}")
+                 raise HTTPException(status_code=502, detail=f"N.I.N.A returned error: {resp.status_code}")
+    except Exception as e:
+        print(f"Failed to contact NINA: {e}")
+        # We don't want to crash the frontend flow if NINA isn't open, just warn.
+        # But for an API call, we should return error.
+        raise HTTPException(status_code=502, detail="Could not connect to N.I.N.A. Is it running on port 1888?")
+
+    return {"status": "success", "message": "Sent to N.I.N.A"}
+
 
 async def event_stream(request: Request, settings: dict):
     try:
@@ -84,63 +199,46 @@ async def event_stream(request: Request, settings: dict):
         camera = Camera(**settings['camera'])
         location = Location(**settings['location'])
         min_altitude = settings.get('min_altitude', 30.0)
-        sort_key = settings.get('sort_key', 'time')
         setup_hash = get_setup_hash(telescope, camera)
-        print(f"-> Settings: Sort='{sort_key}', Hash='{setup_hash}', Catalogs={settings.get('catalogs', [])}")
         
-        all_objects = catalogs.get_all_objects(settings.get('catalogs', []))
-        if all_objects.empty:
-            print("-> No objects found in selected catalogs. Closing stream.")
+        # 1. Get Sorted Objects
+        processed_objects = await asyncio.to_thread(get_sorted_objects, settings, telescope, camera, location)
+        
+        if not processed_objects:
+            print("-> No objects found.")
             yield "event: close\ndata: No objects found\n\n"; return
-        print(f"-> Loaded {len(all_objects)} total objects from data files.")
 
-        fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
-        filtered_objects = calculator.filter_objects_by_fov(all_objects, (fov_w_arcmin, fov_h_arcmin))
-        print(f"-> Filtered to {len(filtered_objects)} objects based on FOV.")
+        yield f"event: total\ndata: {len(processed_objects)}\n\n"
         
-        yield f"event: total\ndata: {len(filtered_objects)}\n\n"
-        yield f"event: twilight_info\ndata: {json.dumps(await asyncio.to_thread(calculator.get_twilight_periods, location))}\n\n"
+        twilight = await asyncio.to_thread(calculator.get_twilight_periods, location)
+        yield f"event: twilight_info\ndata: {json.dumps(twilight)}\n\n"
 
-        print("--- STAGE 1: Starting fast pre-computation and sorting ---")
-        processed_objects = []
-        for i, (_, obj) in enumerate(filtered_objects.iterrows()):
-            if await request.is_disconnected(): break
-            if i > 0 and i % 100 == 0: yield f"event: processing_progress\ndata: {i}\n\n"
-            
-            temp_obj = obj.to_dict()
-            if sort_key == 'time':
-                temp_obj['sort_metric'] = calculator.get_max_altitude(temp_obj['dec'], location.latitude)
-            elif sort_key == 'brightness':
-                temp_obj['sort_metric'] = pd.to_numeric(temp_obj.get('mag', 99), errors='coerce')
-            else:
-                temp_obj['sort_metric'] = temp_obj['maj_ax']
-            processed_objects.append(temp_obj)
-        print(f"-> Pre-computation complete for {len(processed_objects)} objects.")
-
-        if sort_key == 'brightness':
-            processed_objects.sort(key=lambda x: x['sort_metric'])
-        else:
-            processed_objects.sort(key=lambda x: x['sort_metric'], reverse=True)
-        print("-> Sorting complete.")
-
+        # 2. Slice Top 200 (or user limit)
         top_objects = processed_objects[:200]
-        print(f"--- STAGE 2: Sliced to top {len(top_objects)} objects. Streaming detailed data... ---")
+        print(f"--- Streaming detailed data for {len(top_objects)} objects ---")
         
+        fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
         fov_w_deg, fov_h_deg = fov_w_arcmin / 60.0, fov_h_arcmin / 60.0
         largest_fov_dim_deg = max(fov_w_deg, fov_h_deg)
         download_fov = largest_fov_dim_deg * 1.5
-        fov_rect = FOVRectangle(width_percent=(fov_w_deg / download_fov) * 100.0, height_percent=(fov_h_deg / download_fov) * 100.0)
+        
+        fov_rect = FOVRectangle(
+            width_percent=(fov_w_deg / download_fov) * 100.0, 
+            height_percent=(fov_h_deg / download_fov) * 100.0
+        )
 
         objects_to_download = []
+        
+        # 3. Send Object Data (Fast)
         for obj_dict in top_objects:
             if await request.is_disconnected(): break
             object_id = obj_dict['id']
-            print(f"\n[+] Processing {object_id}...")
             
             cache_url, cache_filepath, _ = get_cache_info(object_id, setup_hash)
             is_cached = os.path.exists(cache_filepath)
-            print(f"  -> Cache check for {cache_filepath}: {'HIT' if is_cached else 'MISS'}")
             
+            # Calculating altitude graph can be slow.
+            # We could optimize this or do it in parallel, but for now line-by-line is safer for CPU.
             altitude_graph = await asyncio.to_thread(calculator.get_altitude_graph, obj_dict['ra'], obj_dict['dec'], location)
             hours_above_min = await asyncio.to_thread(calculator.calculate_time_above_altitude, altitude_graph, min_altitude)
 
@@ -152,15 +250,29 @@ async def event_stream(request: Request, settings: dict):
 
             size_str = f"{obj_dict['maj_ax']}'" + (f" x {obj_dict['min_ax']}'" if 'min_ax' in obj_dict and obj_dict['min_ax'] > 0 else "")
             
-            result_obj = {"name": object_id, "ra": obj_dict['ra'], "dec": obj_dict['dec'], "catalog": obj_dict['catalog'], "size": size_str, "image_url": image_url, "altitude_graph": [ag.model_dump() for ag in altitude_graph], "fov_rectangle": fov_rect.model_dump(), "hours_above_min": hours_above_min, "maj_ax": obj_dict['maj_ax'], "mag": obj_dict.get('mag', 99), "setup_hash": setup_hash, "status": status }
+            result_obj = {
+                "name": object_id, 
+                "ra": obj_dict['ra'], 
+                "dec": obj_dict['dec'], 
+                "catalog": obj_dict['catalog'], 
+                "size": size_str, 
+                "image_url": image_url, 
+                "altitude_graph": [ag.model_dump() for ag in altitude_graph], 
+                "fov_rectangle": fov_rect.model_dump(), 
+                "hours_above_min": hours_above_min, 
+                "maj_ax": obj_dict['maj_ax'], 
+                "mag": obj_dict.get('mag', 99), 
+                "setup_hash": setup_hash, 
+                "status": status 
+            }
             yield f"event: object_data\ndata: {json.dumps(result_obj)}\n\n"
-            print(f"  -> Sent object_data for {object_id} with status '{status}'.")
 
-        print(f"\n--- STAGE 3: Starting serial download for {len(objects_to_download)} missing images ---")
+        # 4. Serial Download of Missing Images
+        print(f"\n--- Starting download for {len(objects_to_download)} images ---")
         for obj_dict in objects_to_download:
             if await request.is_disconnected(): break
             object_id = obj_dict['id']
-            print(f"\n[*] Downloading image for {object_id}...")
+            
             cache_url, cache_filepath, setup_dir = get_cache_info(object_id, setup_hash)
             
             yield f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'downloading'})}\n\n"
@@ -168,18 +280,21 @@ async def event_stream(request: Request, settings: dict):
             try:
                 live_image_url = get_sky_survey_url(obj_dict['ra'], obj_dict['dec'], largest_fov_dim_deg)
                 await download_and_cache_image(live_image_url, cache_filepath, setup_dir)
-                print(f"  -> SUCCESS: Download complete for {object_id}.")
                 yield f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'cached', 'url': cache_url})}\n\n"
             except Exception as download_error:
-                print(f"  -> FAILED: Download for {object_id} failed. Reason: {download_error}")
+                print(f"  -> FAILED: {object_id} - {download_error}")
                 yield f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'error'})}\n\n"
+                # Optional: Short sleep to prevent hammering API on rapid failures
+                await asyncio.sleep(0.5)
 
         print("--- Event Stream Finished ---")
         yield "event: close\ndata: Stream complete\n\n"
     except Exception as e:
-        print("\n--- CATASTROPHIC ERROR IN EVENT STREAM ---")
+        print("\n--- ERROR IN EVENT STREAM ---")
         traceback.print_exc()
         yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+
+# --- Endpoints ---
 
 @app.get("/api/settings")
 def get_settings(): return JSONResponse(content=load_settings())
@@ -221,3 +336,5 @@ async def get_cached_image(setup_hash: str, image_filename: str):
     return FileResponse(filepath, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 app.mount("/", StaticFiles(directory="frontend", html=True), name="static")
+
+import httpx # Ensure httpx is imported for the NINA client

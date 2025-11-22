@@ -1,5 +1,6 @@
 import math
 import pandas as pd
+import re
 from typing import Tuple, List, Dict
 import astropy.units as u
 from astropy.time import Time
@@ -23,8 +24,6 @@ class AstroCalculator:
         """Filters a DataFrame of objects to those that fit within the given FOV."""
         min_fov_dim = min(fov[0], fov[1])
         return objects[objects['maj_ax'] < min_fov_dim].copy()
-
-import re
 
     def get_max_altitude(self, dec: str, latitude: float) -> float:
         """Calculates an object's maximum possible altitude. Very fast."""
