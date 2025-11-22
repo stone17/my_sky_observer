@@ -80,9 +80,8 @@ def get_sky_survey_url(ra_hms: str, dec_dms: str, fov_in_degrees: float) -> str:
     # print(f"    -> get_sky_survey_url: Calling SkyCoord with RA='{ra_hms}', Dec='{dec_dms}'")
     coords = SkyCoord(ra_hms, dec_dms, unit=(u.hourangle, u.deg))
     # print("    -> get_sky_survey_url: SkyCoord parsing successful.")
-    # Ensure we download a large enough area to cover rotation and aspect ratio differences.
-    # 2.0 multiplier ensures we have plenty of context.
-    download_fov = max(fov_in_degrees, 0.25) * 2.0
+    # Use the exact FOV requested (caller handles padding/diagonal).
+    download_fov = max(fov_in_degrees, 0.25)
     base_url = "https://skyview.gsfc.nasa.gov/current/cgi/runquery.pl"
     # We request a square image (one Size parameter) which maps to square pixels if the survey is isotropic.
     params = f"Survey=dss2r&Position={coords.ra.deg:.5f},{coords.dec.deg:.5f}&Size={download_fov:.4f}&Pixels=512&Return=JPG"
@@ -229,25 +228,13 @@ async def event_stream(request: Request, settings: dict):
         
         fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
         fov_w_deg, fov_h_deg = fov_w_arcmin / 60.0, fov_h_arcmin / 60.0
-        largest_fov_dim_deg = max(fov_w_deg, fov_h_deg)
         
         # User requested +5% (configurable).
-        # If image_padding is e.g. 5 (entered as integer 5%), we convert.
-        # Let's assume the input is a float multiplier, but user asks for "5% larger".
-        # We'll interpret "1.05" as 5% padding.
         # Download FOV needs to cover the rotation (diagonal) + padding.
-        # Diagonal of the sensor FOV:
-        # sqrt(w^2 + h^2) is the minimum diameter needed to rotate fully without cropping.
-        # So let's calculate diagonal.
         import math
         fov_diag_deg = math.sqrt(fov_w_deg**2 + fov_h_deg**2)
 
         # Apply user padding to the diagonal.
-        # Note: User asked "downloaded images need to be 5% larger so we can do framing".
-        # The previous code used `max(w,h) * 2.0`.
-        # If we just use diagonal * padding, it might be tight if padding is small.
-        # But user explicitly asked for 5%.
-        # To be safe for framing (rotation), we need the diagonal.
         download_fov = fov_diag_deg * image_padding
 
         # Ensure a minimum size (0.25 deg)
@@ -311,7 +298,7 @@ async def event_stream(request: Request, settings: dict):
             yield f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'downloading'})}\n\n"
             
             try:
-                live_image_url = get_sky_survey_url(obj_dict['ra'], obj_dict['dec'], largest_fov_dim_deg)
+                live_image_url = get_sky_survey_url(obj_dict['ra'], obj_dict['dec'], download_fov)
                 await download_and_cache_image(live_image_url, cache_filepath, setup_dir)
                 yield f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'cached', 'url': cache_url})}\n\n"
             except Exception as download_error:

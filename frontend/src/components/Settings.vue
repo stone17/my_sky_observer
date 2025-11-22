@@ -11,7 +11,13 @@ const newProfileName = ref("");
 
 // Deep copy settings to local state to avoid mutating props directly
 watch(() => props.settings, (newVal) => {
-  if (newVal) localSettings.value = JSON.parse(JSON.stringify(newVal));
+  if (newVal) {
+      localSettings.value = JSON.parse(JSON.stringify(newVal));
+      // Ensure structure exists to prevent crashes
+      if (!localSettings.value.telescope) localSettings.value.telescope = {};
+      if (!localSettings.value.camera) localSettings.value.camera = {};
+      if (!localSettings.value.location) localSettings.value.location = {};
+  }
 }, { immediate: true, deep: true });
 
 const fetchProfiles = async () => {
