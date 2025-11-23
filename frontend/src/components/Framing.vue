@@ -1,30 +1,58 @@
 <script setup>
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, inject } from 'vue';
 
-const props = defineProps(['object']);
+const props = defineProps(['object', 'settings']); // Settings injected from App
 
-// Framing state
 const rotation = ref(0);
 const offsetX = ref(0);
 const offsetY = ref(0);
 const isDragging = ref(false);
 const dragStart = ref({ x: 0, y: 0 });
+const customImageUrl = ref(null);
+const isFetching = ref(false);
 
-// Watch object change to reset framing
-watch(() => props.object, () => {
+// Current FOV estimate
+const currentFov = ref(1.0); // degrees
+
+// Initialize currentFov from settings and object
+watch(() => props.object, (newObj) => {
+    if (newObj && props.settings && props.settings.telescope) {
+        // Calculate sensor FOV width
+        const fl = props.settings.telescope.focal_length;
+        const sw = props.settings.camera.sensor_width;
+        const sensorFovW = (sw / fl) * 57.2958;
+
+        // Calculate download FOV based on rectangle percent
+        if (newObj.fov_rectangle && newObj.fov_rectangle.width_percent) {
+            currentFov.value = sensorFovW / (newObj.fov_rectangle.width_percent / 100);
+        } else {
+            currentFov.value = sensorFovW * 1.5; // Fallback
+        }
+    }
+    customImageUrl.value = null;
     rotation.value = 0;
-    offsetX.value = 0;
-    offsetY.value = 0;
-});
+}, { immediate: true });
 
 const fovStyle = computed(() => {
-    if (!props.object || !props.object.fov_rectangle) return {};
-    const rect = props.object.fov_rectangle;
+    if (!props.object || !props.settings) return {};
+
+    // Recalculate percents based on currentFov vs Sensor FOV
+    const fl = props.settings.telescope.focal_length;
+    const sw = props.settings.camera.sensor_width;
+    const sh = props.settings.camera.sensor_height;
+
+    const sensorFovW = (sw / fl) * 57.2958;
+    const sensorFovH = (sh / fl) * 57.2958;
+
+    // If currentFov matches the image size
+    const wPct = (sensorFovW / currentFov.value) * 100;
+    const hPct = (sensorFovH / currentFov.value) * 100;
+
     return {
-        width: `${rect.width_percent}%`,
-        height: `${rect.height_percent}%`,
-        top: `calc(50% - ${rect.height_percent/2}% + ${offsetY.value}px)`,
-        left: `calc(50% - ${rect.width_percent/2}% + ${offsetX.value}px)`,
+        width: `${wPct}%`,
+        height: `${hPct}%`,
+        top: `calc(50% - ${hPct/2}% + ${offsetY.value}px)`,
+        left: `calc(50% - ${wPct/2}% + ${offsetX.value}px)`,
         transform: `rotate(${rotation.value}deg)`,
         position: 'absolute',
         border: '2px solid red',
@@ -33,10 +61,35 @@ const fovStyle = computed(() => {
     };
 });
 
+const fetchCustomFov = async () => {
+    if (!props.object) return;
+    isFetching.value = true;
+    try {
+        const res = await fetch('/api/fetch-custom-image', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                ra: props.object.ra,
+                dec: props.object.dec,
+                fov: currentFov.value
+            })
+        });
+        if (res.ok) {
+            const data = await res.json();
+            customImageUrl.value = data.url;
+        }
+    } catch (e) {
+        console.error(e);
+        alert("Failed to fetch image");
+    } finally {
+        isFetching.value = false;
+    }
+};
+
 const startDrag = (e) => {
     isDragging.value = true;
     dragStart.value = { x: e.clientX - offsetX.value, y: e.clientY - offsetY.value };
-    e.preventDefault(); // Prevent text selection
+    e.preventDefault();
 };
 
 const onDrag = (e) => {
@@ -50,83 +103,117 @@ const stopDrag = () => {
 };
 
 const sendToNina = async () => {
+    const payload = {
+        ra: props.object.ra,
+        dec: props.object.dec,
+        rotation: rotation.value
+    };
+
     try {
-        // We need to calculate the new center coordinates based on offsetX/offsetY
-        // This assumes a linear projection which is "okay" for small offsets, 
-        // but strictly speaking we need the WCS (World Coordinate System) of the image.
-        // Since we don't have WCS in the frontend easily, and we are just visually framing 
-        // relative to the center... 
-        // Actually, shifting the FOV box on the image means we want the telescope to point 
-        // where the center of the box is.
-        // The image center corresponds to props.object.ra/dec.
-        // We need to know the pixel scale or degrees per pixel to convert px offset to degrees.
-        
-        // For now, we will just send the original coordinates + rotation.
-        // Implementing true offset calculation requires knowing the image scale in the frontend.
-        // The backend sent `fov_rectangle` percents relative to the download FOV.
-        // We can assume the download FOV corresponds to the image size.
-        // But simpler MVP: Send rotation.
-        
-        const payload = {
-            ra: props.object.ra,
-            dec: props.object.dec,
-            rotation: rotation.value
-        };
-        
         const res = await fetch('/api/nina/framing', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
-        
-        if (res.ok) {
-            alert("Sent to N.I.N.A successfully!");
-        } else {
-            const err = await res.json();
-            alert("Error sending to N.I.N.A: " + (err.detail || "Unknown error"));
-        }
-    } catch (e) {
-        alert("Network error sending to N.I.N.A");
-    }
+        if (res.ok) alert("Sent to N.I.N.A");
+        else alert("Error sending to N.I.N.A");
+    } catch (e) { alert("Network Error"); }
 };
 </script>
 
 <template>
-  <article>
-    <header>
-        <strong>{{ object.name }}</strong>
-        <div style="float: right">
-            <button class="secondary outline" @click="rotation -= 5">↺</button>
-            <input type="number" v-model.number="rotation" style="width: 60px; display: inline-block; margin: 0 5px" />
-            <button class="secondary outline" @click="rotation += 5">↻</button>
-            <button @click="sendToNina">Send to N.I.N.A</button>
+  <article class="framing-panel">
+    <header class="framing-header">
+        <div class="controls-row">
+             <div class="group">
+                <strong>FOV (deg):</strong>
+                <button class="outline small" @click="currentFov = (currentFov * 0.8).toFixed(2)">-</button>
+                <input type="number" v-model.number="currentFov" step="0.1" style="width: 60px" />
+                <button class="outline small" @click="currentFov = (currentFov * 1.2).toFixed(2)">+</button>
+                <button @click="fetchCustomFov" :disabled="isFetching">{{ isFetching ? '...' : 'Fetch' }}</button>
+             </div>
+             <div class="group">
+                <strong>Rot:</strong>
+                <button class="outline small" @click="rotation -= 5">↺</button>
+                <input type="number" v-model.number="rotation" style="width: 50px" />
+                <button class="outline small" @click="rotation += 5">↻</button>
+             </div>
+             <button class="primary" @click="sendToNina">To N.I.N.A</button>
         </div>
     </header>
     
-    <div class="framing-container" @mousemove="onDrag" @mouseup="stopDrag" @mouseleave="stopDrag">
-        <!-- Wrapper ensures overlay is relative to the image size, not the full container width -->
-        <div style="position: relative; height: 100%; aspect-ratio: 1/1;">
-            <img :src="object.image_url || 'https://via.placeholder.com/500?text=Loading...'" class="framing-image" />
+    <div class="framing-viewport" @mousemove="onDrag" @mouseup="stopDrag" @mouseleave="stopDrag">
+        <div class="image-wrapper">
+            <img :src="customImageUrl || object.image_url || 'https://via.placeholder.com/500?text=Loading...'" class="sky-image" />
 
             <!-- FOV Overlay -->
             <div
-                v-if="object.fov_rectangle"
+                v-if="object && settings"
                 :style="fovStyle"
                 @mousedown="startDrag"
             >
-                <!-- Crosshair -->
-                <div style="position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); color: red;">+</div>
+                <div class="crosshair">+</div>
             </div>
         </div>
     </div>
-    
-    <footer>
-        <p>
-            <small>
-                Use the red box to frame your shot. Drag to move, use buttons to rotate.
-                (Note: Position offset calculation is not fully implemented in this version, only Rotation is sent).
-            </small>
-        </p>
-    </footer>
   </article>
 </template>
+
+<style scoped>
+.framing-panel {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+.framing-header {
+    padding: 10px;
+    background: #1f2937;
+    border-bottom: 1px solid #374151;
+}
+.controls-row {
+    display: flex;
+    gap: 15px;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+.group {
+    display: flex;
+    gap: 5px;
+    align-items: center;
+}
+.small {
+    padding: 2px 8px;
+    font-size: 0.9rem;
+}
+.framing-viewport {
+    flex: 1;
+    background: #000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    overflow: hidden;
+    position: relative;
+}
+.image-wrapper {
+    position: relative;
+    height: 100%;
+    aspect-ratio: 1/1;
+}
+.sky-image {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    user-select: none;
+    -webkit-user-drag: none;
+}
+.crosshair {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    color: red;
+    pointer-events: none;
+}
+</style>
