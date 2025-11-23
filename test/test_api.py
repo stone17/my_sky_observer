@@ -239,3 +239,43 @@ def test_nina_framing_endpoint_mock():
         response = client.post("/api/nina/framing", json=payload)
         assert response.status_code == 200
         assert response.json() == {"status": "success", "message": "Sent to N.I.N.A"}
+
+def test_fetch_custom_image_fov():
+    """
+    Tests that downloading images with different FOVs results in different images.
+    """
+    # M45 coordinates
+    ra = "03h 47m 24s"
+    dec = "+24d 07m 00s"
+
+    # Request 1: FOV 1.0 degree
+    req1 = {"ra": ra, "dec": dec, "fov": 1.0}
+    resp1 = client.post("/api/fetch-custom-image", json=req1)
+    assert resp1.status_code == 200
+    url1 = resp1.json()["url"]
+
+    # Request 2: FOV 5.0 degrees - use a larger difference to ensure SkyView respects it
+    req2 = {"ra": ra, "dec": dec, "fov": 5.0}
+    resp2 = client.post("/api/fetch-custom-image", json=req2)
+    assert resp2.status_code == 200
+    url2 = resp2.json()["url"]
+
+    # Get the file paths from the URLs
+    # URLs are /cache/{hash}/{filename}
+    # Filepaths are image_cache/{hash}/{filename}
+    path1 = url1.replace("/cache/", "image_cache/", 1)
+    path2 = url2.replace("/cache/", "image_cache/", 1)
+
+    assert os.path.exists(path1)
+    assert os.path.exists(path2)
+
+    # Read files
+    with open(path1, "rb") as f1:
+        data1 = f1.read()
+    with open(path2, "rb") as f2:
+        data2 = f2.read()
+
+    # Check that the files are different
+    # If they are identical, it means the FOV parameter was ignored or didn't affect the download
+    assert data1 != data2, "Images with different FOVs should differ in content"
+    assert len(data1) != len(data2), "File sizes should differ significantly"

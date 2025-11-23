@@ -76,7 +76,8 @@ const fetchCustomFov = async () => {
         });
         if (res.ok) {
             const data = await res.json();
-            customImageUrl.value = data.url;
+            // Append timestamp to force browser to reload image even if cached
+            customImageUrl.value = data.url + '?t=' + Date.now();
         }
     } catch (e) {
         console.error(e);
