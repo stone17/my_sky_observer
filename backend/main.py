@@ -99,6 +99,7 @@ def get_sorted_objects(settings: dict, telescope: Telescope, camera: Camera, loc
     processed_objects = []
     sort_key = settings.get('sort_key', 'time')
     min_altitude = settings.get('min_altitude', 30.0)
+    min_hours = settings.get('min_hours', 0.0)
     
     # Pre-computation for sorting
     for i, (_, obj) in enumerate(filtered_objects.iterrows()):
@@ -115,6 +116,9 @@ def get_sorted_objects(settings: dict, telescope: Telescope, camera: Camera, loc
 
         # Fast approximation for "hours above altitude" for sorting purposes
         metric_hours = calculator.get_approx_hours_above(temp_obj['dec'], location.latitude, min_altitude)
+
+        if metric_hours < min_hours:
+            continue
 
         temp_obj['max_altitude'] = metric_alt
         temp_obj['magnitude'] = metric_mag
@@ -306,13 +310,14 @@ async def geocode_city(city: str):
         return JSONResponse(content={"error": f"Geocoding API error: {e}"}, status_code=500)
 
 @app.get("/api/stream-objects")
-async def stream_objects(request: Request, focal_length: float, sensor_width: float, sensor_height: float, latitude: float, longitude: float, catalogs: str, sort_key: str, min_altitude: float = 30.0, image_padding: float = 1.1):
+async def stream_objects(request: Request, focal_length: float, sensor_width: float, sensor_height: float, latitude: float, longitude: float, catalogs: str, sort_key: str, min_altitude: float = 30.0, min_hours: float = 0.0, image_padding: float = 1.1):
     settings = {
         "telescope": {"focal_length": focal_length},
         "camera": {"sensor_width": sensor_width, "sensor_height": sensor_height},
         "location": {"latitude": latitude, "longitude": longitude},
         "catalogs": catalogs.split(',') if catalogs else [],
         "min_altitude": min_altitude,
+        "min_hours": min_hours,
         "sort_key": sort_key,
         "image_padding": image_padding
     }
