@@ -279,3 +279,25 @@ def test_fetch_custom_image_fov():
     # If they are identical, it means the FOV parameter was ignored or didn't affect the download
     assert data1 != data2, "Images with different FOVs should differ in content"
     assert len(data1) != len(data2), "File sizes should differ significantly"
+
+def test_fetch_custom_image_with_special_chars():
+    """
+    Tests that downloading images with special characters in RA/Dec (like quotes) works.
+    This simulates the Windows filename issue.
+    """
+    # Coordinates with special chars
+    ra = "17h 17m 07.3s"
+    dec = "+43° 08' 11\"" # Double quote at end
+
+    req = {"ra": ra, "dec": dec, "fov": 1.0}
+    resp = client.post("/api/fetch-custom-image", json=req)
+    assert resp.status_code == 200, f"Request failed with {resp.status_code}: {resp.text}"
+    url = resp.json()["url"]
+
+    path = url.replace("/cache/", "image_cache/", 1)
+
+    # Verify the file was created and name is sanitized
+    assert os.path.exists(path)
+    # Check that double quote is NOT in the filename
+    assert '"' not in path
+    assert '°' not in path # We replaced it with 'd'

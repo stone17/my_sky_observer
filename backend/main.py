@@ -55,7 +55,16 @@ def get_setup_hash(telescope: Telescope, camera: Camera, image_padding: float) -
     return hashlib.md5(s.encode()).hexdigest()[:12]
 
 def get_cache_info(object_name: str, setup_hash: str) -> Tuple[str, str, str]:
-    sanitized_name = object_name.replace(" ", "_").replace("/", "-")
+    # Sanitize filename aggressively to prevent OS errors (especially on Windows)
+    # Remove chars: < > : " / \ | ? * and replace spaces/slashes
+    invalid_chars = '<>:"/\\|?*'
+    sanitized_name = object_name
+    for char in invalid_chars:
+        sanitized_name = sanitized_name.replace(char, "")
+
+    # Also clean up common coordinate symbols for cleaner filenames
+    sanitized_name = sanitized_name.replace(" ", "_").replace("°", "d").replace("'", "m")
+
     filename = f"{sanitized_name}_{setup_hash}.jpg"
     setup_dir = os.path.join(CACHE_DIR, setup_hash)
     filepath = os.path.join(setup_dir, filename)
