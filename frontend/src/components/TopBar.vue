@@ -12,8 +12,14 @@ const localSettings = ref({});
 const profiles = ref({});
 const presets = ref({ cameras: {} });
 const cacheStatus = ref({ size_mb: 0, count: 0 });
+const selectedProfileName = ref(null);
 
 const activeDropdown = ref(null);
+
+// Location Search
+const cityQuery = ref("");
+const cityResults = ref([]);
+const isSearchingCity = ref(false);
 
 // Sorting options
 const sortOptions = ref({
@@ -27,12 +33,17 @@ const sortOptions = ref({
 watch(() => props.settings, (newVal) => {
   if (newVal) {
     try {
+        // Keep track if we are initializing
+        const isInit = Object.keys(localSettings.value).length === 0;
+
         localSettings.value = JSON.parse(JSON.stringify(newVal));
 
         // Ensure sub-objects exist
         if (!localSettings.value.telescope) localSettings.value.telescope = {};
         if (!localSettings.value.camera) localSettings.value.camera = {};
         if (!localSettings.value.location) localSettings.value.location = {};
+        if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
+        if (localSettings.value.min_hours === undefined) localSettings.value.min_hours = 0.0;
 
         // Initialize sort options based on current setting
         const currentSort = localSettings.value.sort_key || 'time';
@@ -98,6 +109,11 @@ onMounted(() => {
 const loadProfile = (name) => {
   if (profiles.value[name]) {
     localSettings.value = JSON.parse(JSON.stringify(profiles.value[name]));
+    // Ensure defaults
+    if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
+    if (localSettings.value.min_hours === undefined) localSettings.value.min_hours = 0.0;
+
+    selectedProfileName.value = name;
     // Save to localStorage for next time
     localStorage.setItem('last_profile', name);
     emit('update-settings', localSettings.value);
@@ -113,6 +129,26 @@ const applyPreset = (cameraName) => {
         emit('update-settings', localSettings.value);
     }
 };
+
+// Computed property for the camera preset select
+const selectedCameraPreset = computed({
+    get() {
+        if (!localSettings.value.camera || !presets.value.cameras) return "";
+        const w = localSettings.value.camera.sensor_width;
+        const h = localSettings.value.camera.sensor_height;
+        // Find key with matching width/height (allow small float diff)
+        for (const [name, specs] of Object.entries(presets.value.cameras)) {
+            if (Math.abs(specs.width - w) < 0.01 && Math.abs(specs.height - h) < 0.01) {
+                return name;
+            }
+        }
+        return "";
+    },
+    set(val) {
+        applyPreset(val);
+    }
+});
+
 
 const updateSort = () => {
     const keys = Object.keys(sortOptions.value).filter(k => sortOptions.value[k].enabled);
@@ -139,6 +175,28 @@ const redownloadCache = () => {
     }
 };
 
+const searchCity = async () => {
+    if (!cityQuery.value || cityQuery.value.length < 2) return;
+    isSearchingCity.value = true;
+    try {
+        const res = await fetch(`/api/geocode?city=${encodeURIComponent(cityQuery.value)}`);
+        if (res.ok) {
+            cityResults.value = await res.json();
+        }
+    } catch(e) { console.error(e); }
+    finally { isSearchingCity.value = false; }
+};
+
+const selectCity = (city) => {
+    if (!localSettings.value.location) localSettings.value.location = {};
+    localSettings.value.location.latitude = city.latitude;
+    localSettings.value.location.longitude = city.longitude;
+    emit('update-settings', localSettings.value);
+    cityResults.value = [];
+    cityQuery.value = "";
+    closeDropdown();
+};
+
 const fovDisplay = computed(() => {
     if (!localSettings.value.telescope || !localSettings.value.camera) return "-";
     const fl = localSettings.value.telescope.focal_length;
@@ -157,7 +215,7 @@ const fovDisplay = computed(() => {
     <!-- Profile -->
     <div class="tb-item relative">
       <button class="tb-btn" @click="toggleDropdown('profile')">
-        Profile: {{ localSettings.telescope?.focal_length ? 'Custom' : 'Select' }} ▼
+        Profile: {{ selectedProfileName || 'Custom' }} ▼
       </button>
       <div class="dropdown-menu" v-if="activeDropdown === 'profile'">
         <label><strong>Load Profile</strong></label>
@@ -165,15 +223,51 @@ const fovDisplay = computed(() => {
             <li v-for="(p, name) in profiles" :key="name" @click="loadProfile(name)">{{ name }}</li>
         </ul>
         <hr/>
-        <label><strong>Camera Preset</strong></label>
-         <select @change="applyPreset($event.target.value)" class="mini-select">
-            <option value="" disabled selected>Select...</option>
-            <option v-for="(specs, name) in presets.cameras" :key="name" :value="name">{{ name }}</option>
-        </select>
         <div class="field-group" v-if="localSettings.telescope">
              <label>Focal Length (mm)</label>
              <input type="number" v-model.number="localSettings.telescope.focal_length" @change="$emit('update-settings', localSettings)" />
         </div>
+        <label><strong>Camera Settings</strong></label>
+         <select v-model="selectedCameraPreset" class="mini-select">
+            <option value="" disabled>Custom / Select Preset...</option>
+            <option v-for="(specs, name) in presets.cameras" :key="name" :value="name">{{ name }}</option>
+        </select>
+        <div class="field-group" v-if="localSettings.camera">
+             <label>Sensor Width (mm)</label>
+             <input type="number" step="0.1" v-model.number="localSettings.camera.sensor_width" @change="$emit('update-settings', localSettings)" />
+        </div>
+        <div class="field-group" v-if="localSettings.camera">
+             <label>Sensor Height (mm)</label>
+             <input type="number" step="0.1" v-model.number="localSettings.camera.sensor_height" @change="$emit('update-settings', localSettings)" />
+        </div>
+      </div>
+    </div>
+
+    <!-- Location -->
+    <div class="tb-item relative">
+      <button class="tb-btn" @click="toggleDropdown('location')">
+        Location ▼
+      </button>
+      <div class="dropdown-menu" v-if="activeDropdown === 'location'">
+        <div class="field-group" v-if="localSettings.location">
+             <label>Latitude</label>
+             <input type="number" step="0.0001" v-model.number="localSettings.location.latitude" @change="$emit('update-settings', localSettings)" />
+        </div>
+        <div class="field-group" v-if="localSettings.location">
+             <label>Longitude</label>
+             <input type="number" step="0.0001" v-model.number="localSettings.location.longitude" @change="$emit('update-settings', localSettings)" />
+        </div>
+        <hr/>
+        <label><strong>Search City</strong></label>
+        <div style="display: flex; gap: 5px;">
+            <input type="text" v-model="cityQuery" @keyup.enter="searchCity" placeholder="City name..." style="flex:1; background: black; border: 1px solid #444; color: white; padding: 5px;" />
+            <button class="small" @click="searchCity">{{ isSearchingCity ? '...' : 'Go' }}</button>
+        </div>
+        <ul v-if="cityResults.length > 0" class="link-list" style="max-height: 150px; overflow-y: auto;">
+            <li v-for="(city, idx) in cityResults" :key="idx" @click="selectCity(city)">
+                {{ city.name }}, {{ city.country }}
+            </li>
+        </ul>
       </div>
     </div>
 
@@ -182,12 +276,23 @@ const fovDisplay = computed(() => {
       <span>FOV: {{ fovDisplay }}</span>
     </div>
 
-    <!-- Sorting -->
+    <!-- Filter / Sorting -->
     <div class="tb-item relative">
       <button class="tb-btn" @click="toggleDropdown('sort')">
-        Sort Targets ▼
+        Filter / Sort ▼
       </button>
       <div class="dropdown-menu" v-if="activeDropdown === 'sort'">
+        <label><strong>Filters</strong></label>
+        <div class="field-group">
+             <label>Min Altitude (°)</label>
+             <input type="number" v-model.number="localSettings.min_altitude" @change="$emit('update-settings', localSettings)" />
+        </div>
+        <div class="field-group">
+             <label>Min Hours Visible</label>
+             <input type="number" step="0.1" v-model.number="localSettings.min_hours" @change="$emit('update-settings', localSettings)" />
+        </div>
+        <hr/>
+        <label><strong>Sort By</strong></label>
         <div v-for="(opt, key) in sortOptions" :key="key" class="checkbox-row">
              <input type="checkbox" v-model="opt.enabled" @change="updateSort" :id="'sort-'+key">
              <label :for="'sort-'+key">{{ opt.label }}</label>
@@ -263,7 +368,7 @@ const fovDisplay = computed(() => {
     border: 1px solid #374151;
     padding: 10px;
     z-index: 100;
-    min-width: 200px;
+    min-width: 220px;
     border-radius: 0 0 4px 4px;
     box-shadow: 0 4px 6px rgba(0,0,0,0.3);
 }
@@ -293,6 +398,11 @@ const fovDisplay = computed(() => {
 .field-group {
     margin-bottom: 5px;
 }
+.field-group label {
+    display: block;
+    font-size: 0.8em;
+    color: #9ca3af;
+}
 .field-group input {
     width: 100%;
     padding: 5px;
@@ -309,8 +419,9 @@ const fovDisplay = computed(() => {
 }
 
 .full-width { width: 100%; }
-.small { padding: 5px; font-size: 0.8rem; }
+.small { padding: 2px 8px; font-size: 0.8rem; }
 .danger { background-color: #ef4444; border-color: #ef4444; color: white; }
+.secondary { background-color: #4b5563; border-color: #4b5563; color: white; }
 
 .status-text {
     color: #9ca3af;
