@@ -99,13 +99,88 @@ class AstroCalculator:
 
         return {"target": target_points, "moon": moon_points}
 
-    def calculate_time_above_altitude(self, altitude_points: List[AltitudePoint], min_altitude: float) -> float:
-        """Estimates the total hours an object is above a minimum altitude based on the graph points."""
-        above_times = [p for p in altitude_points if p.altitude >= min_altitude]
-        if len(above_times) < 2:
+    def prepare_night_frame(self, location: Location, night_start: Time, night_end: Time) -> Optional[Tuple[AltAz, float]]:
+        """
+        Pre-calculates the AltAz frame for the night period to speed up batch calculations.
+        Returns (AltAz_Frame, duration_in_hours).
+        """
+        try:
+            duration = (night_end - night_start).to(u.hour).value
+            if duration <= 0: return None
+
+            num_points = int(duration * 4) # 4 points per hour
+            if num_points < 2: num_points = 2
+
+            times = night_start + np.linspace(0, duration, num_points) * u.hour
+            observer_location = EarthLocation(lat=location.latitude * u.deg, lon=location.longitude * u.deg)
+            altaz_frame = AltAz(obstime=times, location=observer_location)
+
+            return altaz_frame, duration
+        except Exception:
+            return None
+
+    def calculate_nightly_hours_fast(self, ra: str, dec: str, altaz_frame: AltAz, duration: float, min_altitude: float) -> float:
+        """
+        Calculates hours above altitude using a pre-calculated AltAz frame.
+        """
+        try:
+            # Handle potentially different input types
+            ra_str = str(ra).strip()
+            dec_str = str(dec).strip()
+
+            # Check if RA looks like degrees (float string) or HMS
+            if re.match(r'^[\d.]+$', ra_str):
+                unit = (u.deg, u.deg)
+            else:
+                unit = (u.hourangle, u.deg)
+
+            target_coords = SkyCoord(ra_str, dec_str, unit=unit)
+
+            # This is the heavy part, but frame is reused
+            altitudes = target_coords.transform_to(altaz_frame).alt.deg
+
+            count_above = np.sum(altitudes >= min_altitude)
+            hours = (count_above / len(altitudes)) * duration
+            return round(hours, 1)
+
+        except Exception as e:
+            # print(f"Error in nightly calc: {e}")
             return 0.0
+
+    def calculate_time_above_altitude(self, altitude_points: List[AltitudePoint], min_altitude: float, twilight_periods: Optional[Dict[str, List[str]]] = None) -> float:
+        """
+        Estimates the total hours an object is above a minimum altitude based on the graph points.
+        If twilight_periods is provided (and contains 'night'), only counts hours during the night.
+        """
+        valid_points = []
+
+        night_start = None
+        night_end = None
+
+        if twilight_periods and "night" in twilight_periods:
+            try:
+                night_start = Time(twilight_periods["night"][0])
+                night_end = Time(twilight_periods["night"][1])
+            except: pass
+
+        for p in altitude_points:
+            if p.altitude >= min_altitude:
+                if night_start and night_end:
+                    # Check if point time is within night period
+                    # Note: p.time is ISOT string.
+                    pt = Time(p.time)
+                    if pt >= night_start and pt <= night_end:
+                        valid_points.append(p)
+                else:
+                    valid_points.append(p)
+
+        if len(valid_points) < 1: # Single point counts as some time if step is known, but let's be safe
+            return 0.0
+
+        # Time step is constant
         time_step_hours = 24.0 / (len(altitude_points) - 1) if len(altitude_points) > 1 else 0
-        return round(len(above_times) * time_step_hours, 1)
+
+        return round(len(valid_points) * time_step_hours, 1)
 
     def get_twilight_periods(self, location: Location) -> Dict[str, List[str]]:
         """Calculates twilight periods for the next 24 hours."""

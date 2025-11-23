@@ -18,6 +18,7 @@ import math
 from .models import Telescope, Camera, Location, FOVRectangle
 from .data_manager import CatalogManager
 from .astro_utils import AstroCalculator, auto_stretch_image
+from astropy.time import Time
 
 CACHE_DIR = "image_cache"
 SETTINGS_FILE = "settings.json"
@@ -101,6 +102,24 @@ def get_sorted_objects(settings: dict, telescope: Telescope, camera: Camera, loc
     min_altitude = settings.get('min_altitude', 30.0)
     min_hours = settings.get('min_hours', 0.0)
     
+    # Pre-calculate twilight periods for sorting if needed
+    night_start, night_end = None, None
+    altaz_frame, night_duration = None, 0.0
+
+    if 'hours_above' in sort_key or min_hours > 0:
+        try:
+            twilight = calculator.get_twilight_periods(location)
+            if "night" in twilight:
+                night_start = Time(twilight["night"][0])
+                night_end = Time(twilight["night"][1])
+
+                # Pre-calculate frame for fast batch processing
+                result = calculator.prepare_night_frame(location, night_start, night_end)
+                if result:
+                    altaz_frame, night_duration = result
+        except Exception as e:
+            print(f"Error calculating twilight for sort: {e}")
+
     # Pre-computation for sorting
     for i, (_, obj) in enumerate(filtered_objects.iterrows()):
         temp_obj = obj.to_dict()
@@ -114,8 +133,14 @@ def get_sorted_objects(settings: dict, telescope: Telescope, camera: Camera, loc
         metric_mag = pd.to_numeric(temp_obj.get('mag', 99), errors='coerce')
         metric_size = temp_obj['maj_ax']
 
-        # Fast approximation for "hours above altitude" for sorting purposes
-        metric_hours = calculator.get_approx_hours_above(temp_obj['dec'], location.latitude, min_altitude)
+        # Determine visibility duration
+        # If we have night periods, calculate nightly hours using fast method.
+        if altaz_frame is not None:
+            metric_hours = calculator.calculate_nightly_hours_fast(
+                temp_obj['ra'], temp_obj['dec'], altaz_frame, night_duration, min_altitude
+            )
+        else:
+            metric_hours = calculator.get_approx_hours_above(temp_obj['dec'], location.latitude, min_altitude)
 
         if metric_hours < min_hours:
             continue
@@ -231,7 +256,7 @@ async def event_stream(request: Request, settings: dict):
             altitude_data = await asyncio.to_thread(calculator.get_altitude_graph, obj_dict['ra'], obj_dict['dec'], location)
 
             # Calculate hours above min based on graph
-            hours_above_min = await asyncio.to_thread(calculator.calculate_time_above_altitude, altitude_data['target'], min_altitude)
+            hours_above_min = await asyncio.to_thread(calculator.calculate_time_above_altitude, altitude_data['target'], min_altitude, twilight)
 
             image_url, status = ("", "queued")
             if is_cached:
@@ -260,22 +285,47 @@ async def event_stream(request: Request, settings: dict):
             yield f"event: object_data\ndata: {json.dumps(result_obj)}\n\n"
 
         print(f"\n--- Starting download for {len(objects_to_download)} images ---")
-        for obj_dict in objects_to_download:
-            if await request.is_disconnected(): break
-            object_id = obj_dict['id']
+
+        # Parallel Download Management
+        download_queue = asyncio.Queue()
+        semaphore = asyncio.Semaphore(5) # Limit to 5 concurrent downloads
+
+        async def worker(obj_dict):
+             async with semaphore:
+                if await request.is_disconnected(): return
+
+                object_id = obj_dict['id']
+                cache_url, cache_filepath, setup_dir = get_cache_info(object_id, setup_hash)
+
+                await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'downloading'})}\n\n")
+
+                try:
+                    live_image_url = get_sky_survey_url(obj_dict['ra'], obj_dict['dec'], download_fov)
+                    await download_and_cache_image(live_image_url, cache_filepath, setup_dir)
+                    await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'cached', 'url': cache_url})}\n\n")
+                except Exception as download_error:
+                    print(f"  -> FAILED: {object_id} - {download_error}")
+                    await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'error'})}\n\n")
+
+        # Start workers
+        workers = [asyncio.create_task(worker(obj)) for obj in objects_to_download]
+
+        # Monitor completion
+        async def monitor_completion():
+            await asyncio.gather(*workers)
+            await download_queue.put(None) # Signal end
+
+        asyncio.create_task(monitor_completion())
+
+        # Stream events from queue
+        while True:
+            if await request.is_disconnected():
+                break
             
-            cache_url, cache_filepath, setup_dir = get_cache_info(object_id, setup_hash)
+            event = await download_queue.get()
+            if event is None: break
             
-            yield f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'downloading'})}\n\n"
-            
-            try:
-                live_image_url = get_sky_survey_url(obj_dict['ra'], obj_dict['dec'], download_fov)
-                await download_and_cache_image(live_image_url, cache_filepath, setup_dir)
-                yield f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'cached', 'url': cache_url})}\n\n"
-            except Exception as download_error:
-                print(f"  -> FAILED: {object_id} - {download_error}")
-                yield f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'error'})}\n\n"
-                await asyncio.sleep(0.5)
+            yield event
 
         print("--- Event Stream Finished ---")
         yield "event: close\ndata: Stream complete\n\n"
@@ -387,9 +437,12 @@ async def fetch_custom_image(req: FetchImageRequest):
     name = f"RADEC_{req.ra}_{req.dec}"
     url, filepath, setup_dir = get_cache_info(name, setup_hash)
 
+    print(f"Fetching custom image: FOV={req.fov}, Hash={setup_hash}, Path={filepath}")
+
     if not os.path.exists(filepath):
         try:
             live_url = get_sky_survey_url(req.ra, req.dec, req.fov)
+            print(f"  -> Downloading from: {live_url}")
             await download_and_cache_image(live_url, filepath, setup_dir)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
