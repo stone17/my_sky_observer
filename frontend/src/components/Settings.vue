@@ -6,16 +6,32 @@ const emit = defineEmits(['update', 'start']);
 
 const localSettings = ref({});
 const presets = ref({ cameras: {} });
+const profiles = ref({});
+const newProfileName = ref("");
 
 // Deep copy settings to local state to avoid mutating props directly
 watch(() => props.settings, (newVal) => {
-  if (newVal) localSettings.value = JSON.parse(JSON.stringify(newVal));
+  if (newVal) {
+      localSettings.value = JSON.parse(JSON.stringify(newVal));
+      // Ensure structure exists to prevent crashes
+      if (!localSettings.value.telescope) localSettings.value.telescope = {};
+      if (!localSettings.value.camera) localSettings.value.camera = {};
+      if (!localSettings.value.location) localSettings.value.location = {};
+  }
 }, { immediate: true, deep: true });
+
+const fetchProfiles = async () => {
+    try {
+        const res = await fetch('/api/profiles');
+        if (res.ok) profiles.value = await res.json();
+    } catch (e) { console.error(e); }
+};
 
 onMounted(async () => {
     try {
         const res = await fetch('/api/presets');
         presets.value = await res.json();
+        await fetchProfiles();
     } catch (e) { console.error(e); }
 });
 
@@ -27,9 +43,34 @@ const applyPreset = (cameraName) => {
     }
 };
 
-const geocodeCity = async () => {
-    // Implementation for geocoding if needed, for now manual input
-    // Could add a city search input later
+const saveProfile = async () => {
+    if (!newProfileName.value) return;
+    try {
+        const res = await fetch(`/api/profiles/${newProfileName.value}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(localSettings.value)
+        });
+        if (res.ok) {
+            await fetchProfiles();
+            newProfileName.value = "";
+            alert("Profile saved");
+        }
+    } catch (e) { alert("Error saving profile"); }
+};
+
+const loadProfile = (name) => {
+    if (profiles.value[name]) {
+        localSettings.value = JSON.parse(JSON.stringify(profiles.value[name]));
+    }
+};
+
+const deleteProfile = async (name) => {
+    if (!confirm(`Delete profile ${name}?`)) return;
+    try {
+        const res = await fetch(`/api/profiles/${name}`, { method: 'DELETE' });
+        if (res.ok) await fetchProfiles();
+    } catch (e) { alert("Error deleting profile"); }
 };
 
 const saveAndStart = () => {
@@ -40,8 +81,33 @@ const saveAndStart = () => {
 
 <template>
   <article>
-    <header>Configuration</header>
-    <form @submit.prevent="saveAndStart">
+    <header>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span>Configuration</span>
+            <button class="outline secondary" style="padding: 5px 10px; font-size: 0.8rem;" @click="$emit('collapse')">Hide</button>
+        </div>
+    </header>
+    <form @submit.prevent="saveAndStart" v-if="localSettings.telescope && localSettings.camera && localSettings.location">
+        <details>
+            <summary>Profiles</summary>
+             <div class="grid">
+                <label>
+                    Load Profile
+                    <select @change="loadProfile($event.target.value)">
+                        <option value="" disabled selected>Select...</option>
+                        <option v-for="(data, name) in profiles" :key="name" :value="name">{{ name }}</option>
+                    </select>
+                </label>
+            </div>
+             <div class="grid">
+                <label>
+                    New Profile Name
+                    <input type="text" v-model="newProfileName" placeholder="My Setup" />
+                </label>
+                <button type="button" class="secondary" @click="saveProfile" style="margin-top: 25px">Save</button>
+            </div>
+        </details>
+
         <details open>
             <summary>Telescope & Camera</summary>
             <div class="grid">
@@ -108,9 +174,17 @@ const saveAndStart = () => {
                     </select>
                 </label>
             </div>
+            <div class="grid">
+                 <label>
+                    Image Padding (x FOV)
+                    <input type="number" step="0.05" v-model.number="localSettings.image_padding" />
+                    <small>1.05 = 5% larger</small>
+                </label>
+            </div>
         </details>
 
         <button type="submit">Start Search</button>
     </form>
+    <div v-else>Loading settings...</div>
   </article>
 </template>

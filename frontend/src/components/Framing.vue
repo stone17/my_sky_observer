@@ -104,16 +104,19 @@ const sendToNina = async () => {
     </header>
     
     <div class="framing-container" @mousemove="onDrag" @mouseup="stopDrag" @mouseleave="stopDrag">
-        <img :src="object.image_url || 'https://via.placeholder.com/500?text=Loading...'" class="framing-image" />
-        
-        <!-- FOV Overlay -->
-        <div 
-            v-if="object.fov_rectangle" 
-            :style="fovStyle" 
-            @mousedown="startDrag"
-        >
-            <!-- Crosshair -->
-            <div style="position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); color: red;">+</div>
+        <!-- Wrapper ensures overlay is relative to the image size, not the full container width -->
+        <div style="position: relative; height: 100%; aspect-ratio: 1/1;">
+            <img :src="object.image_url || 'https://via.placeholder.com/500?text=Loading...'" class="framing-image" />
+
+            <!-- FOV Overlay -->
+            <div
+                v-if="object.fov_rectangle"
+                :style="fovStyle"
+                @mousedown="startDrag"
+            >
+                <!-- Crosshair -->
+                <div style="position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); color: red;">+</div>
+            </div>
         </div>
     </div>
     

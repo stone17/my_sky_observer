@@ -138,21 +138,26 @@ async def test_stream_and_download():
     - Verifies that an image download is triggered and completes.
     - Verifies that the cached image is accessible.
     """
-    server_process = subprocess.Popen(["python", "-c", "import sys; sys.path.insert(0, '.'); import uvicorn; uvicorn.run('backend.main:app', host='127.0.0.1', port=8000)"])
+    # Use a different port to avoid conflicts with running instances
+    TEST_PORT = 8001
+    server_process = subprocess.Popen(["python", "-c", f"import sys; sys.path.insert(0, '.'); import uvicorn; uvicorn.run('backend.main:app', host='127.0.0.1', port={TEST_PORT})"])
     
     # Wait for the server to start
     is_server_ready = False
-    for _ in range(10): # Try for 5 seconds
+    for _ in range(20): # Try for 10 seconds
         try:
             async with httpx.AsyncClient() as async_client:
-                response = await async_client.get("http://127.0.0.1:8000/")
+                response = await async_client.get(f"http://127.0.0.1:{TEST_PORT}/")
                 if response.status_code == 200:
                     is_server_ready = True
                     break
         except httpx.ConnectError:
             await asyncio.sleep(0.5)
 
-    assert is_server_ready, "Server failed to start within the timeout period."
+    if not is_server_ready:
+        server_process.terminate()
+        server_process.wait()
+        pytest.fail(f"Server failed to start on port {TEST_PORT} within the timeout period.")
 
     download_verified = False
     try:
@@ -168,7 +173,7 @@ async def test_stream_and_download():
         }
         
         async with httpx.AsyncClient(timeout=180) as client: # Generous timeout
-            async with client.stream("GET", "http://127.0.0.1:8000/api/stream-objects", params=params) as response:
+            async with client.stream("GET", f"http://127.0.0.1:{TEST_PORT}/api/stream-objects", params=params) as response:
                 response.raise_for_status()
                 
                 event_name = None
@@ -199,7 +204,7 @@ async def test_stream_and_download():
                         print(f"   - SUCCESS: File found at {file_path}")
 
                         # 2. Verify we can fetch the image from the cache endpoint
-                        img_response = await client.get(f"http://127.0.0.1:8000{image_url}")
+                        img_response = await client.get(f"http://127.0.0.1:{TEST_PORT}{image_url}")
                         assert img_response.status_code == 200, f"Cache endpoint returned {img_response.status_code}"
                         assert len(img_response.content) > 1000 # Check it's a real image
                         print(f"   - SUCCESS: Endpoint {image_url} is accessible.")
@@ -213,3 +218,24 @@ async def test_stream_and_download():
         server_process.wait()
 
     assert download_verified, "Failed to verify image download and caching within the test."
+
+def test_nina_framing_endpoint_mock():
+    """Tests the NINA endpoint with mocked httpx for success."""
+    from unittest.mock import patch, AsyncMock
+
+    payload = {
+        "ra": "05h 34m 31.9s",
+        "dec": "+22d 00m 52.2s",
+        "rotation": 45.0
+    }
+
+    # Ensure we patch where it is used, or httpx.AsyncClient directly if used as context manager
+    # The backend code does: async with httpx.AsyncClient() as client:
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = {"Success": True}
+
+        # Use the global client defined at the top level
+        response = client.post("/api/nina/framing", json=payload)
+        assert response.status_code == 200
+        assert response.json() == {"status": "success", "message": "Sent to N.I.N.A"}

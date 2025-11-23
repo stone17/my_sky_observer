@@ -38,14 +38,19 @@ catalogs = CatalogManager()
 
 def load_settings() -> dict:
     if os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, 'r') as f: return json.load(f)
-    return {"telescope": {"focal_length": 1000}, "camera": {"sensor_width": 23.5, "sensor_height": 15.7}, "location": {"latitude": 55.70, "longitude": 13.19}, "catalogs": ["messier"], "min_altitude": 30.0}
+        with open(SETTINGS_FILE, 'r') as f:
+            settings = json.load(f)
+            # Ensure new fields exist
+            if 'image_padding' not in settings: settings['image_padding'] = 1.05
+            return settings
+    return {"telescope": {"focal_length": 1000}, "camera": {"sensor_width": 23.5, "sensor_height": 15.7}, "location": {"latitude": 55.70, "longitude": 13.19}, "catalogs": ["messier"], "min_altitude": 30.0, "image_padding": 1.05}
 
 def save_settings(settings: dict):
     with open(SETTINGS_FILE, 'w') as f: json.dump(settings, f, indent=2)
 
-def get_setup_hash(telescope: Telescope, camera: Camera) -> str:
-    s = f"f{telescope.focal_length}_w{camera.sensor_width}_h{camera.sensor_height}"
+def get_setup_hash(telescope: Telescope, camera: Camera, image_padding: float) -> str:
+    # Include image_padding in hash so that changing it forces new downloads (or crop logic, but redownload is safer for now)
+    s = f"f{telescope.focal_length}_w{camera.sensor_width}_h{camera.sensor_height}_p{image_padding}"
     return hashlib.md5(s.encode()).hexdigest()[:12]
 
 def get_cache_info(object_name: str, setup_hash: str) -> Tuple[str, str, str]:
@@ -75,8 +80,10 @@ def get_sky_survey_url(ra_hms: str, dec_dms: str, fov_in_degrees: float) -> str:
     # print(f"    -> get_sky_survey_url: Calling SkyCoord with RA='{ra_hms}', Dec='{dec_dms}'")
     coords = SkyCoord(ra_hms, dec_dms, unit=(u.hourangle, u.deg))
     # print("    -> get_sky_survey_url: SkyCoord parsing successful.")
-    download_fov = max(fov_in_degrees, 0.25) * 1.5
+    # Use the exact FOV requested (caller handles padding/diagonal).
+    download_fov = max(fov_in_degrees, 0.25)
     base_url = "https://skyview.gsfc.nasa.gov/current/cgi/runquery.pl"
+    # We request a square image (one Size parameter) which maps to square pixels if the survey is isotropic.
     params = f"Survey=dss2r&Position={coords.ra.deg:.5f},{coords.dec.deg:.5f}&Size={download_fov:.4f}&Pixels=512&Return=JPG"
     return f"{base_url}?{params}"
 
@@ -199,7 +206,9 @@ async def event_stream(request: Request, settings: dict):
         camera = Camera(**settings['camera'])
         location = Location(**settings['location'])
         min_altitude = settings.get('min_altitude', 30.0)
-        setup_hash = get_setup_hash(telescope, camera)
+        image_padding = settings.get('image_padding', 1.05) # Percentage (e.g., 1.05 = +5%)
+
+        setup_hash = get_setup_hash(telescope, camera, image_padding)
         
         # 1. Get Sorted Objects
         processed_objects = await asyncio.to_thread(get_sorted_objects, settings, telescope, camera, location)
@@ -219,9 +228,20 @@ async def event_stream(request: Request, settings: dict):
         
         fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
         fov_w_deg, fov_h_deg = fov_w_arcmin / 60.0, fov_h_arcmin / 60.0
-        largest_fov_dim_deg = max(fov_w_deg, fov_h_deg)
-        download_fov = largest_fov_dim_deg * 1.5
         
+        # User requested +5% (configurable).
+        # Download FOV needs to cover the rotation (diagonal) + padding.
+        import math
+        fov_diag_deg = math.sqrt(fov_w_deg**2 + fov_h_deg**2)
+
+        # Apply user padding to the diagonal.
+        download_fov = fov_diag_deg * image_padding
+
+        # Ensure a minimum size (0.25 deg)
+        download_fov = max(download_fov, 0.25)
+
+        # Recalculate percentages for the FOV rectangle overlay on this new image size.
+        # The image size corresponds to download_fov (width and height, since square).
         fov_rect = FOVRectangle(
             width_percent=(fov_w_deg / download_fov) * 100.0, 
             height_percent=(fov_h_deg / download_fov) * 100.0
@@ -278,7 +298,7 @@ async def event_stream(request: Request, settings: dict):
             yield f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'downloading'})}\n\n"
             
             try:
-                live_image_url = get_sky_survey_url(obj_dict['ra'], obj_dict['dec'], largest_fov_dim_deg)
+                live_image_url = get_sky_survey_url(obj_dict['ra'], obj_dict['dec'], download_fov)
                 await download_and_cache_image(live_image_url, cache_filepath, setup_dir)
                 yield f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'cached', 'url': cache_url})}\n\n"
             except Exception as download_error:
@@ -320,9 +340,46 @@ async def geocode_city(city: str):
         return JSONResponse(content={"error": f"Geocoding API error: {e}"}, status_code=500)
 
 @app.get("/api/stream-objects")
-async def stream_objects(request: Request, focal_length: float, sensor_width: float, sensor_height: float, latitude: float, longitude: float, catalogs: str, sort_key: str, min_altitude: float = 30.0):
-    settings = { "telescope": {"focal_length": focal_length}, "camera": {"sensor_width": sensor_width, "sensor_height": sensor_height}, "location": {"latitude": latitude, "longitude": longitude}, "catalogs": catalogs.split(',') if catalogs else [], "min_altitude": min_altitude, "sort_key": sort_key }
+async def stream_objects(request: Request, focal_length: float, sensor_width: float, sensor_height: float, latitude: float, longitude: float, catalogs: str, sort_key: str, min_altitude: float = 30.0, image_padding: float = 1.1):
+    settings = {
+        "telescope": {"focal_length": focal_length},
+        "camera": {"sensor_width": sensor_width, "sensor_height": sensor_height},
+        "location": {"latitude": latitude, "longitude": longitude},
+        "catalogs": catalogs.split(',') if catalogs else [],
+        "min_altitude": min_altitude,
+        "sort_key": sort_key,
+        "image_padding": image_padding
+    }
     return StreamingResponse(event_stream(request, settings), media_type="text/event-stream")
+
+# Profile Management
+PROFILES_FILE = "profiles.json"
+
+@app.get("/api/profiles")
+def get_profiles():
+    if os.path.exists(PROFILES_FILE):
+        with open(PROFILES_FILE, 'r') as f: return json.load(f)
+    return {}
+
+@app.post("/api/profiles/{name}")
+async def save_profile(name: str, request: Request):
+    data = await request.json()
+    profiles = {}
+    if os.path.exists(PROFILES_FILE):
+        with open(PROFILES_FILE, 'r') as f: profiles = json.load(f)
+    profiles[name] = data
+    with open(PROFILES_FILE, 'w') as f: json.dump(profiles, f, indent=2)
+    return {"status": "saved"}
+
+@app.delete("/api/profiles/{name}")
+def delete_profile(name: str):
+    if os.path.exists(PROFILES_FILE):
+        with open(PROFILES_FILE, 'r') as f: profiles = json.load(f)
+        if name in profiles:
+            del profiles[name]
+            with open(PROFILES_FILE, 'w') as f: json.dump(profiles, f, indent=2)
+            return {"status": "deleted"}
+    return JSONResponse(content={"error": "Profile not found"}, status_code=404)
 
 @app.get("/api/presets")
 def get_presets(): return EQUIPMENT_PRESETS
@@ -335,6 +392,9 @@ async def get_cached_image(setup_hash: str, image_filename: str):
     if not os.path.exists(filepath): return JSONResponse(content={"error": "File not found"}, status_code=404)
     return FileResponse(filepath, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
-app.mount("/", StaticFiles(directory="frontend", html=True), name="static")
+# Serve static files from dist if it exists (production build), otherwise fallback to frontend (likely broken for Vue without build)
+# User environment seems to have issues building, so we prefer dist if we built it.
+static_dir = "frontend/dist" if os.path.exists("frontend/dist") else "frontend"
+app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
 
 import httpx # Ensure httpx is imported for the NINA client
