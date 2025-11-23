@@ -1,23 +1,23 @@
 <script setup>
 import { ref, onMounted, watch } from 'vue';
-import Settings from './components/Settings.vue';
+import TopBar from './components/TopBar.vue';
 import ObjectList from './components/ObjectList.vue';
 import Framing from './components/Framing.vue';
+import AltitudeGraph from './components/AltitudeGraph.vue';
 
 const settings = ref({});
 const objects = ref([]);
 const selectedObject = ref(null);
 const streamStatus = ref('Idle');
-const totalObjects = ref(0);
-const isSettingsCollapsed = ref(false);
+
+// Stream handling
+let eventSource = null;
 
 const fetchSettings = async () => {
   try {
     const res = await fetch('/api/settings');
     if (res.ok) settings.value = await res.json();
-  } catch (e) {
-    console.error("Failed to load settings", e);
-  }
+  } catch (e) { console.error(e); }
 };
 
 const saveSettings = async (newSettings) => {
@@ -28,20 +28,15 @@ const saveSettings = async (newSettings) => {
       body: JSON.stringify(newSettings)
     });
     settings.value = newSettings;
-  } catch (e) {
-    console.error("Failed to save settings", e);
-  }
+  } catch (e) { console.error(e); }
 };
-
-let eventSource = null;
 
 const startStream = () => {
   if (eventSource) eventSource.close();
   
-  objects.value = []; // Clear list
+  objects.value = [];
   selectedObject.value = null;
   streamStatus.value = 'Connecting...';
-  totalObjects.value = 0;
 
   const params = new URLSearchParams();
   if (settings.value.telescope) params.append('focal_length', settings.value.telescope.focal_length);
@@ -60,19 +55,13 @@ const startStream = () => {
 
   eventSource = new EventSource(`/api/stream-objects?${params.toString()}`);
 
-  eventSource.onmessage = (event) => {
-    // Generic message handler if needed
-  };
-
   eventSource.addEventListener('total', (e) => {
-    totalObjects.value = parseInt(e.data);
-    streamStatus.value = `Found ${totalObjects.value} objects.`;
+    streamStatus.value = `Found ${e.data} objects.`;
   });
 
   eventSource.addEventListener('object_data', (e) => {
     const obj = JSON.parse(e.data);
     objects.value.push(obj);
-    // If it's the first object and none selected, select it? Maybe not, let user choose.
   });
 
   eventSource.addEventListener('image_status', (e) => {
@@ -91,15 +80,9 @@ const startStream = () => {
   });
 
   eventSource.addEventListener('error', (e) => {
-    console.error("Stream error", e);
-    if (e.data) {
-         const err = JSON.parse(e.data);
-         streamStatus.value = `Error: ${err.error}`;
-    } else {
-        streamStatus.value = 'Connection Error';
-    }
-    eventSource.close();
-    eventSource = null;
+     streamStatus.value = 'Error/Disconnected';
+     if(eventSource) eventSource.close();
+     eventSource = null;
   });
 };
 
@@ -109,7 +92,14 @@ const stopStream = () => {
         eventSource = null;
         streamStatus.value = 'Stopped';
     }
-}
+};
+
+// Handle cache purge reload
+const handlePurge = () => {
+    objects.value = [];
+    selectedObject.value = null;
+    // Optionally restart stream?
+};
 
 onMounted(() => {
   fetchSettings();
@@ -117,55 +107,109 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="container-fluid">
-    <header>
-      <nav>
-        <ul>
-          <li><strong>My Sky Observer</strong></li>
-        </ul>
-        <ul>
-          <li><small>{{ streamStatus }}</small></li>
-          <li><button class="outline" @click="stopStream" v-if="streamStatus.includes('Connecting') || streamStatus.includes('Found')">Stop</button></li>
-        </ul>
-      </nav>
-    </header>
+  <div class="app-container">
+    <TopBar
+        :settings="settings"
+        :streamStatus="streamStatus"
+        @update-settings="saveSettings"
+        @start-stream="startStream"
+        @stop-stream="stopStream"
+        @purge-cache="handlePurge"
+    />
 
-    <div class="layout-grid" :class="{ 'collapsed-settings': isSettingsCollapsed }">
-      <aside>
-        <div v-if="!isSettingsCollapsed">
-            <Settings :settings="settings" @update="saveSettings" @start="startStream" @collapse="isSettingsCollapsed = true" />
-            <hr />
-        </div>
-        <div v-else style="margin-bottom: 10px;">
-             <button class="outline secondary" @click="isSettingsCollapsed = false" style="width: 100%">Show Settings</button>
-        </div>
-        <ObjectList :objects="objects" :selectedId="selectedObject?.name" @select="selectedObject = $event" />
-      </aside>
-
-      <main>
-        <div v-if="selectedObject">
-           <Framing :object="selectedObject" />
+    <div class="main-layout">
+      <!-- Left: Main Framing -->
+      <section class="framing-section">
+        <div v-if="selectedObject" class="fill-height">
+             <Framing :object="selectedObject" :settings="settings" />
         </div>
         <div v-else class="empty-state">
-          <article>
-            <header>Select an object</header>
-            <p>Configure your equipment and location on the left, start the search, and select an object to view framing details.</p>
-          </article>
+             <h2>Select an object to view</h2>
+             <p>Configure settings in the top bar and start the search.</p>
         </div>
-      </main>
+      </section>
+
+      <!-- Right: Graph + List -->
+      <aside class="sidebar">
+        <div class="graph-panel">
+             <AltitudeGraph :object="selectedObject" :location="settings.location" />
+        </div>
+        <div class="list-panel">
+             <ObjectList :objects="objects" :selectedId="selectedObject?.name" @select="selectedObject = $event" />
+        </div>
+      </aside>
     </div>
   </div>
 </template>
 
-<style scoped>
+<style>
+:root {
+    --bg-color: #111827;
+    --text-color: #f3f4f6;
+    --border-color: #374151;
+}
+
+body {
+    margin: 0;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    font-family: sans-serif;
+    height: 100vh;
+    overflow: hidden;
+}
+
+.app-container {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+}
+
+.main-layout {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+.framing-section {
+    flex: 2; /* Takes more space */
+    border-right: 1px solid var(--border-color);
+    position: relative;
+}
+
+.sidebar {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 300px;
+    max-width: 450px;
+}
+
+.graph-panel {
+    height: 150px; /* Fixed height for graph */
+    border-bottom: 1px solid var(--border-color);
+}
+
+.list-panel {
+    flex: 1;
+    overflow-y: auto;
+}
+
+.fill-height {
+    height: 100%;
+}
+
 .empty-state {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  height: 100%;
-  text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: #6b7280;
 }
-.collapsed-settings {
-    /* Adjust grid if sidebar needs to be smaller, though standard sidebar is fine */
-}
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: #1f2937; }
+::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #6b7280; }
 </style>

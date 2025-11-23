@@ -1,13 +1,14 @@
 import math
 import pandas as pd
 import re
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
 import astropy.units as u
 from astropy.time import Time
-from astropy.coordinates import SkyCoord, EarthLocation, AltAz, get_sun, Angle
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz, get_sun, get_body, Angle
 from astroplan import Observer
 import io
-from PIL import Image
+from PIL import Image, ImageOps
+import numpy as np
 
 from .models import Telescope, Camera, Location, AltitudePoint
 
@@ -28,7 +29,6 @@ class AstroCalculator:
     def get_max_altitude(self, dec: str, latitude: float) -> float:
         """Calculates an object's maximum possible altitude. Very fast."""
         try:
-            # FIX: Sanitize the dec string to be more robust
             dec_formatted = re.sub(r"[^\d.\-]", " ", dec).strip()
             dec_angle = Angle(dec_formatted, unit=u.deg)
             max_alt = 90 - abs(latitude - dec_angle.deg)
@@ -36,23 +36,71 @@ class AstroCalculator:
         except Exception:
             return 0.0
 
-    def get_altitude_graph(self, ra: str, dec: str, location: Location, num_points: int = 48) -> List[AltitudePoint]:
-        """Generates altitude data for an object over a 24-hour period. Computationally expensive."""
-        # FIX: Sanitize the RA and Dec strings to be more robust
+    def get_approx_hours_above(self, dec: str, latitude: float, min_altitude: float) -> float:
+        """
+        Calculates the approximate duration (in hours) an object is above min_altitude.
+        Uses the spherical trig formula for hour angle.
+        """
+        try:
+            dec_formatted = re.sub(r"[^\d.\-]", " ", dec).strip()
+            dec_deg = Angle(dec_formatted, unit=u.deg).deg
+            lat_rad = math.radians(latitude)
+            dec_rad = math.radians(dec_deg)
+            min_alt_rad = math.radians(min_altitude)
+
+            # cos(H) = (sin(h) - sin(phi)sin(delta)) / (cos(phi)cos(delta))
+            numerator = math.sin(min_alt_rad) - math.sin(lat_rad) * math.sin(dec_rad)
+            denominator = math.cos(lat_rad) * math.cos(dec_rad)
+
+            if denominator == 0: return 0.0 # Pole?
+
+            cos_h = numerator / denominator
+
+            if cos_h >= 1.0: return 0.0 # Never rises above min_alt
+            if cos_h <= -1.0: return 24.0 # Circumpolar (always above)
+
+            h_rad = math.acos(cos_h)
+            h_deg = math.degrees(h_rad)
+
+            # Total time is 2 * H (converted to hours)
+            return (2 * h_deg) / 15.0
+        except Exception:
+            return 0.0
+
+    def get_altitude_graph(self, ra: str, dec: str, location: Location, num_points: int = 48) -> Dict[str, List[AltitudePoint]]:
+        """
+        Generates altitude data for an object and the Moon over a 24-hour period.
+        Returns dict with 'target' and 'moon' lists.
+        """
         ra_formatted = re.sub(r"[^\d.\-]", " ", ra).strip()
         dec_formatted = re.sub(r"[^\d.\-]", " ", dec).strip()
         
         observer_location = EarthLocation(lat=location.latitude * u.deg, lon=location.longitude * u.deg)
         target_coords = SkyCoord(ra_formatted, dec_formatted, unit=(u.hourangle, u.deg))
+
         now = Time.now()
         time_deltas = u.Quantity([i * (24 / num_points) for i in range(num_points + 1)], u.hour)
         times = now + time_deltas
+
         altaz_frame = AltAz(obstime=times, location=observer_location)
+
+        # Target Altitudes
         target_altaz = target_coords.transform_to(altaz_frame)
-        return [AltitudePoint(time=t.isot, altitude=round(alt.deg, 2)) for t, alt in zip(times, target_altaz.alt)]
+        target_points = [AltitudePoint(time=t.isot, altitude=round(alt.deg, 2)) for t, alt in zip(times, target_altaz.alt)]
+
+        # Moon Altitudes
+        try:
+            moon_coords = get_body("moon", times, location=observer_location)
+            moon_altaz = moon_coords.transform_to(altaz_frame)
+            moon_points = [AltitudePoint(time=t.isot, altitude=round(alt.deg, 2)) for t, alt in zip(times, moon_altaz.alt)]
+        except Exception as e:
+            print(f"Error calculating moon altitude: {e}")
+            moon_points = []
+
+        return {"target": target_points, "moon": moon_points}
 
     def calculate_time_above_altitude(self, altitude_points: List[AltitudePoint], min_altitude: float) -> float:
-        """Estimates the total hours an object is above a minimum altitude."""
+        """Estimates the total hours an object is above a minimum altitude based on the graph points."""
         above_times = [p for p in altitude_points if p.altitude >= min_altitude]
         if len(above_times) < 2:
             return 0.0
@@ -97,30 +145,36 @@ def auto_stretch_image(image_bytes: bytes) -> bytes:
         hist = img.histogram()
         total_pixels = img.width * img.height
         if total_pixels == 0: return image_bytes
-        clip_pixels = total_pixels * 0.005
+
+        clip_percent = 0.001 # 0.1%
+        clip_pixels = total_pixels * clip_percent
+
         min_val, max_val = 0, 255
         
-        cumulative_count = 0
+        cumulative = 0
         for i in range(256):
-            cumulative_count += hist[i]
-            if cumulative_count >= clip_pixels:
+            cumulative += hist[i]
+            if cumulative >= clip_pixels:
                 min_val = i; break
-        cumulative_count = 0
+
+        cumulative = 0
         for i in range(255, -1, -1):
-            cumulative_count += hist[i]
-            if cumulative_count >= clip_pixels:
+            cumulative += hist[i]
+            if cumulative >= clip_pixels:
                 max_val = i; break
         
         if max_val <= min_val: return image_bytes
         
-        lut = [int(((i - min_val) / (max_val - min_val)) * 255) if min_val < i < max_val else (0 if i <= min_val else 255) for i in range(256)]
-        stretched_img = img.point(lut)
+        def lut_func(x):
+            if x <= min_val: return 0
+            if x >= max_val: return 255
+            return int(255 * (x - min_val) / (max_val - min_val))
+
+        img = img.point(lut_func)
         
         buffer = io.BytesIO()
-        stretched_img.save(buffer, format="JPEG", quality=90)
+        img.save(buffer, format="JPEG", quality=95)
         return buffer.getvalue()
     except Exception as e:
-        # FIX: Raise the exception instead of returning the bad image data
-        # This prevents corrupted files from being saved to the cache.
         print(f"Error during auto-stretch: {e}")
         raise e
