@@ -1,18 +1,18 @@
 {
   "telescope": {
-    "focal_length": 1200
+    "focal_length": 600
   },
   "camera": {
-    "sensor_width": 17.5,
-    "sensor_height": 13
+    "sensor_width": 23.5,
+    "sensor_height": 15.7
   },
   "location": {
-    "latitude": 40.7128,
-    "longitude": -74.006
+    "latitude": 45,
+    "longitude": -80
   },
   "catalogs": [
     "messier"
   ],
-  "min_altitude": 20.0,
-  "sort_key": "size"
+  "min_altitude": 30,
+  "min_hours": 0
 }

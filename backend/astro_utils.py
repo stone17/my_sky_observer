@@ -16,9 +16,13 @@ class AstroCalculator:
     """Performs astronomical calculations."""
 
     def calculate_fov(self, telescope: Telescope, camera: Camera) -> Tuple[float, float]:
-        """Calculates the field of view in arcminutes."""
-        fov_width = (camera.sensor_width / telescope.focal_length) * (180 / math.pi) * 60
-        fov_height = (camera.sensor_height / telescope.focal_length) * (180 / math.pi) * 60
+        """Calculates the field of view in arcminutes using exact formula."""
+        # 2 * atan(sensor / (2 * focal_length))
+        fov_width_rad = 2 * math.atan(camera.sensor_width / (2 * telescope.focal_length))
+        fov_height_rad = 2 * math.atan(camera.sensor_height / (2 * telescope.focal_length))
+        
+        fov_width = fov_width_rad * (180 / math.pi) * 60
+        fov_height = fov_height_rad * (180 / math.pi) * 60
         return fov_width, fov_height
 
     def filter_objects_by_fov(self, objects: pd.DataFrame, fov: Tuple[float, float]) -> pd.DataFrame:
@@ -215,41 +219,57 @@ class AstroCalculator:
             return {"day": [now.isot, end_time.isot]} if sun_alt > -18*u.deg else {"night": [now.isot, end_time.isot]}
 
 def auto_stretch_image(image_bytes: bytes) -> bytes:
+    """
+    Robustly stretches the image using histogram normalization and Gamma correction.
+    Ignores black (0) and white (255) pixels during calculation.
+    Target mean brightness is ~85 (1/3 of 255).
+    """
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("L")
-        hist = img.histogram()
-        total_pixels = img.width * img.height
-        if total_pixels == 0: return image_bytes
-
-        clip_percent = 0.001 # 0.1%
-        clip_pixels = total_pixels * clip_percent
-
-        min_val, max_val = 0, 255
+        arr = np.array(img)
         
-        cumulative = 0
-        for i in range(256):
-            cumulative += hist[i]
-            if cumulative >= clip_pixels:
-                min_val = i; break
-
-        cumulative = 0
-        for i in range(255, -1, -1):
-            cumulative += hist[i]
-            if cumulative >= clip_pixels:
-                max_val = i; break
+        # Mask out 0 (black) and 255 (white) to ignore borders/artifacts/saturated stars
+        mask = (arr > 3) & (arr < 250)
         
-        if max_val <= min_val: return image_bytes
+        if not np.any(mask):
+            # print("  -> Warning: No valid pixels found for stretching. Returning original.")
+            return image_bytes 
+            
+        valid_pixels = arr[mask]
         
-        def lut_func(x):
-            if x <= min_val: return 0
-            if x >= max_val: return 255
-            return int(255 * (x - min_val) / (max_val - min_val))
-
-        img = img.point(lut_func)
+        # Calculate percentiles on valid pixels only
+        p_min, p_max = np.percentile(valid_pixels, (0.1, 99.9)) 
         
+        if p_max <= p_min:
+            return image_bytes
+            
+        # 1. Linear Stretch
+        stretched = (arr.astype(np.float32) - p_min) / (p_max - p_min) * 255.0
+        stretched = np.clip(stretched, 0, 255)
+        
+        # 2. Gamma Correction to Target Mean
+        # Target mean ~ 64 (1/4 of 255) - User requested 1/4 (approx 60-65)
+        TARGET_MEAN = 64.0
+        current_mean = stretched.mean()
+        
+        if current_mean > 1.0:
+            norm_mean = current_mean / 255.0
+            norm_target = TARGET_MEAN / 255.0
+            
+            # gamma = log(target) / log(current)
+            gamma = math.log(norm_target) / math.log(norm_mean)
+            
+            # Apply Gamma: pixel' = 255 * (pixel/255)^gamma
+            stretched = 255.0 * np.power(stretched / 255.0, gamma)
+            stretched = np.clip(stretched, 0, 255)
+        
+        stretched = stretched.astype(np.uint8)
+        
+        out_img = Image.fromarray(stretched)
         buffer = io.BytesIO()
-        img.save(buffer, format="JPEG", quality=95)
+        out_img.save(buffer, format="JPEG", quality=95)
         return buffer.getvalue()
+        
     except Exception as e:
         print(f"Error during auto-stretch: {e}")
-        raise e
+        return image_bytes

@@ -239,3 +239,124 @@ def test_nina_framing_endpoint_mock():
         response = client.post("/api/nina/framing", json=payload)
         assert response.status_code == 200
         assert response.json() == {"status": "success", "message": "Sent to N.I.N.A"}
+
+def test_fetch_custom_image_fov():
+    """
+    Tests that downloading images with different FOVs results in different images.
+    Mocks the network call to avoid SkyView rate limits.
+    """
+    from unittest.mock import patch, Mock
+    from PIL import Image
+    import io
+
+    # Generate valid JPEG bytes
+    def create_dummy_jpeg(color, size=(10, 10)):
+        img = Image.new('L', size, color=color)
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG')
+        return buf.getvalue()
+
+    dummy_img_1 = create_dummy_jpeg(0)   # Black
+    dummy_img_2 = create_dummy_jpeg(255) # White
+
+    mock_resp = Mock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {"Content-Type": "image/jpeg"}
+    mock_resp.raise_for_status = Mock()
+
+    def side_effect(url, timeout):
+        # Return different content based on FOV/URL (simplified check)
+        if "Size=5.0000" in url:
+            mock_resp.content = dummy_img_2
+        else:
+            mock_resp.content = dummy_img_1
+        return mock_resp
+
+    with patch("requests.get", side_effect=side_effect):
+        # M45 coordinates
+        ra = "03h 47m 24s"
+        dec = "+24d 07m 00s"
+
+        # Request 1: FOV 1.0 degree
+        req1 = {"ra": ra, "dec": dec, "fov": 1.0}
+        resp1 = client.post("/api/fetch-custom-image", json=req1)
+        assert resp1.status_code == 200
+        url1 = resp1.json()["url"]
+
+        # Request 2: FOV 5.0 degrees
+        req2 = {"ra": ra, "dec": dec, "fov": 5.0}
+        resp2 = client.post("/api/fetch-custom-image", json=req2)
+        assert resp2.status_code == 200
+        url2 = resp2.json()["url"]
+
+        # Get the file paths from the URLs
+        path1 = url1.replace("/cache/", "image_cache/", 1)
+        path2 = url2.replace("/cache/", "image_cache/", 1)
+
+        assert os.path.exists(path1)
+        assert os.path.exists(path2)
+
+        with open(path1, "rb") as f1: data1 = f1.read()
+        with open(path2, "rb") as f2: data2 = f2.read()
+
+        assert data1 != data2, "Images with different FOVs should differ in content"
+
+def test_fetch_custom_image_with_special_chars():
+    """
+    Tests that downloading images with special characters in RA/Dec works (sanitization).
+    Mocks network.
+    """
+    from unittest.mock import patch, Mock
+    from PIL import Image
+    import io
+
+    # Generate valid JPEG bytes
+    img = Image.new('L', (10, 10), color=128)
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG')
+    dummy_img = buf.getvalue()
+
+    mock_resp = Mock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {"Content-Type": "image/jpeg"}
+    mock_resp.content = dummy_img
+    mock_resp.raise_for_status = Mock()
+
+    with patch("requests.get", return_value=mock_resp):
+        # Coordinates with special chars
+        ra = "17h 17m 07.3s"
+        dec = "+43° 08' 11\""
+
+        req = {"ra": ra, "dec": dec, "fov": 1.0}
+        resp = client.post("/api/fetch-custom-image", json=req)
+        assert resp.status_code == 200, f"Request failed: {resp.text}"
+        url = resp.json()["url"]
+
+        path = url.replace("/cache/", "image_cache/", 1)
+
+        assert os.path.exists(path)
+        assert '"' not in path
+        assert '°' not in path
+
+def test_fetch_custom_image_failure_html():
+    """
+    Tests that a 200 OK response containing HTML (SkyView error) raises a proper error.
+    """
+    from unittest.mock import patch, Mock
+
+    # Mock requests.get to return HTML
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.headers = {"Content-Type": "text/html"}
+    mock_response.text = "<html>Error: No data found</html>"
+    mock_response.content = b"<html>Error: No data found</html>"
+    mock_response.raise_for_status = Mock()
+
+    with patch("requests.get", return_value=mock_response):
+        req = {"ra": "00h 00m 00s", "dec": "+00d 00m 00s", "fov": 1.0}
+        resp = client.post("/api/fetch-custom-image", json=req)
+
+        # It should fail with 500 (since we raise ValueError which bubbles up)
+        # Ideally we could catch it and return 400/422, but currently it's 500.
+        assert resp.status_code == 500
+        assert "SkyView returned non-image data" in resp.json()['detail']

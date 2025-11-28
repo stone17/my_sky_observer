@@ -55,7 +55,16 @@ def get_setup_hash(telescope: Telescope, camera: Camera, image_padding: float) -
     return hashlib.md5(s.encode()).hexdigest()[:12]
 
 def get_cache_info(object_name: str, setup_hash: str) -> Tuple[str, str, str]:
-    sanitized_name = object_name.replace(" ", "_").replace("/", "-")
+    # Sanitize filename aggressively to prevent OS errors (especially on Windows)
+    # Remove chars: < > : " / \ | ? * and replace spaces/slashes
+    invalid_chars = '<>:"/\\|?*'
+    sanitized_name = object_name
+    for char in invalid_chars:
+        sanitized_name = sanitized_name.replace(char, "")
+
+    # Also clean up common coordinate symbols for cleaner filenames
+    sanitized_name = sanitized_name.replace(" ", "_").replace("°", "d").replace("'", "m")
+
     filename = f"{sanitized_name}_{setup_hash}.jpg"
     setup_dir = os.path.join(CACHE_DIR, setup_hash)
     filepath = os.path.join(setup_dir, filename)
@@ -69,8 +78,21 @@ async def download_and_cache_image(image_url: str, filepath: str, setup_dir: str
             print(f"    -> Downloading from {image_url}")
             response = await asyncio.to_thread(requests.get, image_url, timeout=60)
             response.raise_for_status()
+
+            # Check for non-image content (SkyView often returns 200 OK with HTML error)
+            content_type = response.headers.get("Content-Type", "")
+            if content_type.startswith("text/"):
+                print(f"    -> SkyView returned text/html instead of image. Preview: {response.text[:200]}")
+                raise ValueError(f"SkyView returned non-image data: {content_type}")
+
             print("    -> Download successful. Stretching image...")
-            stretched_bytes = await asyncio.to_thread(auto_stretch_image, response.content)
+            try:
+                stretched_bytes = await asyncio.to_thread(auto_stretch_image, response.content)
+            except Exception as stretch_err:
+                # Log content snippet if image identification fails
+                print(f"    -> Auto-stretch failed. Content preview: {response.content[:100]}")
+                raise stretch_err
+
             with open(filepath, 'wb') as f: f.write(stretched_bytes)
             print(f"    -> Image saved to {filepath}")
     except Exception as e:
@@ -235,8 +257,11 @@ async def event_stream(request: Request, settings: dict):
         
         fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
         fov_w_deg, fov_h_deg = fov_w_arcmin / 60.0, fov_h_arcmin / 60.0
-        fov_diag_deg = math.sqrt(fov_w_deg**2 + fov_h_deg**2)
-        download_fov = max(fov_diag_deg * image_padding, 0.25)
+        
+        # Calculate download FOV: Max dimension + 5% padding
+        # User requested: "take the calculated FOV (camera+telescope) and then add 5% margin to the longer sider"
+        max_fov_deg = max(fov_w_deg, fov_h_deg)
+        download_fov = max(max_fov_deg * 1.05, 0.25)
 
         fov_rect = FOVRectangle(
             width_percent=(fov_w_deg / download_fov) * 100.0, 
