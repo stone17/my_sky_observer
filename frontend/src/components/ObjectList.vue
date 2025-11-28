@@ -108,15 +108,12 @@ const getAltitudePath = (altitudeGraph) => {
           <div class="card-content">
               <!-- Left: Info -->
               <div class="info-col">
-                  <header>
-                    <h4>{{ obj.name }}</h4>
-                  </header>
+                  <h4 :title="obj.name">{{ obj.name || 'Unknown Object' }}</h4>
                   <small>
-                    {{ obj.catalog }}<br/>
                     Mag: {{ obj.mag }}<br/>
                     Size: {{ obj.size }}<br/>
-                    <span v-if="obj.hours_above_min > 0" class="vis-time">
-                        Vis: {{ obj.hours_above_min }}h
+                    <span class="vis-time">
+                        Vis: {{ obj.hours_above_min || 0 }}h
                     </span>
                   </small>
                   <span :class="['status-badge', `status-${obj.status}`]">{{ obj.status }}</span>
@@ -273,10 +270,15 @@ const getAltitudePath = (altitudeGraph) => {
 
 .info-col h4 {
     margin: 0 0 2px 0;
-    font-size: 0.9rem;
+    font-size: 1rem;
+    font-weight: bold;
+    line-height: 1.2;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    color: #f3f4f6;
+    flex-shrink: 0; /* Prevent collapsing */
+    min-height: 1.2em; /* Ensure height */
 }
 .info-col small {
     font-size: 0.75rem;
