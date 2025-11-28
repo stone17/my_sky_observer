@@ -1,83 +1,256 @@
 <script setup>
-import { computed } from 'vue';
+import { computed, ref, watch } from 'vue';
 
-const props = defineProps(['objects', 'selectedId']);
-defineEmits(['select']);
+const props = defineProps(['objects', 'selectedId', 'settings']);
+const emit = defineEmits(['select', 'update-settings']);
+
+const activeDropdown = ref(null);
+const localSettings = ref({});
+
+const sortOptions = ref({
+  time: { label: 'Best Time (Altitude)', enabled: true },
+  hours_above: { label: 'Hours Visible', enabled: false },
+  brightness: { label: 'Brightness', enabled: false },
+  size: { label: 'Size', enabled: false }
+});
+
+// Sync local settings
+watch(() => props.settings, (newVal) => {
+    if (newVal) {
+        localSettings.value = JSON.parse(JSON.stringify(newVal));
+        if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
+        if (localSettings.value.min_hours === undefined) localSettings.value.min_hours = 0.0;
+
+        const currentSort = localSettings.value.sort_key || 'time';
+        const keys = currentSort.split(',');
+        for (const k in sortOptions.value) {
+            sortOptions.value[k].enabled = keys.includes(k);
+        }
+    }
+}, { immediate: true, deep: true });
+
+const toggleDropdown = () => {
+  activeDropdown.value = activeDropdown.value ? null : 'filter';
+};
+
+const updateSort = () => {
+    const keys = Object.keys(sortOptions.value).filter(k => sortOptions.value[k].enabled);
+    if (keys.length === 0) {
+        sortOptions.value.time.enabled = true;
+        keys.push('time');
+    }
+    localSettings.value.sort_key = keys.join(',');
+    emit('update-settings', localSettings.value);
+};
 
 // Helper to generate SVG path for altitude
 const getAltitudePath = (altitudeGraph) => {
     if (!altitudeGraph || altitudeGraph.length === 0) return "";
 
-    // Canvas size: 100x30
     const width = 100;
-    const height = 30;
+    const height = 40; // Increased slightly
     const maxAlt = 90;
 
-    // Normalize x (time) and y (altitude)
-    // Time is assumed to be evenly spaced over 24h, so index maps to X
     const stepX = width / (altitudeGraph.length - 1);
-
-    let d = `M 0 ${height}`; // Start bottom-left
+    let d = `M 0 ${height}`;
 
     altitudeGraph.forEach((point, index) => {
         const x = index * stepX;
         const alt = point.altitude;
-        // Y needs to be inverted (0 is top)
-        // Map 0-90 deg to height-0
         const y = height - (Math.max(0, alt) / maxAlt) * height;
         d += ` L ${x} ${y}`;
     });
 
-    d += ` L ${width} ${height} Z`; // Close path to bottom-right
+    d += ` L ${width} ${height} Z`;
     return d;
 };
 </script>
 
 <template>
-  <div class="scrollable-list">
-    <div 
-        v-for="obj in objects" 
-        :key="obj.name" 
-        class="object-card" 
-        :class="{ active: selectedId === obj.name }"
-        @click="$emit('select', obj)"
-    >
-      <header>
-        <h4>{{ obj.name }}
-            <span :class="['status-badge', `status-${obj.status}`]">{{ obj.status }}</span>
-        </h4>
-      </header>
-      <small>
-        Cat: {{ obj.catalog }} | Mag: {{ obj.mag }} | Size: {{ obj.size }}
-      </small>
-      <br/>
-
-      <!-- Altitude Graph -->
-      <div class="altitude-chart" v-if="obj.altitude_graph && obj.altitude_graph.length">
-          <svg viewBox="0 0 100 30" preserveAspectRatio="none" width="100%" height="30">
-              <!-- Horizon Line -->
-              <line x1="0" y1="20" x2="100" y2="20" stroke="#444" stroke-width="1" stroke-dasharray="2" />
-              <!-- Graph -->
-              <path :d="getAltitudePath(obj.altitude_graph)" fill="rgba(0, 255, 0, 0.2)" stroke="#0f0" stroke-width="1" />
-          </svg>
-      </div>
-
-      <small v-if="obj.hours_above_min > 0">
-        Visible for {{ obj.hours_above_min }}h
-      </small>
+  <div class="list-wrapper">
+    <!-- Filter Header (Sticky) -->
+    <div class="list-header">
+         <button class="filter-btn" @click="toggleDropdown">
+            Filter / Sort ▼
+         </button>
+         <div class="filter-popup" v-if="activeDropdown === 'filter'">
+            <label><strong>Filters</strong></label>
+            <div class="field-group">
+                 <label>Min Altitude (°)</label>
+                 <input type="number" v-model.number="localSettings.min_altitude" @change="$emit('update-settings', localSettings)" />
+            </div>
+            <div class="field-group">
+                 <label>Min Hours Visible</label>
+                 <input type="number" step="0.1" v-model.number="localSettings.min_hours" @change="$emit('update-settings', localSettings)" />
+            </div>
+            <hr/>
+            <label><strong>Sort By</strong></label>
+            <div v-for="(opt, key) in sortOptions" :key="key" class="checkbox-row">
+                 <input type="checkbox" v-model="opt.enabled" @change="updateSort" :id="'sort-'+key">
+                 <label :for="'sort-'+key">{{ opt.label }}</label>
+            </div>
+         </div>
     </div>
-    <div v-if="objects.length === 0" style="text-align: center; color: gray;">
-        No objects loaded.
+
+    <!-- Scrollable List -->
+    <div class="scrollable-list">
+        <div
+            v-for="obj in objects"
+            :key="obj.name"
+            class="object-card"
+            :class="{ active: selectedId === obj.name }"
+            @click="$emit('select', obj)"
+        >
+          <div class="card-content">
+              <!-- Left: Info -->
+              <div class="info-col">
+                  <header>
+                    <h4>{{ obj.name }}</h4>
+                  </header>
+                  <small>
+                    {{ obj.catalog }}<br/>
+                    Mag: {{ obj.mag }}<br/>
+                    Size: {{ obj.size }}<br/>
+                    <span v-if="obj.hours_above_min > 0" class="vis-time">
+                        Vis: {{ obj.hours_above_min }}h
+                    </span>
+                  </small>
+                  <span :class="['status-badge', `status-${obj.status}`]">{{ obj.status }}</span>
+              </div>
+
+              <!-- Right: Graph -->
+              <div class="graph-col">
+                  <div class="altitude-chart" v-if="obj.altitude_graph && obj.altitude_graph.length">
+                      <svg viewBox="0 0 100 40" preserveAspectRatio="none" width="100%" height="40">
+                          <line x1="0" y1="26" x2="100" y2="26" stroke="#444" stroke-width="1" stroke-dasharray="2" />
+                          <path :d="getAltitudePath(obj.altitude_graph)" fill="rgba(0, 255, 0, 0.2)" stroke="#0f0" stroke-width="1" />
+                      </svg>
+                  </div>
+              </div>
+          </div>
+        </div>
+        <div v-if="objects.length === 0" style="text-align: center; color: gray; padding: 20px;">
+            No objects loaded.
+        </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.altitude-chart {
-    margin-top: 5px;
+.list-wrapper {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    position: relative;
+}
+
+.list-header {
+    background: #1f2937;
+    border-bottom: 1px solid #374151;
+    padding: 10px;
+    z-index: 50;
+    /* Sticky removed, using flex container */
+}
+
+.filter-btn {
+    width: 100%;
+    background: #374151;
+    color: white;
+    border: none;
+    padding: 8px;
+    cursor: pointer;
+    text-align: left;
+}
+
+.filter-popup {
+    background: #1f2937;
+    border: 1px solid #4b5563;
+    padding: 10px;
+    position: absolute; /* Overlays the list */
+    top: 45px;
+    left: 10px;
+    right: 10px;
+    z-index: 100;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.5);
+}
+
+.scrollable-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 5px;
+}
+
+.object-card {
+    background: #111827;
+    border: 1px solid #374151;
     margin-bottom: 5px;
-    background: #111;
-    border-radius: 3px;
+    cursor: pointer;
+    border-radius: 4px;
+}
+.object-card:hover { background: #1f2937; }
+.object-card.active {
+    border-color: #10b981;
+    background: #1f2937;
+}
+
+.card-content {
+    display: flex;
+    height: 80px; /* Fixed height for consistency */
+}
+
+.info-col {
+    flex: 1;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
     overflow: hidden;
 }
+
+.graph-col {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    padding: 5px;
+    background: #000;
+}
+
+.info-col h4 {
+    margin: 0 0 2px 0;
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.info-col small {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    line-height: 1.2;
+}
+.vis-time {
+    color: #10b981;
+    font-weight: bold;
+}
+
+.status-badge {
+    font-size: 0.7rem;
+    padding: 1px 4px;
+    border-radius: 2px;
+    background: #374151;
+    margin-top: auto;
+    align-self: flex-start;
+}
+.status-cached { color: #10b981; }
+.status-downloading { color: #f59e0b; }
+.status-error { color: #ef4444; }
+
+.altitude-chart {
+    width: 100%;
+    height: 100%;
+}
+
+.field-group { margin-bottom: 5px; }
+.field-group label { display: block; font-size: 0.8em; color: #9ca3af; }
+.field-group input { width: 100%; padding: 5px; background: #000; border: 1px solid #444; color: white; }
+.checkbox-row { display: flex; align-items: center; gap: 5px; margin-bottom: 5px; }
 </style>

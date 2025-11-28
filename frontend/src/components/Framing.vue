@@ -171,14 +171,14 @@ onUnmounted(() => {
              <div class="group">
                 <strong>FOV (deg):</strong>
                 <button class="outline small" @click="currentFov = (currentFov * 1.2).toFixed(2)">-</button>
-                <input type="number" v-model.number="currentFov" step="0.1" style="width: 60px" />
+                <input type="number" v-model.number="currentFov" step="0.1" class="fov-input" />
                 <button class="outline small" @click="currentFov = (currentFov * 0.8).toFixed(2)">+</button>
                 <button @click="fetchCustomFov" :disabled="isFetching">{{ isFetching ? '...' : 'Fetch' }}</button>
              </div>
              <div class="group">
                 <strong>Rot:</strong>
                 <button class="outline small" @click="rotation -= 5">↺</button>
-                <input type="number" v-model.number="rotation" style="width: 50px" />
+                <input type="number" v-model.number="rotation" class="rot-input" />
                 <button class="outline small" @click="rotation += 5">↻</button>
              </div>
              <button class="primary" @click="sendToNina">To N.I.N.A</button>
@@ -228,6 +228,14 @@ onUnmounted(() => {
     display: flex;
     gap: 5px;
     align-items: center;
+}
+.fov-input, .rot-input {
+    width: 70px;
+    font-size: 0.9rem;
+    padding: 2px 5px;
+    background: #000;
+    color: white;
+    border: 1px solid #4b5563;
 }
 .small {
     padding: 2px 8px;

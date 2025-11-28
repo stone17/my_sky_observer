@@ -21,14 +21,6 @@ const cityQuery = ref("");
 const cityResults = ref([]);
 const isSearchingCity = ref(false);
 
-// Sorting options
-const sortOptions = ref({
-  time: { label: 'Best Time (Altitude)', enabled: true },
-  hours_above: { label: 'Hours Visible', enabled: false },
-  brightness: { label: 'Brightness', enabled: false },
-  size: { label: 'Size', enabled: false }
-});
-
 // Watch for prop updates with deep copy and safety checks
 watch(() => props.settings, (newVal) => {
   if (newVal) {
@@ -45,12 +37,6 @@ watch(() => props.settings, (newVal) => {
         if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
         if (localSettings.value.min_hours === undefined) localSettings.value.min_hours = 0.0;
 
-        // Initialize sort options based on current setting
-        const currentSort = localSettings.value.sort_key || 'time';
-        const keys = currentSort.split(',');
-        for (const k in sortOptions.value) {
-            sortOptions.value[k].enabled = keys.includes(k);
-        }
     } catch(e) {
         console.error("Error parsing settings prop:", e);
     }
@@ -150,16 +136,6 @@ const selectedCameraPreset = computed({
 });
 
 
-const updateSort = () => {
-    const keys = Object.keys(sortOptions.value).filter(k => sortOptions.value[k].enabled);
-    if (keys.length === 0) {
-        // Default fallback
-        sortOptions.value.time.enabled = true;
-        keys.push('time');
-    }
-    localSettings.value.sort_key = keys.join(',');
-    emit('update-settings', localSettings.value);
-};
 
 const purgeCache = async () => {
     if(!confirm("Are you sure you want to purge the cache? This will delete all downloaded images.")) return;
@@ -191,6 +167,7 @@ const selectCity = (city) => {
     if (!localSettings.value.location) localSettings.value.location = {};
     localSettings.value.location.latitude = city.latitude;
     localSettings.value.location.longitude = city.longitude;
+    localSettings.value.location.city_name = city.name;
     emit('update-settings', localSettings.value);
     cityResults.value = [];
     cityQuery.value = "";
@@ -206,6 +183,16 @@ const fovDisplay = computed(() => {
     const w = ((sw / fl) * 57.2958).toFixed(2);
     const h = ((sh / fl) * 57.2958).toFixed(2);
     return `${w}° x ${h}°`;
+});
+
+const locationDisplay = computed(() => {
+    const loc = localSettings.value.location;
+    if (!loc) return "Location";
+    if (loc.city_name) return loc.city_name;
+    if (loc.latitude !== undefined && loc.longitude !== undefined) {
+        return `${loc.latitude.toFixed(2)}, ${loc.longitude.toFixed(2)}`;
+    }
+    return "Location";
 });
 
 </script>
@@ -246,7 +233,7 @@ const fovDisplay = computed(() => {
     <!-- Location -->
     <div class="tb-item relative">
       <button class="tb-btn" @click="toggleDropdown('location')">
-        Location ▼
+        {{ locationDisplay }} ▼
       </button>
       <div class="dropdown-menu" v-if="activeDropdown === 'location'">
         <div class="field-group" v-if="localSettings.location">
@@ -276,29 +263,6 @@ const fovDisplay = computed(() => {
       <span>FOV: {{ fovDisplay }}</span>
     </div>
 
-    <!-- Filter / Sorting -->
-    <div class="tb-item relative">
-      <button class="tb-btn" @click="toggleDropdown('sort')">
-        Filter / Sort ▼
-      </button>
-      <div class="dropdown-menu" v-if="activeDropdown === 'sort'">
-        <label><strong>Filters</strong></label>
-        <div class="field-group">
-             <label>Min Altitude (°)</label>
-             <input type="number" v-model.number="localSettings.min_altitude" @change="$emit('update-settings', localSettings)" />
-        </div>
-        <div class="field-group">
-             <label>Min Hours Visible</label>
-             <input type="number" step="0.1" v-model.number="localSettings.min_hours" @change="$emit('update-settings', localSettings)" />
-        </div>
-        <hr/>
-        <label><strong>Sort By</strong></label>
-        <div v-for="(opt, key) in sortOptions" :key="key" class="checkbox-row">
-             <input type="checkbox" v-model="opt.enabled" @change="updateSort" :id="'sort-'+key">
-             <label :for="'sort-'+key">{{ opt.label }}</label>
-        </div>
-      </div>
-    </div>
 
     <!-- Cache -->
     <div class="tb-item relative">

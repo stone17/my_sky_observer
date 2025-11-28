@@ -44,8 +44,10 @@ def load_settings() -> dict:
         with open(SETTINGS_FILE, 'r') as f:
             settings = json.load(f)
             if 'image_padding' not in settings: settings['image_padding'] = 1.05
+            if 'location' in settings and 'city_name' not in settings['location']:
+                 settings['location']['city_name'] = ""
             return settings
-    return {"telescope": {"focal_length": 1000}, "camera": {"sensor_width": 23.5, "sensor_height": 15.7}, "location": {"latitude": 55.70, "longitude": 13.19}, "catalogs": ["messier"], "min_altitude": 30.0, "image_padding": 1.05}
+    return {"telescope": {"focal_length": 1000}, "camera": {"sensor_width": 23.5, "sensor_height": 15.7}, "location": {"latitude": 55.70, "longitude": 13.19, "city_name": ""}, "catalogs": ["messier"], "min_altitude": 30.0, "image_padding": 1.05}
 
 def save_settings(settings: dict):
     with open(SETTINGS_FILE, 'w') as f: json.dump(settings, f, indent=2)
@@ -251,6 +253,9 @@ async def event_stream(request: Request, settings: dict):
         
         twilight = await asyncio.to_thread(calculator.get_twilight_periods, location)
         yield f"event: twilight_info\ndata: {json.dumps(twilight)}\n\n"
+
+        # Also send current night times in a dedicated event for the UI to use globally
+        yield f"event: night_times\ndata: {json.dumps(twilight)}\n\n"
 
         top_objects = processed_objects[:200]
         print(f"--- Streaming detailed data for {len(top_objects)} objects ---")

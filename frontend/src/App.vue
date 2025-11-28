@@ -9,6 +9,7 @@ const settings = ref({});
 const objects = ref([]);
 const selectedObject = ref(null);
 const streamStatus = ref('Idle');
+const nightTimes = ref({});
 
 // Stream handling
 let eventSource = null;
@@ -62,6 +63,12 @@ const startStream = () => {
 
   eventSource.addEventListener('total', (e) => {
     streamStatus.value = `Found ${e.data} objects.`;
+  });
+
+  eventSource.addEventListener('night_times', (e) => {
+      try {
+          nightTimes.value = JSON.parse(e.data);
+      } catch (e) { console.error("Error parsing night times", e); }
   });
 
   eventSource.addEventListener('object_data', (e) => {
@@ -156,10 +163,20 @@ onMounted(async () => {
       <!-- Right: Graph + List -->
       <aside class="sidebar">
         <div class="graph-panel">
-             <AltitudeGraph :object="selectedObject" :location="settings.location" />
+             <AltitudeGraph
+                :object="selectedObject"
+                :location="settings.location"
+                :nightTimes="nightTimes"
+             />
         </div>
         <div class="list-panel">
-             <ObjectList :objects="objects" :selectedId="selectedObject?.name" @select="selectedObject = $event" />
+             <ObjectList
+                :objects="objects"
+                :selectedId="selectedObject?.name"
+                :settings="settings"
+                @select="selectedObject = $event"
+                @update-settings="saveSettings"
+             />
         </div>
       </aside>
     </div>
@@ -209,7 +226,7 @@ body {
 }
 
 .graph-panel {
-    height: 150px; /* Fixed height for graph */
+    height: 250px; /* Increased height as requested */
     border-bottom: 1px solid var(--border-color);
 }
 
