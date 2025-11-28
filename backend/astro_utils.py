@@ -228,17 +228,16 @@ def auto_stretch_image(image_bytes: bytes) -> bytes:
         img = Image.open(io.BytesIO(image_bytes)).convert("L")
         arr = np.array(img)
         
-        # Mask out 0 (black) and 255 (white) to ignore borders/artifacts/saturated stars
-        mask = (arr > 3) & (arr < 250)
+        # Mask out exactly 0 (black) and 255 (white) to ignore borders and saturation
+        mask = (arr > 0) & (arr < 255)
         
         if not np.any(mask):
-            # print("  -> Warning: No valid pixels found for stretching. Returning original.")
             return image_bytes 
             
         valid_pixels = arr[mask]
         
         # Calculate percentiles on valid pixels only
-        p_min, p_max = np.percentile(valid_pixels, (0.1, 99.9)) 
+        p_min, p_max = np.percentile(valid_pixels, (0.5, 99.5))
         
         if p_max <= p_min:
             return image_bytes
@@ -247,21 +246,22 @@ def auto_stretch_image(image_bytes: bytes) -> bytes:
         stretched = (arr.astype(np.float32) - p_min) / (p_max - p_min) * 255.0
         stretched = np.clip(stretched, 0, 255)
         
-        # 2. Gamma Correction to Target Mean
-        # Target mean ~ 64 (1/4 of 255) - User requested 1/4 (approx 60-65)
-        TARGET_MEAN = 64.0
-        current_mean = stretched.mean()
-        
-        if current_mean > 1.0:
-            norm_mean = current_mean / 255.0
-            norm_target = TARGET_MEAN / 255.0
+        # 2. Gamma Correction
+        # Calculate mean only on valid pixels to avoid borders skewing gamma
+        valid_stretched = stretched[mask]
+        if valid_stretched.size > 0:
+            current_mean = valid_stretched.mean()
+            TARGET_MEAN = 60.0
             
-            # gamma = log(target) / log(current)
-            gamma = math.log(norm_target) / math.log(norm_mean)
-            
-            # Apply Gamma: pixel' = 255 * (pixel/255)^gamma
-            stretched = 255.0 * np.power(stretched / 255.0, gamma)
-            stretched = np.clip(stretched, 0, 255)
+            if current_mean > 1.0:
+                norm_mean = current_mean / 255.0
+                norm_target = TARGET_MEAN / 255.0
+                try:
+                    gamma = math.log(norm_target) / math.log(norm_mean)
+                    gamma = max(0.2, min(gamma, 3.0)) # Limit gamma
+                    stretched = 255.0 * np.power(stretched / 255.0, gamma)
+                    stretched = np.clip(stretched, 0, 255)
+                except: pass
         
         stretched = stretched.astype(np.uint8)
         
