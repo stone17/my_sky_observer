@@ -257,8 +257,11 @@ async def event_stream(request: Request, settings: dict):
         
         fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
         fov_w_deg, fov_h_deg = fov_w_arcmin / 60.0, fov_h_arcmin / 60.0
-        fov_diag_deg = math.sqrt(fov_w_deg**2 + fov_h_deg**2)
-        download_fov = max(fov_diag_deg * image_padding, 0.25)
+        
+        # Calculate download FOV: Max dimension + 5% padding
+        # User requested: "take the calculated FOV (camera+telescope) and then add 5% margin to the longer sider"
+        max_fov_deg = max(fov_w_deg, fov_h_deg)
+        download_fov = max(max_fov_deg * 1.05, 0.25)
 
         fov_rect = FOVRectangle(
             width_percent=(fov_w_deg / download_fov) * 100.0, 

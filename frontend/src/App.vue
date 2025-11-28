@@ -35,7 +35,12 @@ const startStream = () => {
   if (eventSource) eventSource.close();
   
   objects.value = [];
+  // Don't clear selectedObject immediately if we want to persist it, 
+  // but we might want to validate it exists in the new stream.
+  // For now, let's keep it null until we find it.
+  const lastSelectedId = localStorage.getItem('lastSelectedId');
   selectedObject.value = null;
+  
   streamStatus.value = 'Connecting...';
 
   const params = new URLSearchParams();
@@ -62,6 +67,17 @@ const startStream = () => {
   eventSource.addEventListener('object_data', (e) => {
     const obj = JSON.parse(e.data);
     objects.value.push(obj);
+    
+    // Auto-select if matches last selection
+    if (lastSelectedId && obj.name === lastSelectedId && !selectedObject.value) {
+        selectedObject.value = obj;
+    }
+    // If no last selection, maybe select the first one? 
+    // User asked: "I want to see the first target directly (based on last selection)"
+    // If no last selection, selecting the first one is a good default.
+    else if (!lastSelectedId && objects.value.length === 1) {
+        selectedObject.value = obj;
+    }
   });
 
   eventSource.addEventListener('image_status', (e) => {
@@ -98,11 +114,19 @@ const stopStream = () => {
 const handlePurge = () => {
     objects.value = [];
     selectedObject.value = null;
-    // Optionally restart stream?
+    startStream(); // Restart automatically
 };
 
-onMounted(() => {
-  fetchSettings();
+// Watch selection to persist
+watch(selectedObject, (newVal) => {
+    if (newVal) {
+        localStorage.setItem('lastSelectedId', newVal.name);
+    }
+});
+
+onMounted(async () => {
+  await fetchSettings();
+  startStream(); // Auto-start
 });
 </script>
 

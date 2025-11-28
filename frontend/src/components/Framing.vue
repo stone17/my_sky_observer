@@ -1,7 +1,7 @@
 <script setup>
-import { ref, computed, watch, inject } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 
-const props = defineProps(['object', 'settings']); // Settings injected from App
+const props = defineProps(['object', 'settings']);
 
 const rotation = ref(0);
 const offsetX = ref(0);
@@ -11,50 +11,75 @@ const dragStart = ref({ x: 0, y: 0 });
 const customImageUrl = ref(null);
 const isFetching = ref(false);
 
-// Current FOV estimate
-const currentFov = ref(1.0); // degrees
+// ResizeObserver State
+const viewportRef = ref(null);
+const wrapperSize = ref(0);
+let resizeObserver = null;
 
-// Initialize currentFov from settings and object
-watch(() => props.object, (newObj) => {
-    if (newObj && props.settings && props.settings.telescope) {
-        // Calculate sensor FOV width
-        const fl = props.settings.telescope.focal_length;
-        const sw = props.settings.camera.sensor_width;
-        const sensorFovW = (sw / fl) * 57.2958;
+// FOV State
+const currentFov = ref(2.0); // Viewport FOV in degrees
+const imageFov = ref(2.0);   // FOV of the currently loaded image
 
-        // Calculate download FOV based on rectangle percent
-        if (newObj.fov_rectangle && newObj.fov_rectangle.width_percent) {
-            currentFov.value = sensorFovW / (newObj.fov_rectangle.width_percent / 100);
-        } else {
-            currentFov.value = sensorFovW * 1.5; // Fallback
-        }
-    }
-    customImageUrl.value = null;
-    rotation.value = 0;
-}, { immediate: true });
-
-const fovStyle = computed(() => {
-    if (!props.object || !props.settings) return {};
-
-    // Recalculate percents based on currentFov vs Sensor FOV
+// Calculate Sensor FOV in degrees
+const sensorFov = computed(() => {
+    if (!props.settings?.camera || !props.settings?.telescope) return { w: 0, h: 0 };
     const fl = props.settings.telescope.focal_length;
     const sw = props.settings.camera.sensor_width;
     const sh = props.settings.camera.sensor_height;
+    
+    // Use exact formula: 2 * atan(sensor / (2 * focal_length))
+    const fovW = 2 * Math.atan(sw / (2 * fl)) * (180 / Math.PI);
+    const fovH = 2 * Math.atan(sh / (2 * fl)) * (180 / Math.PI);
+    
+    return { w: fovW, h: fovH };
+});
 
-    const sensorFovW = (sw / fl) * 57.2958;
-    const sensorFovH = (sh / fl) * 57.2958;
+// Initialize FOVs from object data
+const initFov = () => {
+    if (props.object && props.object.fov_rectangle && sensorFov.value.w > 0) {
+        // object.fov_rectangle.width_percent = (sensorFovW / imageFov) * 100
+        // So imageFov = sensorFovW / (width_percent / 100)
+        const wPct = props.object.fov_rectangle.width_percent;
+        if (wPct > 0) {
+            const calculatedImageFov = sensorFov.value.w / (wPct / 100);
+            imageFov.value = calculatedImageFov;
+            currentFov.value = calculatedImageFov; // Start matched
+        }
+    }
+};
 
-    // If currentFov matches the image size
-    const wPct = (sensorFovW / currentFov.value) * 100;
-    const hPct = (sensorFovH / currentFov.value) * 100;
+watch(() => props.object, () => {
+    customImageUrl.value = null;
+    offsetX.value = 0;
+    offsetY.value = 0;
+    initFov();
+}, { immediate: true });
 
+// Computed Styles
+const imageStyle = computed(() => {
+    if (currentFov.value <= 0) return {};
+    const scale = imageFov.value / currentFov.value;
+    return {
+        width: `${scale * 100}%`,
+        height: `${scale * 100}%`,
+        position: 'absolute',
+        top: '50%',
+        left: '50%',
+        transform: `translate(-50%, -50%)`
+    };
+});
+
+const sensorStyle = computed(() => {
+    if (currentFov.value <= 0) return {};
+    const wPct = (sensorFov.value.w / currentFov.value) * 100;
+    const hPct = (sensorFov.value.h / currentFov.value) * 100;
     return {
         width: `${wPct}%`,
         height: `${hPct}%`,
-        top: `calc(50% - ${hPct/2}% + ${offsetY.value}px)`,
-        left: `calc(50% - ${wPct/2}% + ${offsetX.value}px)`,
-        transform: `rotate(${rotation.value}deg)`,
         position: 'absolute',
+        top: `calc(50% + ${offsetY.value}px)`,
+        left: `calc(50% + ${offsetX.value}px)`,
+        transform: `translate(-50%, -50%) rotate(${rotation.value}deg)`,
         border: '2px solid red',
         boxShadow: '0 0 10px rgba(255,0,0,0.5)',
         cursor: 'move'
@@ -76,8 +101,9 @@ const fetchCustomFov = async () => {
         });
         if (res.ok) {
             const data = await res.json();
-            // Append timestamp to force browser to reload image even if cached
             customImageUrl.value = data.url + '?t=' + Date.now();
+            // Update imageFov to match the newly fetched FOV
+            imageFov.value = currentFov.value;
         }
     } catch (e) {
         console.error(e);
@@ -120,6 +146,22 @@ const sendToNina = async () => {
         else alert("Error sending to N.I.N.A");
     } catch (e) { alert("Network Error"); }
 };
+
+onMounted(() => {
+    if (viewportRef.value) {
+        resizeObserver = new ResizeObserver(entries => {
+            for (let entry of entries) {
+                const { width, height } = entry.contentRect;
+                wrapperSize.value = Math.min(width, height);
+            }
+        });
+        resizeObserver.observe(viewportRef.value);
+    }
+});
+
+onUnmounted(() => {
+    if (resizeObserver) resizeObserver.disconnect();
+});
 </script>
 
 <template>
@@ -128,9 +170,9 @@ const sendToNina = async () => {
         <div class="controls-row">
              <div class="group">
                 <strong>FOV (deg):</strong>
-                <button class="outline small" @click="currentFov = (currentFov * 0.8).toFixed(2)">-</button>
+                <button class="outline small" @click="currentFov = (currentFov * 1.2).toFixed(2)">-</button>
                 <input type="number" v-model.number="currentFov" step="0.1" style="width: 60px" />
-                <button class="outline small" @click="currentFov = (currentFov * 1.2).toFixed(2)">+</button>
+                <button class="outline small" @click="currentFov = (currentFov * 0.8).toFixed(2)">+</button>
                 <button @click="fetchCustomFov" :disabled="isFetching">{{ isFetching ? '...' : 'Fetch' }}</button>
              </div>
              <div class="group">
@@ -143,18 +185,21 @@ const sendToNina = async () => {
         </div>
     </header>
     
-    <div class="framing-viewport" @mousemove="onDrag" @mouseup="stopDrag" @mouseleave="stopDrag">
-        <div class="image-wrapper">
-            <img :src="customImageUrl || object.image_url || 'https://via.placeholder.com/500?text=Loading...'" class="sky-image" />
+    <div class="framing-viewport" ref="viewportRef" @mousemove="onDrag" @mouseup="stopDrag" @mouseleave="stopDrag">
+        <!-- Image Layer -->
+        <div class="image-wrapper" :style="{ width: wrapperSize + 'px', height: wrapperSize + 'px' }">
+             <div class="image-container" :style="imageStyle">
+                  <img :src="customImageUrl || object.image_url || 'https://via.placeholder.com/500?text=Loading...'" class="sky-image" />
+             </div>
 
-            <!-- FOV Overlay -->
-            <div
-                v-if="object && settings"
-                :style="fovStyle"
-                @mousedown="startDrag"
-            >
-                <div class="crosshair">+</div>
-            </div>
+             <!-- Sensor Layer -->
+             <div
+                 v-if="object && settings"
+                 :style="sensorStyle"
+                 @mousedown="startDrag"
+             >
+                 <div class="crosshair">+</div>
+             </div>
         </div>
     </div>
   </article>
@@ -191,16 +236,27 @@ const sendToNina = async () => {
 .framing-viewport {
     flex: 1;
     background: #000;
+    position: relative;
+    overflow: hidden;
+    /* Center coordinate system */
     display: flex;
     justify-content: center;
     align-items: center;
-    overflow: hidden;
-    position: relative;
 }
 .image-wrapper {
     position: relative;
-    height: 100%;
-    aspect-ratio: 1/1;
+    /* Size set by JS */
+    /* Ensure it doesn't overflow */
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: #000; /* Optional: ensures black bars are black */
+}
+.image-container {
+    /* Centering handled by absolute positioning in computed style */
+    display: flex;
+    justify-content: center;
+    align-items: center;
 }
 .sky-image {
     width: 100%;
@@ -216,5 +272,6 @@ const sendToNina = async () => {
     transform: translate(-50%, -50%);
     color: red;
     pointer-events: none;
+    font-size: 20px;
 }
 </style>
