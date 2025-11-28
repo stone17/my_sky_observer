@@ -78,8 +78,21 @@ async def download_and_cache_image(image_url: str, filepath: str, setup_dir: str
             print(f"    -> Downloading from {image_url}")
             response = await asyncio.to_thread(requests.get, image_url, timeout=60)
             response.raise_for_status()
+
+            # Check for non-image content (SkyView often returns 200 OK with HTML error)
+            content_type = response.headers.get("Content-Type", "")
+            if content_type.startswith("text/"):
+                print(f"    -> SkyView returned text/html instead of image. Preview: {response.text[:200]}")
+                raise ValueError(f"SkyView returned non-image data: {content_type}")
+
             print("    -> Download successful. Stretching image...")
-            stretched_bytes = await asyncio.to_thread(auto_stretch_image, response.content)
+            try:
+                stretched_bytes = await asyncio.to_thread(auto_stretch_image, response.content)
+            except Exception as stretch_err:
+                # Log content snippet if image identification fails
+                print(f"    -> Auto-stretch failed. Content preview: {response.content[:100]}")
+                raise stretch_err
+
             with open(filepath, 'wb') as f: f.write(stretched_bytes)
             print(f"    -> Image saved to {filepath}")
     except Exception as e:
