@@ -1,18 +1,20 @@
 {
   "telescope": {
-    "focal_length": 1200
+    "focal_length": 600
   },
   "camera": {
-    "sensor_width": 17.5,
-    "sensor_height": 13
+    "sensor_width": 23.5,
+    "sensor_height": 15.7
   },
   "location": {
-    "latitude": 40.7128,
-    "longitude": -74.006
+    "latitude": 55.7058,
+    "longitude": 13.1932,
+    "city_name": "Lund"
   },
   "catalogs": [
     "messier"
   ],
-  "min_altitude": 20.0,
-  "sort_key": "size"
+  "min_altitude": 30,
+  "min_hours": 0,
+  "image_padding": 1.05
 }

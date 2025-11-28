@@ -16,6 +16,7 @@ class Camera(BaseModel):
 class Location(BaseModel):
     latitude: float = Field(..., ge=-90, le=90)
     longitude: float = Field(..., ge=-180, le=180)
+    city_name: str = ""
 
 class AltitudePoint(BaseModel):
     time: str

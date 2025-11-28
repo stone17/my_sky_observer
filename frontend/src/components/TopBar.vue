@@ -61,8 +61,9 @@ const fetchProfiles = async () => {
         // Auto-load last used profile logic
         const lastProfile = localStorage.getItem('last_profile');
         if (lastProfile && profiles.value[lastProfile]) {
-            console.log("Auto-loading profile:", lastProfile);
-            loadProfile(lastProfile);
+            // Just set the name, don't overwrite settings from the profile template
+            // We want to respect the settings loaded from the server (settings.json)
+            selectedProfileName.value = lastProfile;
         }
     }
   } catch (e) { console.error(e); }
