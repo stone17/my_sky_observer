@@ -1,18 +1,18 @@
 <script setup>
 import { computed, ref, watch, nextTick } from 'vue';
 
-const props = defineProps(['objects', 'selectedId', 'settings']);
+const props = defineProps(['objects', 'selectedId', 'settings', 'nightTimes']);
 const emit = defineEmits(['select', 'update-settings', 'fetch-all']);
 
 const activeDropdown = ref(null);
 const localSettings = ref({});
 
-const sortOptions = ref({
-  time: { label: 'Best Time (Altitude)', enabled: true },
-  hours_above: { label: 'Hours Visible', enabled: false },
-  brightness: { label: 'Brightness', enabled: false },
-  size: { label: 'Size', enabled: false }
-});
+const sortOptions = [
+    { value: 'time', label: 'Best Time (Altitude)' },
+    { value: 'hours_above', label: 'Longest Visibility' },
+    { value: 'brightness', label: 'Brightest' },
+    { value: 'size', label: 'Largest' }
+];
 
 // Auto-scroll to selected item
 watch(() => props.selectedId, (newId) => {
@@ -30,37 +30,122 @@ watch(() => props.selectedId, (newId) => {
 watch(() => props.settings, (newVal) => {
     if (newVal) {
         localSettings.value = JSON.parse(JSON.stringify(newVal));
+        // Defaults
         if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
         if (localSettings.value.min_hours === undefined) localSettings.value.min_hours = 0.0;
-
-        const currentSort = localSettings.value.sort_key || 'time';
-        const keys = currentSort.split(',');
-        for (const k in sortOptions.value) {
-            sortOptions.value[k].enabled = keys.includes(k);
-        }
+        if (localSettings.value.max_magnitude === undefined) localSettings.value.max_magnitude = 12.0;
+        if (localSettings.value.min_size === undefined) localSettings.value.min_size = 0.0;
+        if (!localSettings.value.sort_key) localSettings.value.sort_key = 'time';
     }
 }, { immediate: true, deep: true });
 
-const toggleDropdown = () => {
-  activeDropdown.value = activeDropdown.value ? null : 'filter';
-};
-
-const updateSort = () => {
-    const keys = Object.keys(sortOptions.value).filter(k => sortOptions.value[k].enabled);
-    if (keys.length === 0) {
-        sortOptions.value.time.enabled = true;
-        keys.push('time');
-    }
-    localSettings.value.sort_key = keys.join(',');
+const updateSettings = () => {
     emit('update-settings', localSettings.value);
 };
+
+// Helper to calculate hours visible dynamically
+const calculateHoursVisible = (altitudeGraph, minAltitude, nightTimes) => {
+    if (!altitudeGraph || altitudeGraph.length === 0) return 0;
+    
+    // Strict astronomical night check
+    if (!nightTimes || !nightTimes.night) return 0;
+
+    const nightStart = new Date(nightTimes.night[0]);
+    const nightEnd = new Date(nightTimes.night[1]);
+    
+    const validPoints = [];
+    
+    for (const p of altitudeGraph) {
+        if (p.altitude >= minAltitude) {
+            const pt = new Date(p.time);
+            if (pt >= nightStart && pt <= nightEnd) {
+                validPoints.push(p);
+            }
+        }
+    }
+    
+    if (validPoints.length === 0) return 0;
+    
+    let step = 0.4; 
+    if (altitudeGraph.length > 1) {
+        const t1 = new Date(altitudeGraph[0].time);
+        const t2 = new Date(altitudeGraph[1].time);
+        step = (t2 - t1) / (1000 * 60 * 60); // hours
+    }
+    
+    return Number((validPoints.length * step).toFixed(1));
+};
+
+const filteredAndSortedObjects = computed(() => {
+    // Calculate dynamic visibility for all objects first
+    let result = props.objects.map(o => {
+        const dynamicHours = calculateHoursVisible(
+            o.altitude_graph, 
+            localSettings.value.min_altitude || 30, 
+            props.nightTimes
+        );
+        return { ...o, dynamicHoursVisible: dynamicHours };
+    });
+
+    // 1. Filter
+    // Min Hours
+    if (localSettings.value.min_hours > 0) {
+        result = result.filter(o => o.dynamicHoursVisible >= localSettings.value.min_hours);
+    }
+    
+    // Min Altitude (Basic check against max_altitude)
+    if (localSettings.value.min_altitude > 0) {
+         result = result.filter(o => (o.max_altitude || 0) >= localSettings.value.min_altitude);
+    }
+
+    // Max Magnitude (Fainter than X is filtered out)
+    // Note: Magnitude is inverse (lower is brighter). So "Max Magnitude 10" means filter out > 10.
+    if (localSettings.value.max_magnitude !== undefined) {
+        result = result.filter(o => (o.mag !== undefined && o.mag <= localSettings.value.max_magnitude));
+    }
+
+    // Min Size (Smaller than X is filtered out)
+    if (localSettings.value.min_size > 0) {
+        result = result.filter(o => (o.maj_ax || 0) >= localSettings.value.min_size);
+    }
+
+    // 2. Sort
+    const key = localSettings.value.sort_key || 'time';
+
+    result.sort((a, b) => {
+        let valA, valB;
+        let dir = -1; // Default descending (larger is better)
+
+        if (key === 'time' || key === 'altitude') {
+            valA = a.max_altitude || 0;
+            valB = b.max_altitude || 0;
+        } else if (key === 'hours_above') {
+            valA = a.dynamicHoursVisible || 0;
+            valB = b.dynamicHoursVisible || 0;
+        } else if (key === 'brightness') {
+            valA = a.mag || 99;
+            valB = b.mag || 99;
+            dir = 1; // Ascending for magnitude (lower is better)
+        } else if (key === 'size') {
+            valA = a.maj_ax || 0;
+            valB = b.maj_ax || 0;
+        }
+
+        if (valA !== valB) {
+            return (valA - valB) * dir;
+        }
+        return 0;
+    });
+
+    return result;
+});
 
 // Helper to generate SVG path for altitude
 const getAltitudePath = (altitudeGraph) => {
     if (!altitudeGraph || altitudeGraph.length === 0) return "";
 
     const width = 100;
-    const height = 40; // Increased slightly
+    const height = 40; 
     const maxAlt = 90;
 
     const stepX = width / (altitudeGraph.length - 1);
@@ -80,31 +165,35 @@ const getAltitudePath = (altitudeGraph) => {
 
 <template>
   <div class="list-wrapper">
-    <!-- Filter Header (Always Visible) -->
+    <!-- Filter Header -->
     <div class="list-header">
-         <div class="filter-row">
+         <div class="filter-grid">
             <div class="field-group compact">
                  <label>Min Alt (°)</label>
-                 <input type="number" v-model.number="localSettings.min_altitude" @change="$emit('update-settings', localSettings)" class="input-xs" />
+                 <input type="number" v-model.number="localSettings.min_altitude" @change="updateSettings" class="input-xs" />
             </div>
             <div class="field-group compact">
                  <label>Min Hours</label>
-                 <input type="number" step="0.5" v-model.number="localSettings.min_hours" @change="$emit('update-settings', localSettings)" class="input-xs" />
+                 <input type="number" step="0.5" v-model.number="localSettings.min_hours" @change="updateSettings" class="input-xs" />
+            </div>
+            <div class="field-group compact">
+                 <label>Max Mag</label>
+                 <input type="number" step="0.5" v-model.number="localSettings.max_magnitude" @change="updateSettings" class="input-xs" />
+            </div>
+            <div class="field-group compact">
+                 <label>Min Size (')</label>
+                 <input type="number" step="1" v-model.number="localSettings.min_size" @change="updateSettings" class="input-xs" />
             </div>
          </div>
+         
          <div class="sort-row">
              <label>Sort:</label>
-             <div class="sort-tags">
-                 <span
-                    v-for="(opt, key) in sortOptions"
-                    :key="key"
-                    class="sort-tag"
-                    :class="{ active: opt.enabled }"
-                    @click="opt.enabled = !opt.enabled; updateSort()"
-                 >
-                    {{ opt.label }}
-                 </span>
-             </div>
+             <select v-model="localSettings.sort_key" @change="updateSettings" class="sort-select">
+                 <option v-for="opt in sortOptions" :key="opt.value" :value="opt.value">
+                     {{ opt.label }}
+                 </option>
+             </select>
+             
              <button
                 v-if="localSettings.download_mode === 'filtered'"
                 class="small primary"
@@ -119,7 +208,7 @@ const getAltitudePath = (altitudeGraph) => {
     <!-- Scrollable List -->
     <div class="scrollable-list">
         <div
-            v-for="obj in objects"
+            v-for="obj in filteredAndSortedObjects"
             :key="obj.name"
             :id="`obj-card-${obj.name}`"
             class="object-card"
@@ -134,7 +223,7 @@ const getAltitudePath = (altitudeGraph) => {
                     Mag: {{ obj.mag }}<br/>
                     Size: {{ obj.size }}<br/>
                     <span class="vis-time">
-                        Vis: {{ obj.hours_above_min || 0 }}h
+                        Vis: {{ obj.dynamicHoursVisible || 0 }}h
                     </span>
                   </small>
                   <span :class="['status-badge', `status-${obj.status}`]">{{ obj.status }}</span>
@@ -157,8 +246,8 @@ const getAltitudePath = (altitudeGraph) => {
               </div>
           </div>
         </div>
-        <div v-if="objects.length === 0" style="text-align: center; color: gray; padding: 20px;">
-            No objects loaded.
+        <div v-if="filteredAndSortedObjects.length === 0" style="text-align: center; color: gray; padding: 20px;">
+            No objects match filters.
         </div>
     </div>
   </div>
@@ -182,15 +271,17 @@ const getAltitudePath = (altitudeGraph) => {
     gap: 8px;
 }
 
-.filter-row {
-    display: flex;
-    gap: 10px;
+.filter-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr;
+    gap: 5px;
 }
+
 .compact {
-    flex: 1;
     display: flex;
     flex-direction: column;
 }
+
 .input-xs {
     width: 100%;
     padding: 4px;
@@ -207,24 +298,14 @@ const getAltitudePath = (altitudeGraph) => {
     font-size: 0.8rem;
     color: #9ca3af;
 }
-.sort-tags {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 5px;
-}
-.sort-tag {
-    background: #374151;
-    padding: 2px 8px;
-    border-radius: 4px;
-    cursor: pointer;
-    user-select: none;
-    font-size: 0.75rem;
-}
-.sort-tag:hover { background: #4b5563; }
-.sort-tag.active {
-    background: #10b981;
-    color: #000;
-    font-weight: bold;
+
+.sort-select {
+    background: #000;
+    color: white;
+    border: 1px solid #4b5563;
+    padding: 2px 5px;
+    font-size: 0.85rem;
+    flex: 1;
 }
 
 .scrollable-list {
@@ -330,6 +411,4 @@ const getAltitudePath = (altitudeGraph) => {
 
 .field-group { margin-bottom: 5px; }
 .field-group label { display: block; font-size: 0.8em; color: #9ca3af; }
-.field-group input { width: 100%; padding: 5px; background: #000; border: 1px solid #444; color: white; }
-.checkbox-row { display: flex; align-items: center; gap: 5px; margin-bottom: 5px; }
 </style>

@@ -35,12 +35,15 @@ const saveSettings = async (newSettings) => {
 const startStream = (forceDownload = false) => {
   if (eventSource) eventSource.close();
   
-  objects.value = [];
+  // Stale Data Pattern: Don't clear objects immediately.
+  // We will clear them when the first new object arrives.
+  let isFirstChunk = true;
+  
   // Don't clear selectedObject immediately if we want to persist it, 
   // but we might want to validate it exists in the new stream.
   // For now, let's keep it null until we find it.
   const lastSelectedId = localStorage.getItem('lastSelectedId');
-  selectedObject.value = null;
+  // selectedObject.value = null; // Keep old selection visible too
   
   streamStatus.value = 'Connecting...';
 
@@ -79,6 +82,15 @@ const startStream = (forceDownload = false) => {
   });
 
   eventSource.addEventListener('object_data', (e) => {
+    if (isFirstChunk) {
+        objects.value = [];
+        isFirstChunk = false;
+        // Now we can clear selection if it's not valid anymore, 
+        // but let's wait to see if it appears in the stream?
+        // Actually, simpler to just clear it now to avoid confusion if it's gone.
+        selectedObject.value = null; 
+    }
+
     const obj = JSON.parse(e.data);
     objects.value.push(obj);
     
@@ -168,6 +180,20 @@ watch(selectedObject, async (newVal) => {
     }
 });
 
+// Auto-restart stream on settings change (Debounced)
+let restartTimer = null;
+watch(settings, (newVal, oldVal) => {
+    // Skip if initial load (empty oldVal)
+    if (!oldVal || Object.keys(oldVal).length === 0) return;
+
+    if (restartTimer) clearTimeout(restartTimer);
+    
+    restartTimer = setTimeout(() => {
+        console.log("Settings changed, restarting stream...");
+        startStream();
+    }, 1000);
+}, { deep: true });
+
 const handleKeydown = (e) => {
     // Only handle if we have objects
     if (objects.value.length === 0) return;
@@ -237,6 +263,7 @@ onUnmounted(() => {
                 :objects="objects"
                 :selectedId="selectedObject?.name"
                 :settings="settings"
+                :nightTimes="nightTimes"
                 @select="selectedObject = $event"
                 @update-settings="saveSettings"
                 @fetch-all="startStream(true)"

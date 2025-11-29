@@ -180,7 +180,9 @@ def get_sorted_objects(settings: dict, telescope: Telescope, camera: Camera, loc
                 temp_obj['ra'], temp_obj['dec'], altaz_frame, night_duration, min_altitude
             )
         else:
-            metric_hours = calculator.get_approx_hours_above(temp_obj['dec'], location.latitude, min_altitude)
+            # User requested strict astronomical night visibility.
+            # If there is no astronomical night (altaz_frame is None), then visibility is 0.
+            metric_hours = 0.0
 
         if metric_hours < min_hours:
             continue
@@ -343,6 +345,7 @@ async def event_stream(request: Request, settings: dict):
                 "hours_above_min": hours_above_min, 
                 "maj_ax": obj_dict['maj_ax'], 
                 "mag": obj_dict.get('mag', 99), 
+                "max_altitude": obj_dict.get('max_altitude', 0), # Added for client-side sorting
                 "setup_hash": setup_hash, 
                 "status": status 
             }
