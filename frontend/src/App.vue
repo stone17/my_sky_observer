@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, watch } from 'vue';
+import { ref, onMounted, watch, onUnmounted } from 'vue';
 import TopBar from './components/TopBar.vue';
 import ObjectList from './components/ObjectList.vue';
 import Framing from './components/Framing.vue';
@@ -32,7 +32,7 @@ const saveSettings = async (newSettings) => {
   } catch (e) { console.error(e); }
 };
 
-const startStream = () => {
+const startStream = (forceDownload = false) => {
   if (eventSource) eventSource.close();
   
   objects.value = [];
@@ -55,9 +55,16 @@ const startStream = () => {
     params.append('longitude', settings.value.location.longitude);
   }
   if (settings.value.catalogs) params.append('catalogs', settings.value.catalogs.join(','));
+  
   params.append('sort_key', settings.value.sort_key || 'time');
   params.append('min_altitude', settings.value.min_altitude || 30.0);
+  params.append('min_hours', settings.value.min_hours || 0.0);
   params.append('image_padding', settings.value.image_padding || 1.05);
+  
+  // Download Mode Logic
+  let mode = settings.value.download_mode || 'selected';
+  if (forceDownload) mode = 'all'; // Override for "Fetch All" action
+  params.append('download_mode', mode);
 
   eventSource = new EventSource(`/api/stream-objects?${params.toString()}`);
 
@@ -124,10 +131,40 @@ const handlePurge = () => {
     startStream(); // Restart automatically
 };
 
-// Watch selection to persist
-watch(selectedObject, (newVal) => {
+// Watch selection to persist and fetch image if needed
+watch(selectedObject, async (newVal) => {
     if (newVal) {
         localStorage.setItem('lastSelectedId', newVal.name);
+        
+        // If in "selected" mode (or any mode really) and image is missing/pending, fetch it
+        if (!newVal.image_url || newVal.status === 'pending') {
+            console.log(`Fetching image for ${newVal.name}...`);
+            // Optimistic update
+            newVal.status = 'downloading';
+            
+            try {
+                const res = await fetch('/api/download-object', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        object: newVal,
+                        settings: settings.value
+                    })
+                });
+                
+                if (res.ok) {
+                    const data = await res.json();
+                    newVal.image_url = data.url;
+                    newVal.status = data.status;
+                } else {
+                    console.error("Failed to fetch image");
+                    newVal.status = 'error';
+                }
+            } catch (e) {
+                console.error(e);
+                newVal.status = 'error';
+            }
+        }
     }
 });
 
@@ -139,8 +176,6 @@ const handleKeydown = (e) => {
         const idx = objects.value.findIndex(o => o.name === selectedObject.value?.name);
         if (idx < objects.value.length - 1) {
             selectedObject.value = objects.value[idx + 1];
-            // Ensure visibility handled by browser default?
-            // Better to scroll into view manually if needed, but let's start with selection.
         } else if (idx === -1 && objects.value.length > 0) {
              selectedObject.value = objects.value[0];
         }
@@ -160,7 +195,6 @@ onMounted(async () => {
   startStream(); // Auto-start
 });
 
-import { onUnmounted } from 'vue';
 onUnmounted(() => {
     window.removeEventListener('keydown', handleKeydown);
 });
@@ -205,6 +239,7 @@ onUnmounted(() => {
                 :settings="settings"
                 @select="selectedObject = $event"
                 @update-settings="saveSettings"
+                @fetch-all="startStream(true)"
              />
         </div>
       </aside>

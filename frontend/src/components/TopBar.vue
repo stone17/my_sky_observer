@@ -16,35 +16,8 @@ const selectedProfileName = ref(null);
 
 const activeDropdown = ref(null);
 
-// Location Search
-const cityQuery = ref("");
-const cityResults = ref([]);
-const isSearchingCity = ref(false);
-
-// Watch for prop updates with deep copy and safety checks
-watch(() => props.settings, (newVal) => {
-  if (newVal) {
-    try {
-        // Keep track if we are initializing
-        const isInit = Object.keys(localSettings.value).length === 0;
-
-        localSettings.value = JSON.parse(JSON.stringify(newVal));
-
-        // Ensure sub-objects exist
-        if (!localSettings.value.telescope) localSettings.value.telescope = {};
-        if (!localSettings.value.camera) localSettings.value.camera = {};
-        if (!localSettings.value.location) localSettings.value.location = {};
-        if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
-        if (localSettings.value.min_hours === undefined) localSettings.value.min_hours = 0.0;
-
-    } catch(e) {
-        console.error("Error parsing settings prop:", e);
-    }
-  }
-}, { immediate: true, deep: true });
-
 const toggleDropdown = (name) => {
-  activeDropdown.value = activeDropdown.value === name ? null : name;
+    activeDropdown.value = activeDropdown.value === name ? null : name;
 };
 
 const closeDropdown = () => {
@@ -61,8 +34,6 @@ const fetchProfiles = async () => {
         // Auto-load last used profile logic
         const lastProfile = localStorage.getItem('last_profile');
         if (lastProfile && profiles.value[lastProfile]) {
-            // Just set the name, don't overwrite settings from the profile template
-            // We want to respect the settings loaded from the server (settings.json)
             selectedProfileName.value = lastProfile;
         }
     }
@@ -83,6 +54,18 @@ const fetchCacheStatus = async () => {
     } catch (e) { console.error(e); }
 };
 
+// Sync settings
+watch(() => props.settings, (newVal) => {
+    if (newVal) {
+        localSettings.value = JSON.parse(JSON.stringify(newVal));
+        // Ensure defaults
+        if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
+        if (localSettings.value.min_hours === undefined) localSettings.value.min_hours = 0.0;
+        if (!localSettings.value.download_mode) localSettings.value.download_mode = 'selected';
+        if (!localSettings.value.catalogs) localSettings.value.catalogs = ['messier'];
+    }
+}, { immediate: true, deep: true });
+
 onMounted(() => {
   fetchProfiles();
   fetchPresets();
@@ -95,13 +78,14 @@ onMounted(() => {
 // Actions
 const loadProfile = (name) => {
   if (profiles.value[name]) {
-    localSettings.value = JSON.parse(JSON.stringify(profiles.value[name]));
-    // Ensure defaults
-    if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
-    if (localSettings.value.min_hours === undefined) localSettings.value.min_hours = 0.0;
-
+    const profileData = JSON.parse(JSON.stringify(profiles.value[name]));
+    // Merge into localSettings, preserving some defaults if missing
+    localSettings.value = {
+        ...localSettings.value,
+        ...profileData
+    };
+    
     selectedProfileName.value = name;
-    // Save to localStorage for next time
     localStorage.setItem('last_profile', name);
     emit('update-settings', localSettings.value);
     closeDropdown();
@@ -123,7 +107,6 @@ const selectedCameraPreset = computed({
         if (!localSettings.value.camera || !presets.value.cameras) return "";
         const w = localSettings.value.camera.sensor_width;
         const h = localSettings.value.camera.sensor_height;
-        // Find key with matching width/height (allow small float diff)
         for (const [name, specs] of Object.entries(presets.value.cameras)) {
             if (Math.abs(specs.width - w) < 0.01 && Math.abs(specs.height - h) < 0.01) {
                 return name;
@@ -136,21 +119,17 @@ const selectedCameraPreset = computed({
     }
 });
 
-
-
 const purgeCache = async () => {
     if(!confirm("Are you sure you want to purge the cache? This will delete all downloaded images.")) return;
     await fetch('/api/cache/purge', { method: 'POST' });
     await fetchCacheStatus();
-    emit('purge-cache'); // Trigger parent reload if needed
+    emit('purge-cache');
 };
 
-const redownloadCache = () => {
-    if(confirm("Purge and Redownload?")) {
-        purgeCache();
-        emit('start-stream'); // Restarting stream will redownload images since cache is gone
-    }
-};
+// City Search
+const cityQuery = ref("");
+const cityResults = ref([]);
+const isSearchingCity = ref(false);
 
 const searchCity = async () => {
     if (!cityQuery.value || cityQuery.value.length < 2) return;
@@ -264,24 +243,52 @@ const locationDisplay = computed(() => {
       <span>FOV: {{ fovDisplay }}</span>
     </div>
 
-
-    <!-- Cache -->
+    <!-- Download Mode -->
     <div class="tb-item relative">
-      <button class="tb-btn" @click="toggleDropdown('cache')">
-        Cache: {{ cacheStatus.size_mb }} MB ▼
+      <button class="tb-btn" @click="toggleDropdown('download')">
+        Mode: {{ localSettings.download_mode || 'Selected' }} ▼
       </button>
-      <div class="dropdown-menu" v-if="activeDropdown === 'cache'">
-         <div class="info-row">Images: {{ cacheStatus.count }}</div>
-         <button class="danger small full-width" @click="purgeCache">Purge Cache</button>
-         <button class="secondary small full-width" @click="redownloadCache" style="margin-top: 5px">Redownload</button>
+      <div class="dropdown-menu" v-if="activeDropdown === 'download'">
+          <label><strong>Download Mode</strong></label>
+          <div class="radio-group">
+              <label><input type="radio" value="selected" v-model="localSettings.download_mode" @change="$emit('update-settings', localSettings)"> Selected Only</label>
+              <label><input type="radio" value="filtered" v-model="localSettings.download_mode" @change="$emit('update-settings', localSettings)"> Filtered (Manual)</label>
+              <label><input type="radio" value="all" v-model="localSettings.download_mode" @change="$emit('update-settings', localSettings)"> All (Auto)</label>
+          </div>
       </div>
     </div>
 
-    <!-- Stream Controls -->
-    <div class="tb-item push-right">
-         <span class="status-text">{{ streamStatus }}</span>
-         <button v-if="streamStatus === 'Idle' || streamStatus === 'Stopped' || streamStatus.includes('Complete')" @click="$emit('start-stream')">Start</button>
-         <button v-else class="outline" @click="$emit('stop-stream')">Stop</button>
+    <!-- Catalogs -->
+    <div class="tb-item relative">
+      <button class="tb-btn" @click="toggleDropdown('catalogs')">
+        Catalogs ▼
+      </button>
+      <div class="dropdown-menu" v-if="activeDropdown === 'catalogs'">
+          <label><strong>Active Catalogs</strong></label>
+          <div class="checkbox-col">
+              <label><input type="checkbox" value="messier" v-model="localSettings.catalogs" @change="$emit('update-settings', localSettings)"> Messier</label>
+              <label><input type="checkbox" value="ngc" v-model="localSettings.catalogs" @change="$emit('update-settings', localSettings)"> NGC</label>
+          </div>
+      </div>
+    </div>
+
+    <!-- Cache -->
+    <div class="tb-item relative push-right">
+      <button class="tb-btn" @click="toggleDropdown('cache')">
+        Cache: {{ cacheStatus.size_mb }} MB ▼
+      </button>
+      <div class="dropdown-menu right-aligned" v-if="activeDropdown === 'cache'">
+         <div class="info-row">Images: {{ cacheStatus.count }}</div>
+         <hr/>
+         <button class="full-width danger" @click="purgeCache">Purge Cache</button>
+      </div>
+    </div>
+
+    <!-- Stream Status -->
+    <div class="tb-item">
+        <span class="status-text">{{ streamStatus }}</span>
+        <button v-if="streamStatus !== 'Stopped'" class="small secondary" @click="$emit('stop-stream')">Stop</button>
+        <button v-else class="small primary" @click="$emit('start-stream')">Start</button>
     </div>
   </div>
 </template>
@@ -318,7 +325,6 @@ const locationDisplay = computed(() => {
 
 .push-right {
     margin-left: auto;
-    gap: 10px;
 }
 
 .relative {
@@ -336,6 +342,11 @@ const locationDisplay = computed(() => {
     min-width: 220px;
     border-radius: 0 0 4px 4px;
     box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+}
+
+.dropdown-menu.right-aligned {
+    left: auto;
+    right: 0;
 }
 
 .link-list {
@@ -387,10 +398,38 @@ const locationDisplay = computed(() => {
 .small { padding: 2px 8px; font-size: 0.8rem; }
 .danger { background-color: #ef4444; border-color: #ef4444; color: white; }
 .secondary { background-color: #4b5563; border-color: #4b5563; color: white; }
+.primary { background-color: #10b981; border-color: #10b981; color: #000; font-weight: bold; }
 
 .status-text {
     color: #9ca3af;
     font-size: 0.8rem;
     margin-right: 10px;
+}
+.radio-group {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-bottom: 10px;
+}
+.radio-group label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    color: #e5e7eb;
+}
+
+.checkbox-col {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-bottom: 5px;
+}
+.checkbox-col label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    color: #e5e7eb;
 }
 </style>

@@ -23,20 +23,48 @@ const getX = (timeStr) => {
     return pct * width;
 };
 
-// Generate Time Labels (Now, +6h, +12h, +18h)
-const timeLabels = computed(() => {
+// Generate Time Ticks (Full hours and half hours)
+const timeTicks = computed(() => {
     if (!props.object || !props.object.altitude_graph || props.object.altitude_graph.length === 0) return [];
 
     const start = new Date(props.object.altitude_graph[0].time);
-    const labels = [];
+    const end = new Date(props.object.altitude_graph[props.object.altitude_graph.length - 1].time);
+    const startTime = start.getTime();
+    const endTime = end.getTime();
+    const range = endTime - startTime;
 
-    for (let i = 0; i <= 24; i += 6) {
-        const t = new Date(start.getTime() + i * 60 * 60 * 1000);
-        // Format: HH:MM
-        const str = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-        labels.push({ x: (i / 24) * width, text: str });
+    if (range <= 0) return [];
+
+    const ticks = [];
+    
+    // Start at the next half-hour boundary
+    let current = new Date(startTime);
+    if (current.getMinutes() > 30) {
+        current.setHours(current.getHours() + 1, 0, 0, 0);
+    } else if (current.getMinutes() > 0) {
+        current.setMinutes(30, 0, 0);
+    } else {
+        current.setMinutes(0, 0, 0);
     }
-    return labels;
+
+    while (current.getTime() <= endTime) {
+        const t = current.getTime();
+        const pct = (t - startTime) / range;
+        const x = pct * width;
+        
+        const isFullHour = current.getMinutes() === 0;
+        const label = isFullHour ? current.getHours() : null; // Only show hour number
+
+        ticks.push({ 
+            x, 
+            label, 
+            isMajor: isFullHour 
+        });
+
+        // Increment by 30 mins
+        current.setTime(current.getTime() + 30 * 60 * 1000);
+    }
+    return ticks;
 });
 
 const getPath = (data, isMoon = false) => {
@@ -142,9 +170,28 @@ const nightZones = computed(() => {
                 <text x="5" :y="height*0.33 + 4" fill="#888" font-size="10">60°</text>
                 <text x="5" :y="height*0.66 + 4" fill="#888" font-size="10">30°</text>
 
-                <!-- X-Axis Labels -->
-                <g transform="translate(0, 15)">
-                    <text v-for="(lbl, i) in timeLabels" :key="i" :x="lbl.x" :y="height" fill="#aaa" font-size="10" text-anchor="middle">{{ lbl.text }}</text>
+                <!-- X-Axis Ticks & Labels -->
+                <g>
+                    <g v-for="(tick, i) in timeTicks" :key="i">
+                        <!-- Tick Line -->
+                        <line 
+                            :x1="tick.x" 
+                            :y1="height" 
+                            :x2="tick.x" 
+                            :y2="height + (tick.isMajor ? 5 : 3)" 
+                            stroke="#666" 
+                            :stroke-width="tick.isMajor ? 1.5 : 1" 
+                        />
+                        <!-- Label (Major only) -->
+                        <text 
+                            v-if="tick.label !== null" 
+                            :x="tick.x" 
+                            :y="height + 15" 
+                            fill="#aaa" 
+                            font-size="9" 
+                            text-anchor="middle"
+                        >{{ tick.label }}</text>
+                    </g>
                 </g>
              </svg>
         </div>

@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from typing import Dict, Tuple, List, Optional
 import pandas as pd
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import SkyCoord, EarthLocation
 import astropy.units as u
 from pydantic import BaseModel
 import math
@@ -53,7 +53,8 @@ def save_settings(settings: dict):
     with open(SETTINGS_FILE, 'w') as f: json.dump(settings, f, indent=2)
 
 def get_setup_hash(telescope: Telescope, camera: Camera, image_padding: float) -> str:
-    s = f"f{telescope.focal_length}_w{camera.sensor_width}_h{camera.sensor_height}_p{image_padding}"
+    # Added v2 prefix to bust cache from previous buggy versions
+    s = f"v2_f{telescope.focal_length}_w{camera.sensor_width}_h{camera.sensor_height}_p{image_padding}"
     return hashlib.md5(s.encode()).hexdigest()[:12]
 
 def get_cache_info(object_name: str, setup_hash: str) -> Tuple[str, str, str]:
@@ -100,6 +101,21 @@ async def download_and_cache_image(image_url: str, filepath: str, setup_dir: str
     except Exception as e:
         print(f"    -> ERROR in download_and_cache_image: {e}")
         raise e
+
+async def download_image(ra: str, dec: str, fov: float, object_id: str, setup_hash: str) -> str:
+    """
+    Unified function to download or retrieve an image from cache.
+    Returns the web-accessible URL of the image.
+    """
+    url, filepath, setup_dir = get_cache_info(object_id, setup_hash)
+    
+    if os.path.exists(filepath):
+        return url
+
+    # Not in cache, download it
+    live_url = get_sky_survey_url(ra, dec, fov)
+    await download_and_cache_image(live_url, filepath, setup_dir)
+    return url
 
 def get_sky_survey_url(ra_hms: str, dec_dms: str, fov_in_degrees: float) -> str:
     coords = SkyCoord(ra_hms, dec_dms, unit=(u.hourangle, u.deg))
@@ -251,7 +267,15 @@ async def event_stream(request: Request, settings: dict):
 
         yield f"event: total\ndata: {len(processed_objects)}\n\n"
         
-        twilight = await asyncio.to_thread(calculator.get_twilight_periods, location)
+        # Calculate observing session times once
+        from astroplan import Observer
+        observer_loc = EarthLocation(lat=location.latitude * u.deg, lon=location.longitude * u.deg)
+        observer = Observer(location=observer_loc)
+        
+        session_start, session_end = await asyncio.to_thread(calculator.get_observing_session, observer, Time.now())
+        
+        # Get twilight periods relative to this session start
+        twilight = await asyncio.to_thread(calculator.get_twilight_periods, location, session_start)
         yield f"event: twilight_info\ndata: {json.dumps(twilight)}\n\n"
 
         # Also send current night times in a dedicated event for the UI to use globally
@@ -263,11 +287,11 @@ async def event_stream(request: Request, settings: dict):
         fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
         fov_w_deg, fov_h_deg = fov_w_arcmin / 60.0, fov_h_arcmin / 60.0
         
-        # Calculate download FOV: Max dimension + 5% padding
+        # Calculate download FOV: Max dimension + padding
         # User requested: "take the calculated FOV (camera+telescope) and then add 5% margin to the longer sider"
         max_fov_deg = max(fov_w_deg, fov_h_deg)
-        download_fov = max(max_fov_deg * 1.05, 0.25)
-        print(f"Calculated download FOV: {download_fov:.4f} degrees (Sensor: {fov_w_deg:.4f}x{fov_h_deg:.4f})")
+        download_fov = max(max_fov_deg * image_padding, 0.25)
+        print(f"Calculated download FOV: {download_fov:.4f} degrees (Sensor: {fov_w_deg:.4f}x{fov_h_deg:.4f}, Padding: {image_padding})")
 
         fov_rect = FOVRectangle(
             width_percent=(fov_w_deg / download_fov) * 100.0, 
@@ -284,7 +308,8 @@ async def event_stream(request: Request, settings: dict):
             is_cached = os.path.exists(cache_filepath)
             
             # Return dictionary with 'target' and 'moon' lists
-            altitude_data = await asyncio.to_thread(calculator.get_altitude_graph, obj_dict['ra'], obj_dict['dec'], location)
+            # Pass the synchronized session times
+            altitude_data = await asyncio.to_thread(calculator.get_altitude_graph, obj_dict['ra'], obj_dict['dec'], location, 60, session_start, session_end)
 
             # Calculate hours above min based on graph
             hours_above_min = await asyncio.to_thread(calculator.calculate_time_above_altitude, altitude_data['target'], min_altitude, twilight)
@@ -293,7 +318,14 @@ async def event_stream(request: Request, settings: dict):
             if is_cached:
                 image_url, status = (cache_url, "cached")
             else:
-                objects_to_download.append(obj_dict)
+                # Download Mode Logic
+                download_mode = settings.get('download_mode', 'selected')
+                if download_mode == 'all':
+                    objects_to_download.append(obj_dict)
+                else:
+                    # 'selected' or 'filtered' (without fetch-all trigger)
+                    # Do not download automatically
+                    status = "pending"
 
             size_str = f"{obj_dict['maj_ax']}'" + (f" x {obj_dict['min_ax']}'" if 'min_ax' in obj_dict and obj_dict['min_ax'] > 0 else "")
             
@@ -306,7 +338,8 @@ async def event_stream(request: Request, settings: dict):
                 "image_url": image_url, 
                 "altitude_graph": [p.model_dump() for p in altitude_data['target']],
                 "moon_graph": [p.model_dump() for p in altitude_data['moon']],
-                "fov_rectangle": fov_rect.model_dump(), 
+                "fov_rectangle": fov_rect.model_dump(),
+                "image_fov": download_fov, # Explicit FOV of the image
                 "hours_above_min": hours_above_min, 
                 "maj_ax": obj_dict['maj_ax'], 
                 "mag": obj_dict.get('mag', 99), 
@@ -331,9 +364,22 @@ async def event_stream(request: Request, settings: dict):
                 await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'downloading'})}\n\n")
 
                 try:
-                    live_image_url = get_sky_survey_url(obj_dict['ra'], obj_dict['dec'], download_fov)
-                    await download_and_cache_image(live_image_url, cache_filepath, setup_dir)
-                    await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'cached', 'url': cache_url})}\n\n")
+                    # Use unified download function
+                    # Note: download_image returns the URL, but we also need to know if it was cached or downloaded for the status update.
+                    # Since download_image handles cache check internally, we can just call it.
+                    # However, to maintain the specific status messages ('downloading' vs 'cached'), we might want to check cache first or modify download_image to return status.
+                    # But the user asked to streamline. Let's trust download_image.
+                    # Actually, for the UI feedback "downloading...", we want to emit that event BEFORE calling download_image if it's not cached.
+                    # But download_image checks cache.
+                    # Let's just emit "downloading" (it's harmless if it returns instantly from cache) or check cache here too.
+                    # The outer loop already checked cache and only added to queue if not cached.
+                    # So we can assume it needs downloading (or race condition, which is fine).
+                    
+                    await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'downloading'})}\n\n")
+                    
+                    url = await download_image(obj_dict['ra'], obj_dict['dec'], download_fov, object_id, setup_hash)
+                    
+                    await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'cached', 'url': url})}\n\n")
                 except Exception as download_error:
                     print(f"  -> FAILED: {object_id} - {download_error}")
                     await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'error'})}\n\n")
@@ -391,7 +437,7 @@ async def geocode_city(city: str):
         return JSONResponse(content={"error": f"Geocoding API error: {e}"}, status_code=500)
 
 @app.get("/api/stream-objects")
-async def stream_objects(request: Request, focal_length: float, sensor_width: float, sensor_height: float, latitude: float, longitude: float, catalogs: str, sort_key: str, min_altitude: float = 30.0, min_hours: float = 0.0, image_padding: float = 1.1):
+async def stream_objects(request: Request, focal_length: float, sensor_width: float, sensor_height: float, latitude: float, longitude: float, catalogs: str, sort_key: str, min_altitude: float = 30.0, min_hours: float = 0.0, image_padding: float = 1.1, download_mode: str = 'selected'):
     settings = {
         "telescope": {"focal_length": focal_length},
         "camera": {"sensor_width": sensor_width, "sensor_height": sensor_height},
@@ -400,7 +446,8 @@ async def stream_objects(request: Request, focal_length: float, sensor_width: fl
         "min_altitude": min_altitude,
         "min_hours": min_hours,
         "sort_key": sort_key,
-        "image_padding": image_padding
+        "image_padding": image_padding,
+        "download_mode": download_mode
     }
     return StreamingResponse(event_stream(request, settings), media_type="text/event-stream")
 
@@ -466,19 +513,40 @@ class FetchImageRequest(BaseModel):
 async def fetch_custom_image(req: FetchImageRequest):
     setup_hash = f"custom_fov_{req.fov:.4f}"
     name = f"RADEC_{req.ra}_{req.dec}"
-    url, filepath, setup_dir = get_cache_info(name, setup_hash)
+    
+    print(f"Fetching custom image: FOV={req.fov}, Hash={setup_hash}")
 
-    print(f"Fetching custom image: FOV={req.fov}, Hash={setup_hash}, Path={filepath}")
+    try:
+        url = await download_image(req.ra, req.dec, req.fov, name, setup_hash)
+        return {"url": url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    if not os.path.exists(filepath):
-        try:
-            live_url = get_sky_survey_url(req.ra, req.dec, req.fov)
-            print(f"  -> Downloading from: {live_url}")
-            await download_and_cache_image(live_url, filepath, setup_dir)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-    return {"url": url}
+@app.post("/api/download-object")
+async def download_object_endpoint(request: Request):
+    try:
+        data = await request.json()
+        
+        # Reconstruct settings to match stream logic
+        telescope = Telescope(**data['settings']['telescope'])
+        camera = Camera(**data['settings']['camera'])
+        image_padding = data['settings'].get('image_padding', 1.05)
+        
+        setup_hash = get_setup_hash(telescope, camera, image_padding)
+        
+        fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
+        fov_w_deg, fov_h_deg = fov_w_arcmin / 60.0, fov_h_arcmin / 60.0
+        max_fov_deg = max(fov_w_deg, fov_h_deg)
+        download_fov = max(max_fov_deg * image_padding, 0.25)
+        
+        obj = data['object']
+        print(f"On-demand download for {obj['name']} (FOV: {download_fov:.4f})")
+        
+        url = await download_image(obj['ra'], obj['dec'], download_fov, obj['name'], setup_hash)
+        return {"url": url, "status": "cached"}
+    except Exception as e:
+        print(f"Error in on-demand download: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if not os.path.exists("frontend"): os.makedirs("frontend", exist_ok=True)
@@ -487,7 +555,8 @@ if not os.path.exists("frontend"): os.makedirs("frontend", exist_ok=True)
 async def get_cached_image(setup_hash: str, image_filename: str):
     filepath = os.path.join(CACHE_DIR, setup_hash, image_filename)
     if not os.path.exists(filepath): return JSONResponse(content={"error": "File not found"}, status_code=404)
-    return FileResponse(filepath, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+    # Disable caching to prevent browser from holding onto wrong images during development/debugging
+    return FileResponse(filepath, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 static_dir = "frontend/dist" if os.path.exists("frontend/dist") else "frontend"
 app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")

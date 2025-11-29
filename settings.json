@@ -17,5 +17,6 @@
   "min_altitude": 30,
   "min_hours": 0,
   "image_padding": 1.05,
-  "sort_key": "size"
+  "sort_key": "time",
+  "download_mode": "selected"
 }

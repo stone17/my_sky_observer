@@ -1,8 +1,8 @@
 <script setup>
-import { computed, ref, watch } from 'vue';
+import { computed, ref, watch, nextTick } from 'vue';
 
 const props = defineProps(['objects', 'selectedId', 'settings']);
-const emit = defineEmits(['select', 'update-settings']);
+const emit = defineEmits(['select', 'update-settings', 'fetch-all']);
 
 const activeDropdown = ref(null);
 const localSettings = ref({});
@@ -12,6 +12,18 @@ const sortOptions = ref({
   hours_above: { label: 'Hours Visible', enabled: false },
   brightness: { label: 'Brightness', enabled: false },
   size: { label: 'Size', enabled: false }
+});
+
+// Auto-scroll to selected item
+watch(() => props.selectedId, (newId) => {
+    if (newId) {
+        nextTick(() => {
+            const el = document.getElementById(`obj-card-${newId}`);
+            if (el) {
+                el.scrollIntoView({ block: 'nearest' });
+            }
+        });
+    }
 });
 
 // Sync local settings
@@ -93,6 +105,14 @@ const getAltitudePath = (altitudeGraph) => {
                     {{ opt.label }}
                  </span>
              </div>
+             <button
+                v-if="localSettings.download_mode === 'filtered'"
+                class="small primary"
+                style="margin-left: auto;"
+                @click="$emit('fetch-all')"
+             >
+                Fetch All
+             </button>
          </div>
     </div>
 
@@ -101,6 +121,7 @@ const getAltitudePath = (altitudeGraph) => {
         <div
             v-for="obj in objects"
             :key="obj.name"
+            :id="`obj-card-${obj.name}`"
             class="object-card"
             :class="{ active: selectedId === obj.name }"
             @click="$emit('select', obj)"

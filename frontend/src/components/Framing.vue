@@ -36,24 +36,35 @@ const sensorFov = computed(() => {
 
 // Initialize FOVs from object data
 const initFov = () => {
-    if (props.object && props.object.fov_rectangle && sensorFov.value.w > 0) {
-        // object.fov_rectangle.width_percent = (sensorFovW / imageFov) * 100
-        // So imageFov = sensorFovW / (width_percent / 100)
-        const wPct = props.object.fov_rectangle.width_percent;
-        if (wPct > 0) {
-            const calculatedImageFov = sensorFov.value.w / (wPct / 100);
-            imageFov.value = calculatedImageFov;
-            currentFov.value = parseFloat(calculatedImageFov.toFixed(1)); // Start matched, rounded
+    if (props.object) {
+        // PREFERRED: Use explicit image_fov if available (from new backend)
+        if (props.object.image_fov) {
+            imageFov.value = props.object.image_fov;
+            currentFov.value = parseFloat(props.object.image_fov.toFixed(2));
+        }
+        // FALLBACK: Use legacy fov_rectangle if image_fov not present
+        else if (props.object.fov_rectangle && sensorFov.value.w > 0) {
+            const wPct = props.object.fov_rectangle.width_percent;
+            if (wPct > 0) {
+                const calculatedImageFov = sensorFov.value.w / (wPct / 100);
+                imageFov.value = calculatedImageFov;
+                currentFov.value = parseFloat(calculatedImageFov.toFixed(2));
+            }
         }
     }
 };
 
+// Watch object and sensorFov to initialize
+watch([() => props.object, sensorFov], () => {
+    initFov();
+}, { immediate: true });
+
+// Watch object specifically for resets
 watch(() => props.object, () => {
     customImageUrl.value = null;
     offsetX.value = 0;
     offsetY.value = 0;
-    initFov();
-}, { immediate: true });
+});
 
 // Computed Styles
 const imageStyle = computed(() => {
@@ -170,9 +181,9 @@ onUnmounted(() => {
         <div class="controls-row">
              <div class="group">
                 <strong>FOV (deg):</strong>
-                <button class="outline small" @click="currentFov = parseFloat((currentFov * 1.1).toFixed(1))">+</button>
+                <button class="outline small" @click="currentFov = parseFloat((currentFov * 1.1).toFixed(2))">+</button>
                 <input type="number" v-model.number="currentFov" step="0.1" class="fov-input" />
-                <button class="outline small" @click="currentFov = parseFloat((currentFov * 0.9).toFixed(1))">-</button>
+                <button class="outline small" @click="currentFov = parseFloat((currentFov * 0.9).toFixed(2))">-</button>
                 <button @click="fetchCustomFov" :disabled="isFetching">{{ isFetching ? '...' : 'Fetch' }}</button>
              </div>
              <div class="group">
@@ -200,6 +211,10 @@ onUnmounted(() => {
              >
                  <div class="crosshair">+</div>
              </div>
+        </div>
+        <!-- Debug Info -->
+        <div style="position: absolute; bottom: 0; left: 0; background: rgba(0,0,0,0.7); color: lime; font-size: 10px; padding: 2px; pointer-events: none;">
+            cFov: {{ currentFov }} | iFov: {{ imageFov }} | sFov: {{ sensorFov.w.toFixed(2) }}x{{ sensorFov.h.toFixed(2) }} | Rect: {{ object?.fov_rectangle?.width_percent?.toFixed(1) }}%
         </div>
     </div>
   </article>
