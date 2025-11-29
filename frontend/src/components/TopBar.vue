@@ -13,6 +13,7 @@ const profiles = ref({});
 const presets = ref({ cameras: {} });
 const cacheStatus = ref({ size_mb: 0, count: 0 });
 const selectedProfileName = ref(null);
+const newProfileName = ref("");
 
 const activeDropdown = ref(null);
 
@@ -63,6 +64,7 @@ watch(() => props.settings, (newVal) => {
         if (localSettings.value.min_hours === undefined) localSettings.value.min_hours = 0.0;
         if (!localSettings.value.download_mode) localSettings.value.download_mode = 'selected';
         if (!localSettings.value.catalogs) localSettings.value.catalogs = ['messier'];
+        if (localSettings.value.image_padding === undefined) localSettings.value.image_padding = 1.05;
     }
 }, { immediate: true, deep: true });
 
@@ -79,17 +81,58 @@ onMounted(() => {
 const loadProfile = (name) => {
   if (profiles.value[name]) {
     const profileData = JSON.parse(JSON.stringify(profiles.value[name]));
-    // Merge into localSettings, preserving some defaults if missing
+    
+    // Preserve current location if it exists
+    const savedLocation = localSettings.value.location;
+
+    // Merge into localSettings
     localSettings.value = {
         ...localSettings.value,
         ...profileData
     };
+    
+    // Restore location
+    if (savedLocation) {
+        localSettings.value.location = savedLocation;
+    }
     
     selectedProfileName.value = name;
     localStorage.setItem('last_profile', name);
     emit('update-settings', localSettings.value);
     closeDropdown();
   }
+};
+
+const createProfile = async () => {
+    if (!newProfileName.value) return;
+    const name = newProfileName.value;
+    
+    // Create profile data excluding location
+    const profileData = JSON.parse(JSON.stringify(localSettings.value));
+    delete profileData.location;
+
+    try {
+        await fetch(`/api/profiles/${name}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(profileData)
+        });
+        await fetchProfiles();
+        selectedProfileName.value = name;
+        newProfileName.value = "";
+        localStorage.setItem('last_profile', name);
+    } catch (e) { console.error(e); }
+};
+
+const deleteProfile = async () => {
+    if (!selectedProfileName.value) return;
+    if (!confirm(`Delete profile "${selectedProfileName.value}"?`)) return;
+    try {
+        await fetch(`/api/profiles/${selectedProfileName.value}`, { method: 'DELETE' });
+        await fetchProfiles();
+        selectedProfileName.value = null;
+        localStorage.removeItem('last_profile');
+    } catch (e) { console.error(e); }
 };
 
 const applyPreset = (cameraName) => {
@@ -186,8 +229,22 @@ const locationDisplay = computed(() => {
       <div class="dropdown-menu" v-if="activeDropdown === 'profile'">
         <label><strong>Load Profile</strong></label>
         <ul class="link-list">
-            <li v-for="(p, name) in profiles" :key="name" @click="loadProfile(name)">{{ name }}</li>
+            <li v-for="(p, name) in profiles" :key="name" @click="loadProfile(name)">
+                {{ name }} <span v-if="selectedProfileName === name" style="color: #10b981;">✓</span>
+            </li>
         </ul>
+        
+        <div class="field-group" style="margin-top: 10px;">
+            <label><strong>New Profile</strong></label>
+            <div style="display: flex; gap: 5px;">
+                <input type="text" v-model="newProfileName" placeholder="Name..." />
+                <button class="small primary" @click="createProfile">Save</button>
+            </div>
+        </div>
+        <div v-if="selectedProfileName" style="margin-top: 10px;">
+             <button class="full-width danger small" @click="deleteProfile">Delete Current Profile</button>
+        </div>
+        
         <hr/>
         <div class="field-group" v-if="localSettings.telescope">
              <label>Focal Length (mm)</label>
@@ -205,6 +262,10 @@ const locationDisplay = computed(() => {
         <div class="field-group" v-if="localSettings.camera">
              <label>Sensor Height (mm)</label>
              <input type="number" step="0.1" v-model.number="localSettings.camera.sensor_height" @change="$emit('update-settings', localSettings)" />
+        </div>
+        <div class="field-group">
+             <label>Download Padding (1.0 = Exact FOV)</label>
+             <input type="number" step="0.05" min="0.5" max="2.0" v-model.number="localSettings.image_padding" @change="$emit('update-settings', localSettings)" />
         </div>
       </div>
     </div>

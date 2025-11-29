@@ -120,26 +120,28 @@ const filteredAndSortedObjects = computed(() => {
     const sortKey = props.settings?.sort_key || 'time';
 
     // Calculate dynamic visibility for all objects first
+    // We wrap the original object to preserve reactivity references, avoiding { ...o } shallow copies
     let result = props.objects.map(o => {
         const dynamicHours = calculateHoursVisible(
             o.altitude_graph, 
             minAlt, 
             props.nightTimes
         );
-        return { ...o, dynamicHoursVisible: dynamicHours };
+        return { obj: o, dynamicHoursVisible: dynamicHours };
     });
 
     const q = searchQuery.value.trim().toLowerCase();
 
     // 1. Filter
-    result = result.filter(o => {
+    result = result.filter(item => {
+        const o = item.obj;
         // Search Bypass: If name matches search query (partial match), include it regardless of other filters
         if (q && o.name.toLowerCase().includes(q)) {
             return true;
         }
 
         // Standard Filters
-        if (minHrs > 0 && o.dynamicHoursVisible < minHrs) return false;
+        if (minHrs > 0 && item.dynamicHoursVisible < minHrs) return false;
         if (minAlt > 0 && (o.max_altitude || 0) < minAlt) return false;
         
         // Max Magnitude (Fainter than X is filtered out)
@@ -153,22 +155,24 @@ const filteredAndSortedObjects = computed(() => {
 
     // 2. Sort
     result.sort((a, b) => {
+        const objA = a.obj;
+        const objB = b.obj;
         let valA, valB;
         let dir = -1; // Default descending (larger is better)
 
         if (sortKey === 'time' || sortKey === 'altitude') {
-            valA = a.max_altitude || 0;
-            valB = b.max_altitude || 0;
+            valA = objA.max_altitude || 0;
+            valB = objB.max_altitude || 0;
         } else if (sortKey === 'hours_above') {
             valA = a.dynamicHoursVisible || 0;
             valB = b.dynamicHoursVisible || 0;
         } else if (sortKey === 'brightness') {
-            valA = a.mag || 99;
-            valB = b.mag || 99;
+            valA = objA.mag || 99;
+            valB = objB.mag || 99;
             dir = 1; // Ascending for magnitude (lower is better)
         } else if (sortKey === 'size') {
-            valA = a.maj_ax || 0;
-            valB = b.maj_ax || 0;
+            valA = objA.maj_ax || 0;
+            valB = objB.maj_ax || 0;
         }
 
         if (valA !== valB) {
@@ -270,39 +274,39 @@ const getAltitudePath = (altitudeGraph) => {
         <!-- Scrollable List -->
         <div class="scrollable-list">
             <div
-                v-for="obj in filteredAndSortedObjects"
-                :key="obj.name"
-                :id="`obj-card-${obj.name}`"
+                v-for="item in filteredAndSortedObjects"
+                :key="item.obj.name"
+                :id="`obj-card-${item.obj.name}`"
                 class="object-card"
-                :class="{ active: selectedId === obj.name }"
-                @click="$emit('select', obj)"
+                :class="{ active: selectedId === item.obj.name }"
+                @click="$emit('select', item.obj)"
             >
               <div class="card-content">
                   <!-- Left: Info -->
                   <div class="info-col">
-                      <h4 :title="obj.name">{{ obj.name || 'Unknown Object' }}</h4>
+                      <h4 :title="item.obj.name">{{ item.obj.name || 'Unknown Object' }}</h4>
                       <small>
-                        Mag: {{ obj.mag }}<br/>
-                        Size: {{ obj.size }}<br/>
+                        Mag: {{ item.obj.mag }}<br/>
+                        Size: {{ item.obj.size }}<br/>
                         <span class="vis-time">
-                            Vis: {{ obj.dynamicHoursVisible || 0 }}h
+                            Vis: {{ item.dynamicHoursVisible || 0 }}h
                         </span>
                       </small>
-                      <span :class="['status-badge', `status-${obj.status}`]">{{ obj.status }}</span>
+                      <span :class="['status-badge', `status-${item.obj.status}`]">{{ item.obj.status }}</span>
                   </div>
 
                   <!-- Center: Image -->
                   <div class="img-col">
-                      <img v-if="obj.image_url" :src="obj.image_url" class="list-thumb" loading="lazy" />
+                      <img v-if="item.obj.image_url" :src="item.obj.image_url" class="list-thumb" loading="lazy" />
                       <div v-else class="img-placeholder"></div>
                   </div>
 
                   <!-- Right: Graph -->
                   <div class="graph-col">
-                      <div class="altitude-chart" v-if="obj.altitude_graph && obj.altitude_graph.length">
+                      <div class="altitude-chart" v-if="item.obj.altitude_graph && item.obj.altitude_graph.length">
                           <svg viewBox="0 0 100 40" preserveAspectRatio="none" width="100%" height="40">
                               <line x1="0" y1="26" x2="100" y2="26" stroke="#444" stroke-width="1" stroke-dasharray="2" />
-                              <path :d="getAltitudePath(obj.altitude_graph)" fill="rgba(0, 255, 0, 0.2)" stroke="#0f0" stroke-width="1" />
+                              <path :d="getAltitudePath(item.obj.altitude_graph)" fill="rgba(0, 255, 0, 0.2)" stroke="#0f0" stroke-width="1" />
                           </svg>
                       </div>
                   </div>

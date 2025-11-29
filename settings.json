@@ -14,11 +14,11 @@
   "catalogs": [
     "messier"
   ],
-  "min_altitude": 20,
+  "min_altitude": 30,
   "min_hours": 2,
-  "image_padding": 1.05,
+  "image_padding": 1.3,
   "sort_key": "size",
-  "download_mode": "filtered",
+  "download_mode": "selected",
   "max_magnitude": 12,
   "min_size": 10
 }

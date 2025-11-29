@@ -52,10 +52,11 @@ def load_settings() -> dict:
 def save_settings(settings: dict):
     with open(SETTINGS_FILE, 'w') as f: json.dump(settings, f, indent=2)
 
-def get_setup_hash(telescope: Telescope, camera: Camera, image_padding: float) -> str:
-    # Added v2 prefix to bust cache from previous buggy versions
-    s = f"v2_f{telescope.focal_length}_w{camera.sensor_width}_h{camera.sensor_height}_p{image_padding}"
-    return hashlib.md5(s.encode()).hexdigest()[:12]
+def get_setup_hash(fov_w_deg: float, fov_h_deg: float, image_padding: float) -> str:
+    # Readable cache folder name based on FOV and padding
+    # Format: fov_W.WW_H.HH_pP.PP
+    # We use 2 decimal places for the folder name to keep it clean but sufficiently unique
+    return f"fov_{fov_w_deg:.2f}_{fov_h_deg:.2f}_p{image_padding:.2f}"
 
 def get_cache_info(object_name: str, setup_hash: str) -> Tuple[str, str, str]:
     # Sanitize filename aggressively to prevent OS errors (especially on Windows)
@@ -259,7 +260,10 @@ async def event_stream(request: Request, settings: dict):
         min_altitude = settings.get('min_altitude', 30.0)
         image_padding = settings.get('image_padding', 1.05)
 
-        setup_hash = get_setup_hash(telescope, camera, image_padding)
+        fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
+        fov_w_deg, fov_h_deg = fov_w_arcmin / 60.0, fov_h_arcmin / 60.0
+        
+        setup_hash = get_setup_hash(fov_w_deg, fov_h_deg, image_padding)
         
         processed_objects = await asyncio.to_thread(get_sorted_objects, settings, telescope, camera, location)
         
@@ -286,8 +290,7 @@ async def event_stream(request: Request, settings: dict):
         top_objects = processed_objects[:200]
         print(f"--- Streaming detailed data for {len(top_objects)} objects ---")
         
-        fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
-        fov_w_deg, fov_h_deg = fov_w_arcmin / 60.0, fov_h_arcmin / 60.0
+        # fov_w_deg and fov_h_deg already calculated above
         
         # Calculate download FOV: Max dimension + padding
         # User requested: "take the calculated FOV (camera+telescope) and then add 5% margin to the longer sider"
@@ -535,10 +538,10 @@ async def download_object_endpoint(request: Request):
         camera = Camera(**data['settings']['camera'])
         image_padding = data['settings'].get('image_padding', 1.05)
         
-        setup_hash = get_setup_hash(telescope, camera, image_padding)
-        
         fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
         fov_w_deg, fov_h_deg = fov_w_arcmin / 60.0, fov_h_arcmin / 60.0
+        
+        setup_hash = get_setup_hash(fov_w_deg, fov_h_deg, image_padding)
         max_fov_deg = max(fov_w_deg, fov_h_deg)
         download_fov = max(max_fov_deg * image_padding, 0.25)
         
