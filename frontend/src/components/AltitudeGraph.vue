@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 
 const props = defineProps(['object', 'location', 'nightTimes']);
 
@@ -8,6 +8,11 @@ const showMoon = ref(true);
 const width = 300;
 const height = 150; // Increased height
 const maxAlt = 90;
+
+// Interactive State
+const hoverX = ref(null);
+const hoverTime = ref(null);
+const hoverAlt = ref(null);
 
 const getX = (timeStr) => {
     if (!props.object || !props.object.altitude_graph || props.object.altitude_graph.length === 0) return 0;
@@ -22,6 +27,11 @@ const getX = (timeStr) => {
     const pct = (target - start) / range;
     return pct * width;
 };
+
+// Calculate "Now" position
+const nowX = computed(() => {
+    return getX(new Date().toISOString());
+});
 
 // Generate Time Ticks (Full hours and half hours)
 const timeTicks = computed(() => {
@@ -110,16 +120,58 @@ const nightZones = computed(() => {
         }
     };
 
-    mapZone('civil', '#3b82f6', 0.2);
+    // Removed civil twilight as requested
     mapZone('nautical', '#2563eb', 0.3);
     mapZone('astronomical', '#1d4ed8', 0.4);
     mapZone('night', '#1e3a8a', 0.5);
     mapZone('astronomical_morn', '#1d4ed8', 0.4);
     mapZone('nautical_morn', '#2563eb', 0.3);
-    mapZone('civil_morn', '#3b82f6', 0.2);
 
     return zones;
 });
+
+const handleMouseMove = (e) => {
+    if (!props.object || !props.object.altitude_graph || props.object.altitude_graph.length === 0) return;
+
+    // Use currentTarget to ensure we get the SVG's rect, not a child element's
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    
+    // Scale mouse position to SVG coordinate system
+    const scaleX = width / rect.width;
+    const svgX = x * scaleX;
+
+    // Constrain X
+    const constrainedX = Math.max(0, Math.min(width, svgX));
+    hoverX.value = constrainedX;
+
+    // Calculate Time
+    const start = new Date(props.object.altitude_graph[0].time).getTime();
+    const end = new Date(props.object.altitude_graph[props.object.altitude_graph.length - 1].time).getTime();
+    const range = end - start;
+    const timeAtX = new Date(start + (constrainedX / width) * range);
+    
+    hoverTime.value = timeAtX.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    // Calculate Altitude (approximate linear interpolation)
+    // Find closest points
+    const idx = (constrainedX / width) * (props.object.altitude_graph.length - 1);
+    const i1 = Math.floor(idx);
+    const i2 = Math.ceil(idx);
+    
+    if (props.object.altitude_graph[i1] && props.object.altitude_graph[i2]) {
+        const alt1 = props.object.altitude_graph[i1].altitude;
+        const alt2 = props.object.altitude_graph[i2].altitude;
+        const pct = idx - i1;
+        hoverAlt.value = (alt1 + (alt2 - alt1) * pct).toFixed(1);
+    }
+};
+
+const handleMouseLeave = () => {
+    hoverX.value = null;
+    hoverTime.value = null;
+    hoverAlt.value = null;
+};
 </script>
 
 <template>
@@ -138,7 +190,13 @@ const nightZones = computed(() => {
             </div>
         </div>
         <div class="chart-container">
-             <svg :viewBox="`0 0 ${width} ${height + 20}`" preserveAspectRatio="none" class="chart-svg">
+             <svg 
+                :viewBox="`0 0 ${width} ${height + 20}`" 
+                preserveAspectRatio="none" 
+                class="chart-svg"
+                @mousemove="handleMouseMove"
+                @mouseleave="handleMouseLeave"
+             >
                 <g class="graph-area">
                     <!-- Night Zones -->
                     <rect
@@ -164,6 +222,12 @@ const nightZones = computed(() => {
 
                     <!-- Moon Graph -->
                     <path v-if="moonPath" :d="moonPath" fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,2" />
+                    
+                    <!-- Now Line -->
+                    <line v-if="nowX > 0 && nowX < width" :x1="nowX" y1="0" :x2="nowX" :y2="height" stroke="#ef4444" stroke-width="1" stroke-dasharray="2" />
+                    
+                    <!-- Hover Line -->
+                    <line v-if="hoverX !== null" :x1="hoverX" y1="0" :x2="hoverX" :y2="height" stroke="#fff" stroke-width="1" />
                 </g>
 
                 <!-- Labels -->
@@ -192,6 +256,13 @@ const nightZones = computed(() => {
                             text-anchor="middle"
                         >{{ tick.label }}</text>
                     </g>
+                </g>
+                
+                <!-- Hover Tooltip (Simulated with text/rect) -->
+                <g v-if="hoverX !== null && hoverTime">
+                    <rect :x="Math.min(width - 70, Math.max(0, hoverX - 35))" :y="10" width="70" height="30" rx="4" fill="rgba(0,0,0,0.8)" stroke="#666" />
+                    <text :x="Math.min(width - 35, Math.max(35, hoverX))" :y="22" fill="#fff" font-size="10" text-anchor="middle" font-weight="bold">{{ hoverTime }}</text>
+                    <text :x="Math.min(width - 35, Math.max(35, hoverX))" :y="34" fill="#10b981" font-size="10" text-anchor="middle">{{ hoverAlt }}°</text>
                 </g>
              </svg>
         </div>
@@ -229,6 +300,7 @@ const nightZones = computed(() => {
 .chart-svg {
     width: 100%;
     height: 100%;
+    cursor: crosshair;
 }
 .legend-inline {
     display: flex;

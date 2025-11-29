@@ -125,13 +125,13 @@ class AstroCalculator:
 
         # Target Altitudes
         target_altaz = target_coords.transform_to(altaz_frame)
-        target_points = [AltitudePoint(time=t.isot, altitude=round(alt.deg, 2)) for t, alt in zip(times, target_altaz.alt)]
+        target_points = [AltitudePoint(time=t.isot + 'Z', altitude=round(alt.deg, 2)) for t, alt in zip(times, target_altaz.alt)]
 
         # Moon Altitudes
         try:
             moon_coords = get_body("moon", times, location=observer_location)
             moon_altaz = moon_coords.transform_to(altaz_frame)
-            moon_points = [AltitudePoint(time=t.isot, altitude=round(alt.deg, 2)) for t, alt in zip(times, moon_altaz.alt)]
+            moon_points = [AltitudePoint(time=t.isot + 'Z', altitude=round(alt.deg, 2)) for t, alt in zip(times, moon_altaz.alt)]
         except Exception as e:
             print(f"Error calculating moon altitude: {e}")
             moon_points = []
@@ -278,7 +278,7 @@ class AstroCalculator:
             
             # Helper to safely add period if valid
             def add_p(name, start, end):
-                if start < end: periods[name] = [start.isot, end.isot]
+                if start < end: periods[name] = [start.isot + 'Z', end.isot + 'Z']
 
             add_p("civil", sunset, eve_civil)
             add_p("nautical", eve_civil, eve_nautical)
