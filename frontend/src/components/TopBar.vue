@@ -174,7 +174,6 @@ const locationDisplay = computed(() => {
     }
     return "Location";
 });
-
 </script>
 
 <template>
@@ -287,8 +286,6 @@ const locationDisplay = computed(() => {
     <!-- Stream Status -->
     <div class="tb-item">
         <span class="status-text">{{ streamStatus }}</span>
-        <button v-if="streamStatus !== 'Stopped'" class="small secondary" @click="$emit('stop-stream')">Stop</button>
-        <button v-else class="small primary" @click="$emit('start-stream')">Start</button>
     </div>
   </div>
 </template>

@@ -1,7 +1,8 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 
-const props = defineProps(['object', 'settings']);
+const props = defineProps(['object', 'settings', 'clientSettings']);
+const emit = defineEmits(['update-settings', 'update-client-settings']);
 
 const rotation = ref(0);
 const offsetX = ref(0);
@@ -178,21 +179,22 @@ onUnmounted(() => {
 <template>
   <article class="framing-panel">
     <header class="framing-header">
-        <div class="controls-row">
+        <!-- Left: Framing Controls -->
+        <div class="controls-section left">
              <div class="group">
-                <strong>FOV (deg):</strong>
+                <strong>FOV:</strong>
                 <button class="outline small" @click="currentFov = parseFloat((currentFov * 1.1).toFixed(2))">+</button>
-                <input type="number" v-model.number="currentFov" step="0.1" class="fov-input" />
+                <input type="number" v-model.number="currentFov" step="0.1" class="input-sm" style="width: 50px;" />
                 <button class="outline small" @click="currentFov = parseFloat((currentFov * 0.9).toFixed(2))">-</button>
-                <button @click="fetchCustomFov" :disabled="isFetching">{{ isFetching ? '...' : 'Fetch' }}</button>
+                <button @click="fetchCustomFov" :disabled="isFetching" class="small">{{ isFetching ? '...' : 'Get' }}</button>
              </div>
              <div class="group">
                 <strong>Rot:</strong>
                 <button class="outline small" @click="rotation -= 5">↺</button>
-                <input type="number" v-model.number="rotation" class="rot-input" />
+                <input type="number" v-model.number="rotation" class="input-sm" style="width: 50px;" />
                 <button class="outline small" @click="rotation += 5">↻</button>
              </div>
-             <button class="primary" @click="sendToNina">To N.I.N.A</button>
+             <button class="primary small" @click="sendToNina">N.I.N.A</button>
         </div>
     </header>
     
@@ -228,33 +230,38 @@ onUnmounted(() => {
     overflow: hidden;
 }
 .framing-header {
-    padding: 10px;
+    padding: 8px;
     background: #1f2937;
     border-bottom: 1px solid #374151;
-}
-.controls-row {
     display: flex;
-    gap: 15px;
+    justify-content: space-between;
     align-items: center;
-    justify-content: center;
     flex-wrap: wrap;
+    gap: 10px;
+}
+.controls-section {
+    display: flex;
+    gap: 10px;
+    align-items: center;
 }
 .group {
     display: flex;
-    gap: 5px;
+    gap: 2px;
     align-items: center;
+    font-size: 0.85rem;
 }
-.fov-input, .rot-input {
-    width: 70px;
-    font-size: 0.9rem;
-    padding: 2px 5px;
+.input-sm {
     background: #000;
     color: white;
     border: 1px solid #4b5563;
+    padding: 2px 4px;
+    font-size: 0.85rem;
+    width: 40px;
+    text-align: center;
 }
 .small {
-    padding: 2px 8px;
-    font-size: 0.9rem;
+    padding: 2px 6px;
+    font-size: 0.8rem;
 }
 .framing-viewport {
     flex: 1;

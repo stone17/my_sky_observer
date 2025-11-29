@@ -330,14 +330,28 @@ def auto_stretch_image(image_bytes: bytes) -> bytes:
             TARGET_MEAN = 60.0
             
             if current_mean > 1.0:
-                norm_mean = current_mean / 255.0
-                norm_target = TARGET_MEAN / 255.0
-                try:
-                    gamma = math.log(norm_target) / math.log(norm_mean)
-                    gamma = max(0.2, min(gamma, 3.0)) # Limit gamma
-                    stretched = 255.0 * np.power(stretched / 255.0, gamma)
-                    stretched = np.clip(stretched, 0, 255)
-                except: pass
+                # Binary search for gamma to target the mean robustly
+                # Jensen's inequality prevents analytic solution from being accurate on skewed distributions
+                g_min, g_max = 0.1, 10.0
+                best_gamma = 1.0
+                
+                # Normalize pixels once for speed
+                norm_pixels = valid_stretched / 255.0
+                
+                for _ in range(10): 
+                    g_mid = (g_min + g_max) / 2
+                    # Calculate mean with this gamma
+                    temp_mean = np.mean(np.power(norm_pixels, g_mid)) * 255.0
+                    
+                    if temp_mean > TARGET_MEAN:
+                        g_min = g_mid
+                    else:
+                        g_max = g_mid
+                    
+                    best_gamma = g_mid
+                
+                stretched = 255.0 * np.power(stretched / 255.0, best_gamma)
+                stretched = np.clip(stretched, 0, 255)
         
         stretched = stretched.astype(np.uint8)
         

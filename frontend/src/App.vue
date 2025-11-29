@@ -1,11 +1,15 @@
 <script setup>
-import { ref, onMounted, watch, onUnmounted } from 'vue';
+import { ref, onMounted, watch, onUnmounted, computed } from 'vue';
 import TopBar from './components/TopBar.vue';
 import ObjectList from './components/ObjectList.vue';
 import Framing from './components/Framing.vue';
 import AltitudeGraph from './components/AltitudeGraph.vue';
 
 const settings = ref({});
+const clientSettings = ref({
+    max_magnitude: 12.0,
+    min_size: 0.0
+});
 const objects = ref([]);
 const selectedObject = ref(null);
 const streamStatus = ref('Idle');
@@ -35,15 +39,12 @@ const saveSettings = async (newSettings) => {
 const startStream = (forceDownload = false) => {
   if (eventSource) eventSource.close();
   
-  // Stale Data Pattern: Don't clear objects immediately.
-  // We will clear them when the first new object arrives.
-  let isFirstChunk = true;
+  // Buffered Update Pattern:
+  // 1. Accumulate new objects in a separate array (bufferedObjects).
+  // 2. Don't touch objects.value or selectedObject.value yet.
+  // 3. On 'close' (stream complete), swap objects.value with bufferedObjects.
   
-  // Don't clear selectedObject immediately if we want to persist it, 
-  // but we might want to validate it exists in the new stream.
-  // For now, let's keep it null until we find it.
-  const lastSelectedId = localStorage.getItem('lastSelectedId');
-  // selectedObject.value = null; // Keep old selection visible too
+  let bufferedObjects = [];
   
   streamStatus.value = 'Connecting...';
 
@@ -82,36 +83,26 @@ const startStream = (forceDownload = false) => {
   });
 
   eventSource.addEventListener('object_data', (e) => {
-    if (isFirstChunk) {
-        objects.value = [];
-        isFirstChunk = false;
-        // Now we can clear selection if it's not valid anymore, 
-        // but let's wait to see if it appears in the stream?
-        // Actually, simpler to just clear it now to avoid confusion if it's gone.
-        selectedObject.value = null; 
-    }
-
     const obj = JSON.parse(e.data);
-    objects.value.push(obj);
-    
-    // Auto-select if matches last selection
-    if (lastSelectedId && obj.name === lastSelectedId && !selectedObject.value) {
-        selectedObject.value = obj;
-    }
-    // If no last selection, maybe select the first one? 
-    // User asked: "I want to see the first target directly (based on last selection)"
-    // If no last selection, selecting the first one is a good default.
-    else if (!lastSelectedId && objects.value.length === 1) {
-        selectedObject.value = obj;
-    }
+    // Push to buffer instead of live list
+    bufferedObjects.push(obj);
   });
 
   eventSource.addEventListener('image_status', (e) => {
     const statusData = JSON.parse(e.data);
+    
+    // Update in current list (so user sees progress if looking at old list)
     const obj = objects.value.find(o => o.name === statusData.name);
     if (obj) {
       obj.status = statusData.status;
       if (statusData.url) obj.image_url = statusData.url;
+    }
+    
+    // Update in buffer (so new list has correct status when swapped)
+    const bufObj = bufferedObjects.find(o => o.name === statusData.name);
+    if (bufObj) {
+        bufObj.status = statusData.status;
+        if (statusData.url) bufObj.image_url = statusData.url;
     }
   });
 
@@ -119,6 +110,27 @@ const startStream = (forceDownload = false) => {
     streamStatus.value = 'Stream Complete';
     eventSource.close();
     eventSource = null;
+    
+    // Atomic Swap
+    console.log("Stream complete. Swapping lists.");
+    
+    // 1. Preserve selection if possible
+    const currentSelectedName = selectedObject.value?.name;
+    
+    // 2. Swap
+    objects.value = bufferedObjects;
+    
+    // 3. Restore selection (find new instance with fresh data)
+    if (currentSelectedName) {
+        const newInstance = objects.value.find(o => o.name === currentSelectedName);
+        if (newInstance) {
+            selectedObject.value = newInstance;
+        } 
+        // If not found, we keep the old selectedObject (stale) so framing doesn't disappear.
+    } else if (objects.value.length > 0 && !selectedObject.value) {
+        // If nothing was selected, maybe select first?
+        // selectedObject.value = objects.value[0];
+    }
   });
 
   eventSource.addEventListener('error', (e) => {
@@ -181,15 +193,29 @@ watch(selectedObject, async (newVal) => {
 });
 
 // Auto-restart stream on settings change (Debounced)
+// Only watch parameters that require a backend reload
+const streamParams = computed(() => {
+    return {
+        loc: settings.value.location,
+        tel: settings.value.telescope,
+        cam: settings.value.camera,
+        cats: settings.value.catalogs,
+        mode: settings.value.download_mode,
+        min_alt: settings.value.min_altitude,
+        min_hrs: settings.value.min_hours,
+        pad: settings.value.image_padding
+    };
+});
+
 let restartTimer = null;
-watch(settings, (newVal, oldVal) => {
+watch(streamParams, (newVal, oldVal) => {
     // Skip if initial load (empty oldVal)
-    if (!oldVal || Object.keys(oldVal).length === 0) return;
+    if (!oldVal) return;
 
     if (restartTimer) clearTimeout(restartTimer);
     
     restartTimer = setTimeout(() => {
-        console.log("Settings changed, restarting stream...");
+        console.log("Stream params changed, restarting stream...");
         startStream();
     }, 1000);
 }, { deep: true });
@@ -241,7 +267,13 @@ onUnmounted(() => {
       <!-- Left: Main Framing -->
       <section class="framing-section">
         <div v-if="selectedObject" class="fill-height">
-             <Framing :object="selectedObject" :settings="settings" />
+             <Framing 
+                :object="selectedObject" 
+                :settings="settings" 
+                :clientSettings="clientSettings"
+                @update-settings="saveSettings"
+                @update-client-settings="Object.assign(clientSettings, $event)"
+             />
         </div>
         <div v-else class="empty-state">
              <h2>Select an object to view</h2>
@@ -263,9 +295,11 @@ onUnmounted(() => {
                 :objects="objects"
                 :selectedId="selectedObject?.name"
                 :settings="settings"
+                :clientSettings="clientSettings"
                 :nightTimes="nightTimes"
                 @select="selectedObject = $event"
                 @update-settings="saveSettings"
+                @update-client-settings="Object.assign(clientSettings, $event)"
                 @fetch-all="startStream(true)"
              />
         </div>
