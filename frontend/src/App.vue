@@ -4,6 +4,7 @@ import TopBar from './components/TopBar.vue';
 import ObjectList from './components/ObjectList.vue';
 import Framing from './components/Framing.vue';
 import AltitudeGraph from './components/AltitudeGraph.vue';
+import TypeFilter from './components/TypeFilter.vue';
 
 const settings = ref({});
 const clientSettings = ref({
@@ -267,6 +268,24 @@ const handleKeydown = (e) => {
 
 onMounted(async () => {
   window.addEventListener('keydown', handleKeydown);
+  
+  // Restore client settings from localStorage
+  const savedClientSettings = localStorage.getItem('clientSettings');
+  if (savedClientSettings) {
+      try {
+          const parsed = JSON.parse(savedClientSettings);
+          // Merge to ensure new keys are preserved
+          Object.assign(clientSettings.value, parsed);
+      } catch (e) {
+          console.error("Failed to parse saved client settings", e);
+      }
+  }
+
+  // Watch for changes to persist
+  watch(clientSettings, (newVal) => {
+      localStorage.setItem('clientSettings', JSON.stringify(newVal));
+  }, { deep: true });
+
   await fetchSettings();
   startStream(); // Auto-start
 });
@@ -295,7 +314,6 @@ onUnmounted(() => {
                 :object="selectedObject" 
                 :settings="settings" 
                 :clientSettings="clientSettings"
-                :availableTypes="availableTypes"
                 @update-settings="saveSettings"
                 @update-client-settings="Object.assign(clientSettings, $event)"
              />
@@ -304,6 +322,15 @@ onUnmounted(() => {
              <h2>Select an object to view</h2>
              <p>Configure settings in the top bar and start the search.</p>
         </div>
+      </section>
+
+      <!-- Middle: Vertical Type Filter -->
+      <section class="filter-section">
+          <TypeFilter
+            :availableTypes="availableTypes"
+            :clientSettings="clientSettings"
+            @update-client-settings="Object.assign(clientSettings, $event)"
+          />
       </section>
 
       <!-- Right: Graph + List -->
@@ -330,6 +357,15 @@ onUnmounted(() => {
         </div>
       </aside>
     </div>
+
+    <!-- Bottom Bar (Footer) -->
+    <footer class="bottom-bar">
+        <div class="footer-content">
+            <span>My Sky Observer v1.0</span>
+            <span class="separator">|</span>
+            <span>{{ objects.length }} Objects Loaded</span>
+        </div>
+    </footer>
   </div>
 </template>
 
@@ -362,9 +398,15 @@ body {
 }
 
 .framing-section {
-    flex: 2; /* Takes more space */
+    flex: 1; /* Takes remaining space */
     border-right: 1px solid var(--border-color);
     position: relative;
+    min-width: 0; /* Allow shrinking */
+}
+
+.filter-section {
+    width: auto; /* Width determined by content (TypeFilter width) */
+    border-right: 1px solid var(--border-color);
 }
 
 .fill-height {
@@ -381,11 +423,10 @@ body {
 }
 
 .sidebar {
-    flex: 1; /* Takes less space */
+    width: 400px; /* Fixed width for sidebar */
     display: flex;
     flex-direction: column;
-    min-width: 350px;
-    max-width: 500px;
+    flex-shrink: 0;
 }
 
 .graph-panel {
@@ -397,5 +438,25 @@ body {
 .list-panel {
     flex: 1;
     overflow: hidden;
+}
+
+.bottom-bar {
+    height: 30px;
+    background: #1f2937;
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    font-size: 0.8rem;
+    color: #9ca3af;
+}
+
+.footer-content {
+    display: flex;
+    gap: 10px;
+}
+
+.separator {
+    color: #4b5563;
 }
 </style>
