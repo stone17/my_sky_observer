@@ -58,24 +58,32 @@ class AstroCalculator:
             print(f"Error calculating session times: {e}")
             return now, now + 24 * u.hour
 
-    def get_max_altitude(self, dec: str, latitude: float) -> float:
+    def get_max_altitude(self, dec: float, latitude: float) -> float:
         """Calculates an object's maximum possible altitude. Very fast."""
         try:
-            dec_formatted = re.sub(r"[^\d.\-]", " ", dec).strip()
-            dec_angle = Angle(dec_formatted, unit=u.deg)
-            max_alt = 90 - abs(latitude - dec_angle.deg)
+            if isinstance(dec, (float, int)):
+                dec_deg = float(dec)
+            else:
+                dec_formatted = re.sub(r"[^\d.\-]", " ", str(dec)).strip()
+                dec_deg = Angle(dec_formatted, unit=u.deg).deg
+                
+            max_alt = 90 - abs(latitude - dec_deg)
             return max(0, max_alt)
         except Exception:
             return 0.0
 
-    def get_approx_hours_above(self, dec: str, latitude: float, min_altitude: float) -> float:
+    def get_approx_hours_above(self, dec: float, latitude: float, min_altitude: float) -> float:
         """
         Calculates the approximate duration (in hours) an object is above min_altitude.
         Uses the spherical trig formula for hour angle.
         """
         try:
-            dec_formatted = re.sub(r"[^\d.\-]", " ", dec).strip()
-            dec_deg = Angle(dec_formatted, unit=u.deg).deg
+            if isinstance(dec, (float, int)):
+                dec_deg = float(dec)
+            else:
+                dec_formatted = re.sub(r"[^\d.\-]", " ", str(dec)).strip()
+                dec_deg = Angle(dec_formatted, unit=u.deg).deg
+
             lat_rad = math.radians(latitude)
             dec_rad = math.radians(dec_deg)
             min_alt_rad = math.radians(min_altitude)
@@ -99,17 +107,32 @@ class AstroCalculator:
         except Exception:
             return 0.0
 
+    def batch_get_max_altitude(self, dec_array: np.ndarray, latitude: float) -> np.ndarray:
+        """
+        Vectorized calculation of max altitude for an array of declinations.
+        """
+        try:
+            # max_alt = 90 - abs(lat - dec)
+            # We assume dec_array is already float degrees
+            return np.maximum(0, 90 - np.abs(latitude - dec_array))
+        except Exception as e:
+            print(f"Error in batch_get_max_altitude: {e}")
+            return np.zeros_like(dec_array)
+
     def get_altitude_graph(self, ra: str, dec: str, location: Location, num_points: int = 60, start_time: Optional[Time] = None, end_time: Optional[Time] = None) -> Dict[str, List[AltitudePoint]]:
         """
         Generates altitude data for an object and the Moon.
         If start_time/end_time are not provided, calculates them for the current observing session.
         """
-        ra_formatted = re.sub(r"[^\d.\-]", " ", ra).strip()
-        dec_formatted = re.sub(r"[^\d.\-]", " ", dec).strip()
-        
         observer_location = EarthLocation(lat=location.latitude * u.deg, lon=location.longitude * u.deg)
         observer = Observer(location=observer_location)
-        target_coords = SkyCoord(ra_formatted, dec_formatted, unit=(u.hourangle, u.deg))
+        
+        if isinstance(ra, (float, int)) and isinstance(dec, (float, int)):
+             target_coords = SkyCoord(ra, dec, unit=(u.deg, u.deg))
+        else:
+             ra_formatted = re.sub(r"[^\d.\-]", " ", str(ra)).strip()
+             dec_formatted = re.sub(r"[^\d.\-]", " ", str(dec)).strip()
+             target_coords = SkyCoord(ra_formatted, dec_formatted, unit=(u.hourangle, u.deg))
 
         if start_time is None or end_time is None:
             start_time, end_time = self.get_observing_session(observer, Time.now())
@@ -165,16 +188,18 @@ class AstroCalculator:
         """
         try:
             # Handle potentially different input types
-            ra_str = str(ra).strip()
-            dec_str = str(dec).strip()
-
-            # Check if RA looks like degrees (float string) or HMS
-            if re.match(r'^[\d.]+$', ra_str):
-                unit = (u.deg, u.deg)
+            if isinstance(ra, (float, int)) and isinstance(dec, (float, int)):
+                 target_coords = SkyCoord(ra, dec, unit=(u.deg, u.deg))
             else:
-                unit = (u.hourangle, u.deg)
+                ra_str = str(ra).strip()
+                dec_str = str(dec).strip()
 
-            target_coords = SkyCoord(ra_str, dec_str, unit=unit)
+                # Check if RA looks like degrees (float string) or HMS
+                if re.match(r'^[\d.]+$', ra_str):
+                    unit = (u.deg, u.deg)
+                else:
+                    unit = (u.hourangle, u.deg)
+                target_coords = SkyCoord(ra_str, dec_str, unit=unit)
 
             # This is the heavy part, but frame is reused
             altitudes = target_coords.transform_to(altaz_frame).alt.deg
@@ -186,6 +211,40 @@ class AstroCalculator:
         except Exception as e:
             # print(f"Error in nightly calc: {e}")
             return 0.0
+
+    def batch_calculate_nightly_hours(self, ra_array: np.ndarray, dec_array: np.ndarray, altaz_frame: AltAz, duration: float, min_altitude: float) -> np.ndarray:
+        """
+        Vectorized calculation of nightly hours visible.
+        ra_array, dec_array: numpy arrays of float degrees.
+        """
+        try:
+            # Create a single SkyCoord object with all targets
+            # Reshape to (N, 1) to broadcast against (M,) time points
+            targets = SkyCoord(ra_array, dec_array, unit=(u.deg, u.deg))[:, np.newaxis]
+            
+            # Transform all targets to AltAz frame
+            # Result shape: (N_targets, N_times)
+            target_altaz = targets.transform_to(altaz_frame)
+            
+            # Get altitudes in degrees
+            altitudes = target_altaz.alt.deg
+            
+            # Count how many time points are above min_altitude for each target
+            # axis=1 aggregates over time
+            count_above = np.sum(altitudes >= min_altitude, axis=1)
+            
+            # Calculate hours
+            # altitudes shape is (N_targets, N_times)
+            num_times = altitudes.shape[1]
+            if num_times == 0:
+                return np.zeros_like(ra_array)
+                
+            hours = (count_above / num_times) * duration
+            return np.round(hours, 1)
+            
+        except Exception as e:
+            print(f"Error in batch_calculate_nightly_hours: {e}")
+            return np.zeros_like(ra_array)
 
     def calculate_time_above_altitude(self, altitude_points: List[AltitudePoint], min_altitude: float, twilight_periods: Optional[Dict[str, List[str]]] = None) -> float:
         """

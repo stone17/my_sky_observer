@@ -89,27 +89,27 @@ const calculateHoursVisible = (altitudeGraph, minAltitude, nightTimes) => {
 
 const suggestionList = computed(() => {
     const q = searchQuery.value.trim();
-    // Regex: Starts with letters, optional space, then digits (e.g. "M 3", "ngc 2")
-    if (!q || !/[a-zA-Z]+\s*\d+/.test(q)) return [];
+    // Allow any non-empty search
+    if (!q) return [];
 
     const lowerQ = q.toLowerCase().replace(/\s+/g, '');
     
     // Filter objects that match
     const matches = props.objects.filter(o => {
-        const name = o.name.toLowerCase().replace(/\s+/g, '');
-        return name.startsWith(lowerQ);
+        const id = o.name.toLowerCase().replace(/\s+/g, '');
+        const common = (o.common_name || '').toLowerCase();
+        const other = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
+        return id.startsWith(lowerQ) || common.includes(q.toLowerCase()) || other.includes(lowerQ);
     });
 
-    // Return top 10 names
-    return matches.slice(0, 10).map(o => o.name);
+    // Return top 10 objects
+    return matches.slice(0, 10);
 });
 
-const selectSuggestion = (name) => {
-    searchQuery.value = name;
+const selectSuggestion = (obj) => {
+    searchQuery.value = obj.name;
     showSuggestions.value = false;
-    // Also try to select it if it exists
-    const obj = props.objects.find(o => o.name === name);
-    if (obj) emit('select', obj);
+    emit('select', obj);
 };
 
 const filteredAndSortedObjects = computed(() => {
@@ -120,27 +120,54 @@ const filteredAndSortedObjects = computed(() => {
     const sortKey = props.settings?.sort_key || 'time';
 
     // Calculate dynamic visibility for all objects first
-    // We wrap the original object to preserve reactivity references, avoiding { ...o } shallow copies
     let result = props.objects.map(o => {
-        const dynamicHours = calculateHoursVisible(
-            o.altitude_graph, 
-            minAlt, 
-            props.nightTimes
-        );
+        const dynamicHours = o.hours_visible || 0;
         return { obj: o, dynamicHoursVisible: dynamicHours };
     });
 
+    if (props.objects.length > 0) {
+        console.log("DEBUG: Settings:", props.settings);
+        console.log("DEBUG: Client Settings:", props.clientSettings);
+        console.log("DEBUG: Filters -> MinAlt:", minAlt, "MinHrs:", minHrs, "MaxMag:", maxMag, "MinSize:", minSize);
+        
+        const testObj = props.objects[0];
+        const testItem = result.find(r => r.obj === testObj);
+        
+        console.log("DEBUG: First Object Details:", {
+            name: testObj.name,
+            max_altitude: testObj.max_altitude,
+            hours_visible: testObj.hours_visible,
+            dynamicHoursVisible: testItem?.dynamicHoursVisible,
+            mag: testObj.mag,
+            size: testObj.maj_ax,
+            _backend_debug: testObj._debug_info
+        });
+
+        const testCheck = {
+            minHrs: minHrs > 0 && (testItem?.dynamicHoursVisible || 0) < minHrs,
+            minAlt: minAlt > 0 && (testObj.max_altitude || 0) < minAlt,
+            maxMag: maxMag !== undefined && testObj.mag !== undefined && testObj.mag > maxMag,
+            minSize: minSize > 0 && (testObj.maj_ax || 0) < minSize
+        };
+        console.log("DEBUG: First Object Filter Check (True means HIDDEN):", testCheck);
+    }
+
     const q = searchQuery.value.trim().toLowerCase();
 
-    // 1. Filter
     result = result.filter(item => {
         const o = item.obj;
-        // Search Bypass: If name matches search query (partial match), include it regardless of other filters
-        if (q && o.name.toLowerCase().includes(q)) {
-            return true;
+        
+        // Search Filter (Exclusive)
+        if (q) {
+            const matchId = o.name.toLowerCase().includes(q);
+            const matchName = o.common_name && o.common_name.toLowerCase().includes(q);
+            const matchOther = o.other_id && o.other_id.toLowerCase().includes(q);
+            
+            // If searching, ONLY show matches. Ignore other filters.
+            return matchId || matchName || matchOther;
         }
 
-        // Standard Filters
+        // Standard Filters (Only apply if NOT searching)
         if (minHrs > 0 && item.dynamicHoursVisible < minHrs) return false;
         if (minAlt > 0 && (o.max_altitude || 0) < minAlt) return false;
         
@@ -205,6 +232,23 @@ const getAltitudePath = (altitudeGraph) => {
     d += ` L ${width} ${height} Z`;
     return d;
 };
+
+const getInfoTooltip = (obj) => {
+    const parts = [];
+    if (obj.common_name && obj.common_name !== 'N/A') parts.push(`Name: ${obj.common_name}`);
+    if (obj.other_id) parts.push(`Other ID: ${obj.other_id}`);
+    if (obj.type) parts.push(`Type: ${obj.type}`);
+    if (obj.constellation) parts.push(`Const: ${obj.constellation}`);
+    if (obj.maj_ax) parts.push(`Size: ${obj.maj_ax}'`);
+    if (obj.surface_brightness) parts.push(`Surf Br: ${obj.surface_brightness}`);
+    return parts.join('\n');
+};
+
+const onSearchBlur = () => {
+    setTimeout(() => {
+        showSuggestions.value = false;
+    }, 200);
+};
 </script>
 
 <template>
@@ -256,16 +300,16 @@ const getAltitudePath = (altitudeGraph) => {
                     placeholder="Search object..." 
                     class="search-input"
                     @focus="showSuggestions = true"
-                    @blur="setTimeout(() => showSuggestions = false, 200)"
+                    @blur="onSearchBlur"
                  />
                  <div v-if="showSuggestions && suggestionList.length > 0" class="suggestions-dropdown">
                      <div 
                         v-for="s in suggestionList" 
-                        :key="s" 
+                        :key="s.name" 
                         class="suggestion-item"
                         @click="selectSuggestion(s)"
                      >
-                        {{ s }}
+                        {{ s.name }} <span v-if="s.common_name && s.common_name !== 'N/A'" style="color: #9ca3af; font-size: 0.8em;">- {{ s.common_name }}</span>
                      </div>
                  </div>
              </div>
@@ -284,7 +328,13 @@ const getAltitudePath = (altitudeGraph) => {
               <div class="card-content">
                   <!-- Left: Info -->
                   <div class="info-col">
-                      <h4 :title="item.obj.name">{{ item.obj.name || 'Unknown Object' }}</h4>
+                      <div style="display: flex; align-items: center; gap: 5px; width: 100%;">
+                          <h4 :title="item.obj.name">{{ item.obj.name }}</h4>
+                          <div class="info-icon" :title="getInfoTooltip(item.obj)">ⓘ</div>
+                      </div>
+                      <div v-if="item.obj.common_name && item.obj.common_name !== 'N/A'" class="common-name" :title="item.obj.common_name">
+                          {{ item.obj.common_name }}
+                      </div>
                       <small>
                         Mag: {{ item.obj.mag }}<br/>
                         Size: {{ item.obj.size }}<br/>
@@ -532,5 +582,20 @@ const getAltitudePath = (altitudeGraph) => {
 .altitude-chart {
     width: 100%;
     height: 100%;
+}
+
+.info-icon {
+    cursor: help;
+    color: #60a5fa;
+    font-size: 0.9rem;
+}
+
+.common-name {
+    font-size: 0.8rem;
+    color: #10b981;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 2px;
 }
 </style>

@@ -5,10 +5,11 @@ import os
 import hashlib
 import requests
 import shutil
+import numpy as np
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional, Union
 import pandas as pd
 from astropy.coordinates import SkyCoord, EarthLocation
 import astropy.units as u
@@ -103,7 +104,7 @@ async def download_and_cache_image(image_url: str, filepath: str, setup_dir: str
         print(f"    -> ERROR in download_and_cache_image: {e}")
         raise e
 
-async def download_image(ra: str, dec: str, fov: float, object_id: str, setup_hash: str) -> str:
+async def download_image(ra: float, dec: float, fov: float, object_id: str, setup_hash: str) -> str:
     """
     Unified function to download or retrieve an image from cache.
     Returns the web-accessible URL of the image.
@@ -118,8 +119,8 @@ async def download_image(ra: str, dec: str, fov: float, object_id: str, setup_ha
     await download_and_cache_image(live_url, filepath, setup_dir)
     return url
 
-def get_sky_survey_url(ra_hms: str, dec_dms: str, fov_in_degrees: float) -> str:
-    coords = SkyCoord(ra_hms, dec_dms, unit=(u.hourangle, u.deg))
+def get_sky_survey_url(ra_deg: float, dec_deg: float, fov_in_degrees: float) -> str:
+    coords = SkyCoord(ra_deg, dec_deg, unit=(u.deg, u.deg))
     download_fov = max(fov_in_degrees, 0.25)
     base_url = "https://skyview.gsfc.nasa.gov/current/cgi/runquery.pl"
     params = f"Survey=dss2r&Position={coords.ra.deg:.5f},{coords.dec.deg:.5f}&Size={download_fov:.4f}&Pixels=512&Return=JPG"
@@ -136,7 +137,9 @@ def get_sorted_objects(settings: dict, telescope: Telescope, camera: Camera, loc
         return []
 
     fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
-    filtered_objects = calculator.filter_objects_by_fov(all_objects, (fov_w_arcmin, fov_h_arcmin))
+    # filtered_objects = calculator.filter_objects_by_fov(all_objects, (fov_w_arcmin, fov_h_arcmin))
+    # We now send ALL objects to the frontend to allow searching hidden/large objects
+    filtered_objects = all_objects
     
     processed_objects = []
     sort_key = settings.get('sort_key', 'time')
@@ -147,54 +150,73 @@ def get_sorted_objects(settings: dict, telescope: Telescope, camera: Camera, loc
     night_start, night_end = None, None
     altaz_frame, night_duration = None, 0.0
 
-    if 'hours_above' in sort_key or min_hours > 0:
-        try:
-            twilight = calculator.get_twilight_periods(location)
-            if "night" in twilight:
-                night_start = Time(twilight["night"][0])
-                night_end = Time(twilight["night"][1])
+    # Always calculate twilight for hours_visible
+    try:
+        twilight = calculator.get_twilight_periods(location)
+        if "night" in twilight:
+            night_start = Time(twilight["night"][0])
+            night_end = Time(twilight["night"][1])
 
-                # Pre-calculate frame for fast batch processing
-                result = calculator.prepare_night_frame(location, night_start, night_end)
-                if result:
-                    altaz_frame, night_duration = result
-        except Exception as e:
-            print(f"Error calculating twilight for sort: {e}")
+            # Pre-calculate frame for fast batch processing
+            result = calculator.prepare_night_frame(location, night_start, night_end)
+            if result:
+                altaz_frame, night_duration = result
+    except Exception as e:
+        print(f"Error calculating twilight: {e}")
 
     # Pre-computation for sorting
-    for i, (_, obj) in enumerate(filtered_objects.iterrows()):
-        temp_obj = obj.to_dict()
+    # --- Vectorized Calculation ---
+    
+    # 1. Max Altitude (Vectorized)
+    # Ensure columns are numeric
+    all_decs = pd.to_numeric(filtered_objects['dec'], errors='coerce').fillna(0).values
+    all_ras = pd.to_numeric(filtered_objects['ra'], errors='coerce').fillna(0).values
+    
+    max_alts = calculator.batch_get_max_altitude(all_decs, location.latitude)
+    filtered_objects['max_altitude'] = max_alts
+    
+    # 2. Nightly Hours (Vectorized)
+    if altaz_frame is not None:
+        print(f"DEBUG: Calculating hours for {len(filtered_objects)} objects. Night duration: {night_duration}")
+        hours_vis = calculator.batch_calculate_nightly_hours(
+            all_ras, all_decs, altaz_frame, night_duration, min_altitude
+        )
+        print(f"DEBUG: Hours calculated. Shape: {hours_vis.shape}, Type: {type(hours_vis)}")
+        print(f"DEBUG: Hours sample (first 5): {hours_vis[:5]}")
+        filtered_objects['hours_visible'] = hours_vis
+    else:
+        print("DEBUG: altaz_frame is None. Setting hours_visible to 0.0")
+        filtered_objects['hours_visible'] = 0.0
+
+    # 3. Priority & Formatting
+    # Vectorized priority assignment
+    filtered_objects['priority'] = 2
+    # Case-insensitive check for 'MESSIER'
+    if 'catalog' in filtered_objects.columns:
+        is_messier = filtered_objects['catalog'].astype(str).str.upper() == 'MESSIER'
+        filtered_objects.loc[is_messier, 'priority'] = 1
         
-        priority = 2
-        if str(temp_obj.get('catalog', '')).upper() == 'MESSIER':
-            priority = 1
-        
-        # Metrics
-        metric_alt = calculator.get_max_altitude(temp_obj['dec'], location.latitude)
-        metric_mag = pd.to_numeric(temp_obj.get('mag', 99), errors='coerce')
-        metric_size = temp_obj['maj_ax']
+    # Ensure magnitude is numeric
+    filtered_objects['magnitude'] = pd.to_numeric(filtered_objects['mag'], errors='coerce').fillna(99)
+    # Ensure size is numeric
+    filtered_objects['size'] = pd.to_numeric(filtered_objects['maj_ax'], errors='coerce').fillna(0)
 
-        # Determine visibility duration
-        # If we have night periods, calculate nightly hours using fast method.
-        if altaz_frame is not None:
-            metric_hours = calculator.calculate_nightly_hours_fast(
-                temp_obj['ra'], temp_obj['dec'], altaz_frame, night_duration, min_altitude
-            )
-        else:
-            # User requested strict astronomical night visibility.
-            # If there is no astronomical night (altaz_frame is None), then visibility is 0.
-            metric_hours = 0.0
+    # Replace all NaN/Infinity with None for valid JSON
+    filtered_objects = filtered_objects.replace([np.nan, np.inf, -np.inf], None)
 
-        if metric_hours < min_hours:
-            continue
+    # DEBUG: Check columns before conversion
+    print(f"DEBUG: Columns before to_dict: {filtered_objects.columns.tolist()}")
+    if 'hours_visible' not in filtered_objects.columns:
+        print("CRITICAL: hours_visible column MISSING!")
+    else:
+        print(f"DEBUG: hours_visible column present. First value: {filtered_objects['hours_visible'].iloc[0]}")
 
-        temp_obj['max_altitude'] = metric_alt
-        temp_obj['magnitude'] = metric_mag
-        temp_obj['size'] = metric_size
-        temp_obj['hours_visible'] = metric_hours
-        temp_obj['priority'] = priority
-
-        processed_objects.append(temp_obj)
+    # Convert to list of dicts
+    processed_objects = filtered_objects.to_dict('records')
+    
+    if processed_objects:
+        print(f"DEBUG: First processed object keys: {list(processed_objects[0].keys())}")
+        print(f"DEBUG: First processed object hours_visible: {processed_objects[0].get('hours_visible')}")
 
     sort_keys = sort_key.split(',') if sort_key else ['time']
 
@@ -216,20 +238,33 @@ def get_sorted_objects(settings: dict, telescope: Telescope, camera: Camera, loc
 
     processed_objects.sort(key=sort_function)
         
+    # DEBUG: Add debug info to first object
+    if processed_objects:
+        processed_objects[0]['_debug_info'] = {
+            'columns_present': 'hours_visible' in filtered_objects.columns,
+            'hours_val': processed_objects[0].get('hours_visible'),
+            'night_duration': night_duration,
+            'altaz_frame_ok': altaz_frame is not None
+        }
+
     return processed_objects
 
 # --- N.I.N.A Integration ---
 
 class NinaFramingRequest(BaseModel):
-    ra: str
-    dec: str
+    ra: Union[float, str]
+    dec: Union[float, str]
     rotation: float = 0.0
 
 @app.post("/api/nina/framing")
 async def send_to_nina(request: NinaFramingRequest):
     nina_url = "http://localhost:1888/api/v1/framing/manualtarget"
     try:
-        coords = SkyCoord(request.ra, request.dec, unit=(u.hourangle, u.deg))
+        if isinstance(request.ra, (float, int)) and isinstance(request.dec, (float, int)):
+             coords = SkyCoord(request.ra, request.dec, unit=(u.deg, u.deg))
+        else:
+             coords = SkyCoord(request.ra, request.dec, unit=(u.hourangle, u.deg))
+             
         payload = {
             "RightAscension": coords.ra.deg,
             "Declination": coords.dec.deg,
@@ -336,6 +371,11 @@ async def event_stream(request: Request, settings: dict):
             
             result_obj = {
                 "name": object_id, 
+                "common_name": obj_dict.get('name', 'N/A'),
+                "type": obj_dict.get('type', ''),
+                "constellation": obj_dict.get('constellation', ''),
+                "other_id": obj_dict.get('other_id', ''),
+                "surface_brightness": obj_dict.get('surface_brightness', ''),
                 "ra": obj_dict['ra'], 
                 "dec": obj_dict['dec'], 
                 "catalog": obj_dict['catalog'], 
@@ -346,11 +386,13 @@ async def event_stream(request: Request, settings: dict):
                 "fov_rectangle": fov_rect.model_dump(),
                 "image_fov": download_fov, # Explicit FOV of the image
                 "hours_above_min": hours_above_min, 
+                "hours_visible": obj_dict.get('hours_visible', 0), # Vectorized calculation
                 "maj_ax": obj_dict['maj_ax'], 
                 "mag": obj_dict.get('mag', 99), 
                 "max_altitude": obj_dict.get('max_altitude', 0), # Added for client-side sorting
                 "setup_hash": setup_hash, 
-                "status": status 
+                "status": status,
+                "_debug_info": obj_dict.get('_debug_info')
             }
             yield f"event: object_data\ndata: {json.dumps(result_obj)}\n\n"
 
@@ -511,8 +553,8 @@ def purge_cache():
 
 # Fetch Custom Image (with specific FOV)
 class FetchImageRequest(BaseModel):
-    ra: str
-    dec: str
+    ra: float
+    dec: float
     fov: float # in degrees
 
 @app.post("/api/fetch-custom-image")
