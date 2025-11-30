@@ -12,7 +12,18 @@
     "city_name": "Lund"
   },
   "catalogs": [
-    "messier"
+    "abell",
+    "barnard",
+    "berkeley",
+    "collinder",
+    "ic",
+    "messier",
+    "ngc",
+    "others",
+    "pk",
+    "ruprecht",
+    "sharpless",
+    "ugc"
   ],
   "min_altitude": 30,
   "min_hours": 2,

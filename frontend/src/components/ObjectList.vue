@@ -138,6 +138,10 @@ const filteredAndSortedObjects = computed(() => {
         // Min Size (Smaller than X is filtered out)
         if (minSize > 0 && (o.maj_ax || 0) < minSize) return false;
 
+        // Type Filter
+        const selectedTypes = props.clientSettings?.selected_types || [];
+        if (selectedTypes.length > 0 && !selectedTypes.includes(o.type)) return false;
+
         return true;
     });
 

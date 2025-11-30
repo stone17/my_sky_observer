@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 
-const props = defineProps(['object', 'settings', 'clientSettings']);
+const props = defineProps(['object', 'settings', 'clientSettings', 'availableTypes']);
 const emit = defineEmits(['update-settings', 'update-client-settings']);
 
 const rotation = ref(0);
@@ -11,6 +11,7 @@ const isDragging = ref(false);
 const dragStart = ref({ x: 0, y: 0 });
 const customImageUrl = ref(null);
 const isFetching = ref(false);
+const showTypeFilter = ref(false);
 
 // ResizeObserver State
 const viewportRef = ref(null);
@@ -179,8 +180,35 @@ onUnmounted(() => {
 <template>
   <article class="framing-panel">
     <header class="framing-header">
-        <!-- Left: Framing Controls -->
-        <div class="controls-section left">
+        <div class="header-left">
+            <h2>{{ object.name }}</h2>
+            <span class="subtitle">{{ object.constellation }}</span>
+        </div>
+        
+        <!-- Type Filter (Right Aligned) -->
+        <div class="header-right">
+            <div class="type-filter relative">
+                <button class="filter-btn" @click="showTypeFilter = !showTypeFilter">
+                    Type Filter ▼
+                </button>
+                <div class="dropdown-menu right-aligned" v-if="showTypeFilter">
+                    <div class="checkbox-col">
+                        <label v-for="type in availableTypes" :key="type">
+                            <input type="checkbox" :value="type" v-model="clientSettings.selected_types" @change="$emit('update-client-settings', clientSettings)">
+                            {{ type }}
+                        </label>
+                    </div>
+                    <div v-if="!availableTypes || availableTypes.length === 0" style="padding: 5px; color: #aaa;">
+                        No types found
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <div class="controls-bar">
+         <!-- Left: Framing Controls -->
+         <div class="controls-section left">
              <div class="group">
                 <strong>FOV:</strong>
                 <button class="outline small" @click="currentFov = parseFloat((currentFov * 1.1).toFixed(2))">+</button>
@@ -196,7 +224,7 @@ onUnmounted(() => {
              </div>
              <button class="primary small" @click="sendToNina">N.I.N.A</button>
         </div>
-    </header>
+    </div>
     
     <div class="framing-viewport" ref="viewportRef" @mousemove="onDrag" @mouseup="stopDrag" @mouseleave="stopDrag">
         <!-- Image Layer -->
@@ -237,8 +265,61 @@ onUnmounted(() => {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    flex-wrap: wrap;
+}
+.header-left {
+    display: flex;
+    align-items: baseline;
     gap: 10px;
+}
+.header-left h2 {
+    margin: 0;
+    font-size: 1.5rem;
+    color: #fff;
+}
+.subtitle {
+    color: #9ca3af;
+    font-size: 0.9rem;
+}
+.header-right {
+    position: relative;
+}
+.filter-btn {
+    background: #374151;
+    border: 1px solid #4b5563;
+    color: white;
+    padding: 5px 10px;
+    cursor: pointer;
+    border-radius: 4px;
+}
+.dropdown-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    background: #1f2937;
+    border: 1px solid #4b5563;
+    padding: 10px;
+    z-index: 50;
+    min-width: 150px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+}
+.checkbox-col {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+.checkbox-col label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.controls-bar {
+    padding: 8px;
+    background: #1f2937;
+    border-bottom: 1px solid #374151;
 }
 .controls-section {
     display: flex;

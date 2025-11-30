@@ -518,6 +518,10 @@ async def stream_objects(request: Request, focal_length: float, sensor_width: fl
 # Profile Management
 PROFILES_FILE = "profiles.json"
 
+@app.get("/api/catalogs")
+def get_catalogs():
+    return CatalogManager.get_available_catalogs()
+
 @app.get("/api/profiles")
 def get_profiles():
     if os.path.exists(PROFILES_FILE):

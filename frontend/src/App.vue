@@ -8,7 +8,8 @@ import AltitudeGraph from './components/AltitudeGraph.vue';
 const settings = ref({});
 const clientSettings = ref({
     max_magnitude: 12.0,
-    min_size: 0.0
+    min_size: 0.0,
+    selected_types: []
 });
 const objects = ref([]);
 const selectedObject = ref(null);
@@ -190,6 +191,15 @@ watch(selectedObject, async (newVal) => {
     }
 });
 
+// Compute available types for filter
+const availableTypes = computed(() => {
+    const types = new Set();
+    objects.value.forEach(o => {
+        if (o.type) types.add(o.type);
+    });
+    return Array.from(types).sort();
+});
+
 // Auto-restart stream on settings change (Debounced)
 // Only watch parameters that require a backend reload
 const streamParams = computed(() => {
@@ -285,6 +295,7 @@ onUnmounted(() => {
                 :object="selectedObject" 
                 :settings="settings" 
                 :clientSettings="clientSettings"
+                :availableTypes="availableTypes"
                 @update-settings="saveSettings"
                 @update-client-settings="Object.assign(clientSettings, $event)"
              />

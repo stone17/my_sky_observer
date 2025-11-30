@@ -55,6 +55,19 @@ const fetchCacheStatus = async () => {
     } catch (e) { console.error(e); }
 };
 
+const availableCatalogs = ref([]);
+const fetchCatalogs = async () => {
+    try {
+        const res = await fetch('/api/catalogs');
+        if (res.ok) availableCatalogs.value = await res.json();
+    } catch (e) { console.error(e); }
+};
+
+const selectAllCatalogs = () => {
+    localSettings.value.catalogs = [...availableCatalogs.value];
+    emit('update-settings', localSettings.value);
+};
+
 // Sync settings
 watch(() => props.settings, (newVal) => {
     if (newVal) {
@@ -72,6 +85,7 @@ onMounted(() => {
   fetchProfiles();
   fetchPresets();
   fetchCacheStatus();
+  fetchCatalogs();
   // Poll cache status every 10s
   const interval = setInterval(fetchCacheStatus, 10000);
   onUnmounted(() => clearInterval(interval));
@@ -325,9 +339,14 @@ const locationDisplay = computed(() => {
       </button>
       <div class="dropdown-menu" v-if="activeDropdown === 'catalogs'">
           <label><strong>Active Catalogs</strong></label>
+          <div style="margin-bottom: 5px;">
+              <button class="small outline" @click="selectAllCatalogs">Select All</button>
+          </div>
           <div class="checkbox-col">
-              <label><input type="checkbox" value="messier" v-model="localSettings.catalogs" @change="$emit('update-settings', localSettings)"> Messier</label>
-              <label><input type="checkbox" value="ngc" v-model="localSettings.catalogs" @change="$emit('update-settings', localSettings)"> NGC</label>
+              <label v-for="cat in availableCatalogs" :key="cat">
+                  <input type="checkbox" :value="cat" v-model="localSettings.catalogs" @change="$emit('update-settings', localSettings)">
+                  {{ cat }}
+              </label>
           </div>
       </div>
     </div>

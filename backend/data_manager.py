@@ -51,27 +51,14 @@ class CatalogManager:
                 print(f"  -> Detected NEW format for {catalog_name}.")
                 
                 # Rename columns to internal standard
-                # designation -> id
-                # ra_deg -> ra
-                # dec_deg -> dec
-                # magnitude -> mag
-                # size -> maj_ax (parsed)
-                
                 df = df.rename(columns={
                     'designation': 'id',
                     'ra_deg': 'ra',
                     'dec_deg': 'dec',
-                    'magnitude': 'mag'
+                    'magnitude': 'mag',
+                    'size': 'maj_ax'
                 })
-                
-                # Parse size
-                df['maj_ax'] = df['size'].apply(cls.parse_size)
-                
-                # Ensure numeric types
-                df['ra'] = pd.to_numeric(df['ra'], errors='coerce')
-                df['dec'] = pd.to_numeric(df['dec'], errors='coerce')
-                df['mag'] = pd.to_numeric(df['mag'], errors='coerce')
-                
+
                 # Fill N/A names
                 df['name'] = df['name'].fillna('N/A')
                 
@@ -84,9 +71,6 @@ class CatalogManager:
             else:
                 print(f"  -> WARNING: Catalog {catalog_name} does not match the NEW format (missing 'designation' or 'ra_deg').")
                 print(f"  -> Columns found: {list(df.columns)}")
-                # User requested to remove support for old format.
-                # We will return an empty DataFrame or raise an error.
-                # Raising error is safer to indicate it's unsupported.
                 raise ValueError(f"Catalog {catalog_name} is in an unsupported format.")
 
             cls._cache[catalog_name] = df
@@ -128,3 +112,15 @@ class CatalogManager:
         print("--- Finished merging catalogs ---\n")
             
         return final_df
+
+    @staticmethod
+    def get_available_catalogs() -> List[str]:
+        """
+        Scans the catalogs directory and returns a list of available catalog names (without .csv extension).
+        """
+        catalogs = []
+        if os.path.exists(CatalogManager._catalog_path):
+            for filename in os.listdir(CatalogManager._catalog_path):
+                if filename.endswith(".csv"):
+                    catalogs.append(filename[:-4])
+        return sorted(catalogs)
