@@ -6,6 +6,8 @@ const emit = defineEmits(['select', 'fetch-all', 'update-settings', 'update-clie
 
 const searchQuery = ref('');
 const showSuggestions = ref(false);
+const showInfoModal = ref(false);
+const infoObject = ref(null);
 
 // Local state for filters to handle v-model updates
 const localSettings = ref({});
@@ -54,37 +56,9 @@ watch(() => props.selectedId, (newId) => {
     }
 });
 
-// Helper to calculate hours visible dynamically
-const calculateHoursVisible = (altitudeGraph, minAltitude, nightTimes) => {
-    if (!altitudeGraph || altitudeGraph.length === 0) return 0;
-    
-    // Strict astronomical night check
-    if (!nightTimes || !nightTimes.night) return 0;
-
-    const nightStart = new Date(nightTimes.night[0]);
-    const nightEnd = new Date(nightTimes.night[1]);
-    
-    const validPoints = [];
-    
-    for (const p of altitudeGraph) {
-        if (p.altitude >= minAltitude) {
-            const pt = new Date(p.time);
-            if (pt >= nightStart && pt <= nightEnd) {
-                validPoints.push(p);
-            }
-        }
-    }
-    
-    if (validPoints.length === 0) return 0;
-    
-    let step = 0.4; 
-    if (altitudeGraph.length > 1) {
-        const t1 = new Date(altitudeGraph[0].time);
-        const t2 = new Date(altitudeGraph[1].time);
-        step = (t2 - t1) / (1000 * 60 * 60); // hours
-    }
-    
-    return Number((validPoints.length * step).toFixed(1));
+const openInfo = (obj) => {
+    infoObject.value = obj;
+    showInfoModal.value = true;
 };
 
 const suggestionList = computed(() => {
@@ -125,31 +99,10 @@ const filteredAndSortedObjects = computed(() => {
         return { obj: o, dynamicHoursVisible: dynamicHours };
     });
 
-    if (props.objects.length > 0) {
-        console.log("DEBUG: Settings:", props.settings);
-        console.log("DEBUG: Client Settings:", props.clientSettings);
-        console.log("DEBUG: Filters -> MinAlt:", minAlt, "MinHrs:", minHrs, "MaxMag:", maxMag, "MinSize:", minSize);
-        
-        const testObj = props.objects[0];
-        const testItem = result.find(r => r.obj === testObj);
-        
-        console.log("DEBUG: First Object Details:", {
-            name: testObj.name,
-            max_altitude: testObj.max_altitude,
-            hours_visible: testObj.hours_visible,
-            dynamicHoursVisible: testItem?.dynamicHoursVisible,
-            mag: testObj.mag,
-            size: testObj.maj_ax,
-            _backend_debug: testObj._debug_info
-        });
-
-        const testCheck = {
-            minHrs: minHrs > 0 && (testItem?.dynamicHoursVisible || 0) < minHrs,
-            minAlt: minAlt > 0 && (testObj.max_altitude || 0) < minAlt,
-            maxMag: maxMag !== undefined && testObj.mag !== undefined && testObj.mag > maxMag,
-            minSize: minSize > 0 && (testObj.maj_ax || 0) < minSize
-        };
-        console.log("DEBUG: First Object Filter Check (True means HIDDEN):", testCheck);
+    if (result.length > 0) {
+        // DEBUG: Inspect first object to verify sort fields
+        // console.log("DEBUG: Sort Key:", sortKey);
+        // console.log("DEBUG: First Object Metadata:", result[0].obj);
     }
 
     const q = searchQuery.value.trim().toLowerCase();
@@ -163,8 +116,16 @@ const filteredAndSortedObjects = computed(() => {
             const matchName = o.common_name && o.common_name.toLowerCase().includes(q);
             const matchOther = o.other_id && o.other_id.toLowerCase().includes(q);
             
+            const passes = matchId || matchName || matchOther;
+            
+            // DEBUG: Log why the first item passes
+            if (passes && result.indexOf(item) === 0) {
+                 console.log(`DEBUG: First item '${o.name}' passed search '${q}'. MatchId=${matchId}, MatchName=${matchName}, MatchOther=${matchOther}`);
+                 console.log("DEBUG: Object data:", o);
+            }
+            
             // If searching, ONLY show matches. Ignore other filters.
-            return matchId || matchName || matchOther;
+            return passes;
         }
 
         // Standard Filters (Only apply if NOT searching)
@@ -313,6 +274,9 @@ const onSearchBlur = () => {
                      </div>
                  </div>
              </div>
+             <div class="list-stats">
+                 Showing {{ filteredAndSortedObjects.length }} / {{ props.objects.length }}
+             </div>
         </div>
 
         <!-- Scrollable List -->
@@ -330,7 +294,7 @@ const onSearchBlur = () => {
                   <div class="info-col">
                       <div style="display: flex; align-items: center; gap: 5px; width: 100%;">
                           <h4 :title="item.obj.name">{{ item.obj.name }}</h4>
-                          <div class="info-icon" :title="getInfoTooltip(item.obj)">ⓘ</div>
+                          <div class="info-icon" @click.stop="openInfo(item.obj)">ⓘ</div>
                       </div>
                       <div v-if="item.obj.common_name && item.obj.common_name !== 'N/A'" class="common-name" :title="item.obj.common_name">
                           {{ item.obj.common_name }}
@@ -365,6 +329,21 @@ const onSearchBlur = () => {
             <div v-if="filteredAndSortedObjects.length === 0" style="text-align: center; color: gray; padding: 20px;">
                 No objects match filters.
             </div>
+        </div>
+    </div>
+
+    <!-- Info Modal -->
+    <div v-if="showInfoModal" class="modal-overlay" @click="showInfoModal = false">
+        <div class="modal-content" @click.stop>
+            <h3>{{ infoObject?.name }}</h3>
+            <p v-if="infoObject?.common_name && infoObject?.common_name !== 'N/A'"><strong>Name:</strong> {{ infoObject.common_name }}</p>
+            <p><strong>Type:</strong> {{ infoObject?.type }}</p>
+            <p><strong>Constellation:</strong> {{ infoObject?.constellation }}</p>
+            <p><strong>Magnitude:</strong> {{ infoObject?.mag }}</p>
+            <p><strong>Size:</strong> {{ infoObject?.size }}</p>
+            <p><strong>Surface Brightness:</strong> {{ infoObject?.surface_brightness }}</p>
+            <p><strong>Other ID:</strong> {{ infoObject?.other_id }}</p>
+            <button @click="showInfoModal = false" class="close-btn">Close</button>
         </div>
     </div>
   </div>
@@ -597,5 +576,61 @@ const onSearchBlur = () => {
     overflow: hidden;
     text-overflow: ellipsis;
     margin-bottom: 2px;
+}
+
+.list-stats {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    text-align: right;
+    margin-top: 4px;
+}
+
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal-content {
+    background: #1f2937;
+    padding: 20px;
+    border-radius: 8px;
+    border: 1px solid #374151;
+    max-width: 300px;
+    width: 90%;
+    color: #f3f4f6;
+}
+
+.modal-content h3 {
+    margin-top: 0;
+    border-bottom: 1px solid #374151;
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+}
+
+.modal-content p {
+    margin: 5px 0;
+    font-size: 0.9rem;
+}
+
+.close-btn {
+    margin-top: 15px;
+    width: 100%;
+    padding: 8px;
+    background: #374151;
+    border: none;
+    color: white;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.close-btn:hover {
+    background: #4b5563;
 }
 </style>

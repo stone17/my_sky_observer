@@ -322,17 +322,48 @@ async def event_stream(request: Request, settings: dict):
         # Also send current night times in a dedicated event for the UI to use globally
         yield f"event: night_times\ndata: {json.dumps(twilight)}\n\n"
 
-        top_objects = processed_objects[:200]
-        print(f"--- Streaming detailed data for {len(top_objects)} objects ---")
+        # 1. Stream Metadata for ALL objects (Fast)
+        # This allows the UI to populate the list and enable search immediately
+        print(f"--- Streaming metadata for {len(processed_objects)} objects ---")
+        metadata_list = []
+        for obj in processed_objects:
+             size_str = f"{obj['maj_ax']}'" + (f" x {obj['min_ax']}'" if 'min_ax' in obj and obj['min_ax'] > 0 else "")
+             metadata_list.append({
+                "name": obj['id'],
+                "common_name": obj.get('name', 'N/A'),
+                "type": obj.get('type', ''),
+                "constellation": obj.get('constellation', ''),
+                "other_id": obj.get('other_id', ''),
+                "surface_brightness": obj.get('surface_brightness', ''),
+                "ra": obj['ra'],
+                "dec": obj['dec'],
+                "catalog": obj['catalog'],
+                "size": size_str,
+                "mag": obj.get('mag', 99),
+                "maj_ax": obj['maj_ax'],
+                "max_altitude": obj.get('max_altitude', 0),
+                "hours_visible": obj.get('hours_visible', 0),
+                "image_url": "", # Placeholder
+                "status": "pending", # Default
+                "altitude_graph": [], # Placeholder
+                "moon_graph": [], # Placeholder
+                "_debug_info": obj.get('_debug_info')
+             })
+        
+        # Send all metadata in one go
+        yield f"event: catalog_metadata\ndata: {json.dumps(metadata_list)}\n\n"
+
+        # 2. Stream Details (Graphs, Cache Check) for Top 50 objects (Slower)
+        # This ensures the visible list gets populated with graphs quickly
+        top_objects = processed_objects[:50]
+        print(f"--- Streaming details for top {len(top_objects)} objects ---")
         
         # fov_w_deg and fov_h_deg already calculated above
         
         # Calculate download FOV: Max dimension + padding
-        # User requested: "take the calculated FOV (camera+telescope) and then add 5% margin to the longer sider"
         max_fov_deg = max(fov_w_deg, fov_h_deg)
         download_fov = max(max_fov_deg * image_padding, 0.25)
-        print(f"Calculated download FOV: {download_fov:.4f} degrees (Sensor: {fov_w_deg:.4f}x{fov_h_deg:.4f}, Padding: {image_padding})")
-
+        
         fov_rect = FOVRectangle(
             width_percent=(fov_w_deg / download_fov) * 100.0, 
             height_percent=(fov_h_deg / download_fov) * 100.0
@@ -366,35 +397,20 @@ async def event_stream(request: Request, settings: dict):
                     # 'selected' or 'filtered' (without fetch-all trigger)
                     # Do not download automatically
                     status = "pending"
-
-            size_str = f"{obj_dict['maj_ax']}'" + (f" x {obj_dict['min_ax']}'" if 'min_ax' in obj_dict and obj_dict['min_ax'] > 0 else "")
             
-            result_obj = {
-                "name": object_id, 
-                "common_name": obj_dict.get('name', 'N/A'),
-                "type": obj_dict.get('type', ''),
-                "constellation": obj_dict.get('constellation', ''),
-                "other_id": obj_dict.get('other_id', ''),
-                "surface_brightness": obj_dict.get('surface_brightness', ''),
-                "ra": obj_dict['ra'], 
-                "dec": obj_dict['dec'], 
-                "catalog": obj_dict['catalog'], 
-                "size": size_str, 
+            # Send ONLY the fields that need updating or are heavy
+            detail_obj = {
+                "name": object_id, # Key to match
                 "image_url": image_url, 
                 "altitude_graph": [p.model_dump() for p in altitude_data['target']],
                 "moon_graph": [p.model_dump() for p in altitude_data['moon']],
                 "fov_rectangle": fov_rect.model_dump(),
-                "image_fov": download_fov, # Explicit FOV of the image
+                "image_fov": download_fov,
                 "hours_above_min": hours_above_min, 
-                "hours_visible": obj_dict.get('hours_visible', 0), # Vectorized calculation
-                "maj_ax": obj_dict['maj_ax'], 
-                "mag": obj_dict.get('mag', 99), 
-                "max_altitude": obj_dict.get('max_altitude', 0), # Added for client-side sorting
                 "setup_hash": setup_hash, 
                 "status": status,
-                "_debug_info": obj_dict.get('_debug_info')
             }
-            yield f"event: object_data\ndata: {json.dumps(result_obj)}\n\n"
+            yield f"event: object_details\ndata: {json.dumps(detail_obj)}\n\n"
 
         print(f"\n--- Starting download for {len(objects_to_download)} images ---")
 

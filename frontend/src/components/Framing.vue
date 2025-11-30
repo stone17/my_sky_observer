@@ -202,7 +202,8 @@ onUnmounted(() => {
         <!-- Image Layer -->
         <div class="image-wrapper" :style="{ width: wrapperSize + 'px', height: wrapperSize + 'px' }">
              <div class="image-container" :style="imageStyle">
-                  <img :src="customImageUrl || object.image_url || 'https://via.placeholder.com/500?text=Loading...'" class="sky-image" />
+                  <img v-if="customImageUrl || object.image_url" :src="customImageUrl || object.image_url" class="sky-image" />
+                  <div v-else class="sky-image placeholder-text">No Image</div>
              </div>
 
              <!-- Sensor Layer -->
@@ -294,6 +295,14 @@ onUnmounted(() => {
     object-fit: contain;
     user-select: none;
     -webkit-user-drag: none;
+}
+.placeholder-text {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    color: #6b7280;
+    font-size: 1.2rem;
+    border: 1px dashed #374151;
 }
 .crosshair {
     position: absolute;

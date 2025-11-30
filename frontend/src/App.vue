@@ -26,6 +26,7 @@ const fetchSettings = async () => {
 };
 
 const saveSettings = async (newSettings) => {
+  console.log("DEBUG: saveSettings called with:", newSettings);
   try {
     await fetch('/api/settings', {
       method: 'POST',
@@ -38,13 +39,6 @@ const saveSettings = async (newSettings) => {
 
 const startStream = (forceDownload = false) => {
   if (eventSource) eventSource.close();
-  
-  // Buffered Update Pattern:
-  // 1. Accumulate new objects in a separate array (bufferedObjects).
-  // 2. Don't touch objects.value or selectedObject.value yet.
-  // 3. On 'close' (stream complete), swap objects.value with bufferedObjects.
-  
-  let bufferedObjects = [];
   
   streamStatus.value = 'Connecting...';
 
@@ -82,27 +76,52 @@ const startStream = (forceDownload = false) => {
       } catch (e) { console.error("Error parsing night times", e); }
   });
 
-  eventSource.addEventListener('object_data', (e) => {
-    const obj = JSON.parse(e.data);
-    // Push to buffer instead of live list
-    bufferedObjects.push(obj);
+  // 1. Metadata Event: Receive full list immediately
+  eventSource.addEventListener('catalog_metadata', (e) => {
+      try {
+          const newObjects = JSON.parse(e.data);
+          console.log(`Received metadata for ${newObjects.length} objects`);
+          
+          // Preserve selection
+          const currentSelectedId = selectedObject.value?.name;
+          
+          // Update list immediately
+          objects.value = newObjects;
+          
+          // Restore selection or Auto-select top item
+          if (currentSelectedId) {
+              const found = objects.value.find(o => o.name === currentSelectedId);
+              if (found) selectedObject.value = found;
+          } else if (objects.value.length > 0) {
+              selectedObject.value = objects.value[0];
+          }
+          
+          streamStatus.value = `Loaded ${newObjects.length} objects. Fetching details...`;
+      } catch (err) {
+          console.error("Error parsing metadata", err);
+      }
+  });
+
+  // 2. Details Event: Update specific objects with graphs/images
+  eventSource.addEventListener('object_details', (e) => {
+      try {
+          const detail = JSON.parse(e.data);
+          const obj = objects.value.find(o => o.name === detail.name);
+          if (obj) {
+              // Merge details into existing object
+              Object.assign(obj, detail);
+          }
+      } catch (err) {
+          console.error("Error parsing details", err);
+      }
   });
 
   eventSource.addEventListener('image_status', (e) => {
     const statusData = JSON.parse(e.data);
-    
-    // Update in current list (so user sees progress if looking at old list)
     const obj = objects.value.find(o => o.name === statusData.name);
     if (obj) {
       obj.status = statusData.status;
       if (statusData.url) obj.image_url = statusData.url;
-    }
-    
-    // Update in buffer (so new list has correct status when swapped)
-    const bufObj = bufferedObjects.find(o => o.name === statusData.name);
-    if (bufObj) {
-        bufObj.status = statusData.status;
-        if (statusData.url) bufObj.image_url = statusData.url;
     }
   });
 
@@ -110,27 +129,6 @@ const startStream = (forceDownload = false) => {
     streamStatus.value = 'Stream Complete';
     eventSource.close();
     eventSource = null;
-    
-    // Atomic Swap
-    console.log("Stream complete. Swapping lists.");
-    
-    // 1. Preserve selection if possible
-    const currentSelectedName = selectedObject.value?.name;
-    
-    // 2. Swap
-    objects.value = bufferedObjects;
-    
-    // 3. Restore selection (find new instance with fresh data)
-    if (currentSelectedName) {
-        const newInstance = objects.value.find(o => o.name === currentSelectedName);
-        if (newInstance) {
-            selectedObject.value = newInstance;
-        } 
-        // If not found, we keep the old selectedObject (stale) so framing doesn't disappear.
-    } else if (objects.value.length > 0 && !selectedObject.value) {
-        // If nothing was selected, maybe select first?
-        // selectedObject.value = objects.value[0];
-    }
   });
 
   eventSource.addEventListener('error', (e) => {
@@ -212,12 +210,28 @@ watch(streamParams, (newVal, oldVal) => {
     // Skip if initial load (empty oldVal)
     if (!oldVal) return;
 
-    if (restartTimer) clearTimeout(restartTimer);
+    // DEBUG: Identify what changed
+    const changes = [];
+    for (const key in newVal) {
+        if (JSON.stringify(newVal[key]) !== JSON.stringify(oldVal[key])) {
+            changes.push(key);
+        }
+    }
     
-    restartTimer = setTimeout(() => {
-        console.log("Stream params changed, restarting stream...");
-        startStream();
-    }, 1000);
+    if (changes.length > 0) {
+        console.log("DEBUG: Stream params changed:", changes);
+        console.log("Old:", oldVal);
+        console.log("New:", newVal);
+        
+        if (restartTimer) clearTimeout(restartTimer);
+        
+        restartTimer = setTimeout(() => {
+            console.log("Stream params changed, restarting stream...");
+            startStream();
+        }, 1000);
+    } else {
+        // console.log("DEBUG: Stream params watcher fired but no changes detected.");
+    }
 }, { deep: true });
 
 const handleKeydown = (e) => {
@@ -342,24 +356,6 @@ body {
     position: relative;
 }
 
-.sidebar {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-width: 300px;
-    max-width: 450px;
-}
-
-.graph-panel {
-    height: 250px; /* Increased height as requested */
-    border-bottom: 1px solid var(--border-color);
-}
-
-.list-panel {
-    flex: 1;
-    overflow-y: auto;
-}
-
 .fill-height {
     height: 100%;
 }
@@ -373,9 +369,22 @@ body {
     color: #6b7280;
 }
 
-/* Scrollbar styling */
-::-webkit-scrollbar { width: 8px; }
-::-webkit-scrollbar-track { background: #1f2937; }
-::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: #6b7280; }
+.sidebar {
+    flex: 1; /* Takes less space */
+    display: flex;
+    flex-direction: column;
+    min-width: 350px;
+    max-width: 500px;
+}
+
+.graph-panel {
+    height: 200px;
+    border-bottom: 1px solid var(--border-color);
+    background: #000;
+}
+
+.list-panel {
+    flex: 1;
+    overflow: hidden;
+}
 </style>
