@@ -12,24 +12,37 @@
     "city_name": "Lund"
   },
   "catalogs": [
-    "abell",
-    "barnard",
-    "berkeley",
-    "collinder",
-    "ic",
-    "messier",
-    "ngc",
-    "others",
-    "pk",
-    "ruprecht",
-    "sharpless",
-    "ugc"
+    "messier"
   ],
   "min_altitude": 30,
   "min_hours": 2,
   "image_padding": 1.3,
-  "sort_key": "time",
+  "sort_key": "hours_above",
   "download_mode": "selected",
   "max_magnitude": 12,
-  "min_size": 10
+  "min_size": 10,
+  "profiles": {
+    "Newt 600": {
+      "telescope": {
+        "focal_length": 600
+      },
+      "camera": {
+        "sensor_width": 23.5,
+        "sensor_height": 15.7
+      },
+      "location": {
+        "latitude": 45,
+        "longitude": -80
+      },
+      "catalogs": [
+        "messier"
+      ],
+      "min_altitude": 30
+    }
+  },
+  "client_settings": {
+    "max_magnitude": 12,
+    "min_size": 10,
+    "selected_types": []
+  }
 }

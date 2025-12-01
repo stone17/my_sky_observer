@@ -41,14 +41,57 @@ catalogs = CatalogManager()
 # --- Helper Functions ---
 
 def load_settings() -> dict:
+    defaults = {
+        "telescope": {"focal_length": 1000},
+        "camera": {"sensor_width": 23.5, "sensor_height": 15.7},
+        "location": {"latitude": 51.50, "longitude": 0.12, "city_name": "London"},
+        "catalogs": ["messier"],
+        "min_altitude": 30.0,
+        "image_padding": 1.05,
+        "profiles": {},
+        "client_settings": {
+            "max_magnitude": 12.0,
+            "min_size": 10.0,
+            "selected_types": []
+        }
+    }
+
     if os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, 'r') as f:
-            settings = json.load(f)
-            if 'image_padding' not in settings: settings['image_padding'] = 1.05
+        try:
+            with open(SETTINGS_FILE, 'r') as f:
+                settings = json.load(f)
+                
+            # Migration: Merge profiles.json if it exists and not yet in settings
+            if 'profiles' not in settings and os.path.exists(PROFILES_FILE):
+                print("Migrating profiles.json to settings.json...")
+                try:
+                    with open(PROFILES_FILE, 'r') as pf:
+                        old_profiles = json.load(pf)
+                        settings['profiles'] = old_profiles
+                except Exception as e:
+                    print(f"Error migrating profiles: {e}")
+                    settings['profiles'] = {}
+            
+            # Ensure defaults for missing keys
+            for key, val in defaults.items():
+                if key not in settings:
+                    settings[key] = val
+            
+            # Ensure nested defaults for client_settings
+            if 'client_settings' in settings:
+                 for k, v in defaults['client_settings'].items():
+                     if k not in settings['client_settings']:
+                         settings['client_settings'][k] = v
+            
+            # Ensure location city_name
             if 'location' in settings and 'city_name' not in settings['location']:
                  settings['location']['city_name'] = ""
+
             return settings
-    return {"telescope": {"focal_length": 1000}, "camera": {"sensor_width": 23.5, "sensor_height": 15.7}, "location": {"latitude": 55.70, "longitude": 13.19, "city_name": ""}, "catalogs": ["messier"], "min_altitude": 30.0, "image_padding": 1.05}
+        except Exception as e:
+            print(f"Error loading settings: {e}")
+            return defaults
+    return defaults
 
 def save_settings(settings: dict):
     with open(SETTINGS_FILE, 'w') as f: json.dump(settings, f, indent=2)
@@ -524,28 +567,26 @@ def get_catalogs():
 
 @app.get("/api/profiles")
 def get_profiles():
-    if os.path.exists(PROFILES_FILE):
-        with open(PROFILES_FILE, 'r') as f: return json.load(f)
-    return {}
+    settings = load_settings()
+    return settings.get('profiles', {})
 
 @app.post("/api/profiles/{name}")
 async def save_profile(name: str, request: Request):
     data = await request.json()
-    profiles = {}
-    if os.path.exists(PROFILES_FILE):
-        with open(PROFILES_FILE, 'r') as f: profiles = json.load(f)
-    profiles[name] = data
-    with open(PROFILES_FILE, 'w') as f: json.dump(profiles, f, indent=2)
+    settings = load_settings()
+    if 'profiles' not in settings: settings['profiles'] = {}
+    
+    settings['profiles'][name] = data
+    save_settings(settings)
     return {"status": "saved"}
 
 @app.delete("/api/profiles/{name}")
 def delete_profile(name: str):
-    if os.path.exists(PROFILES_FILE):
-        with open(PROFILES_FILE, 'r') as f: profiles = json.load(f)
-        if name in profiles:
-            del profiles[name]
-            with open(PROFILES_FILE, 'w') as f: json.dump(profiles, f, indent=2)
-            return {"status": "deleted"}
+    settings = load_settings()
+    if 'profiles' in settings and name in settings['profiles']:
+        del settings['profiles'][name]
+        save_settings(settings)
+        return {"status": "deleted"}
     return JSONResponse(content={"error": "Profile not found"}, status_code=404)
 
 @app.get("/api/presets")
