@@ -614,12 +614,20 @@ def purge_cache():
 
 # Fetch Custom Image (with specific FOV)
 class FetchImageRequest(BaseModel):
-    ra: float
-    dec: float
+    ra: Union[float, str]
+    dec: Union[float, str]
     fov: float # in degrees
 
 @app.post("/api/fetch-custom-image")
 async def fetch_custom_image(req: FetchImageRequest):
+    if isinstance(req.ra, str):
+        try:
+            coords = SkyCoord(req.ra, req.dec, unit=(u.hourangle, u.deg))
+            req.ra = coords.ra.deg
+            req.dec = coords.dec.deg
+        except Exception:
+             # Fallback or error, though SkyCoord usually handles standard string formats
+             pass
     setup_hash = f"custom_fov_{req.fov:.4f}"
     name = f"RADEC_{req.ra}_{req.dec}"
     
