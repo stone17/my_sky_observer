@@ -41,7 +41,7 @@ const initFov = () => {
         // PREFERRED: Use explicit image_fov if available (from new backend)
         if (props.object.image_fov) {
             imageFov.value = props.object.image_fov;
-            currentFov.value = parseFloat(props.object.image_fov.toFixed(2));
+            currentFov.value = parseFloat(props.object.image_fov.toFixed(1));
         }
         // FALLBACK: Use legacy fov_rectangle if image_fov not present
         else if (props.object.fov_rectangle && sensorFov.value.w > 0) {
@@ -49,14 +49,14 @@ const initFov = () => {
             if (wPct > 0) {
                 const calculatedImageFov = sensorFov.value.w / (wPct / 100);
                 imageFov.value = calculatedImageFov;
-                currentFov.value = parseFloat(calculatedImageFov.toFixed(2));
+                currentFov.value = parseFloat(calculatedImageFov.toFixed(1));
             }
         }
     }
 };
 
 // Watch object and sensorFov to initialize
-watch([() => props.object, sensorFov], () => {
+watch([() => props.object, () => props.object?.image_fov, sensorFov], () => {
     initFov();
 }, { immediate: true });
 
@@ -190,9 +190,9 @@ onUnmounted(() => {
          <div class="controls-section left">
              <div class="group">
                 <strong>FOV:</strong>
-                <button class="outline small" @click="currentFov = parseFloat((currentFov * 1.1).toFixed(2))">+</button>
+                <button class="outline small" @click="currentFov = parseFloat((currentFov * 1.1).toFixed(1))">+</button>
                 <input type="number" v-model.number="currentFov" step="0.1" class="input-sm" style="width: 50px;" />
-                <button class="outline small" @click="currentFov = parseFloat((currentFov * 0.9).toFixed(2))">-</button>
+                <button class="outline small" @click="currentFov = parseFloat((currentFov * 0.9).toFixed(1))">-</button>
                 <button @click="fetchCustomFov" :disabled="isFetching" class="small">{{ isFetching ? '...' : 'Get' }}</button>
              </div>
              <div class="group">

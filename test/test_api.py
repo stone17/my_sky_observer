@@ -170,6 +170,7 @@ async def test_stream_and_download():
             "catalogs": ",".join(TEST_SETTINGS["catalogs"]),
             "sort_key": TEST_SETTINGS["sort_key"],
             "min_altitude": TEST_SETTINGS["min_altitude"],
+                "download_mode": "all"
         }
         
         async with httpx.AsyncClient(timeout=180) as client: # Generous timeout
