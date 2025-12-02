@@ -1,34 +1,23 @@
 {
   "telescope": {
-    "focal_length": 600
+    "focal_length": 1200
   },
   "camera": {
-    "sensor_width": 23.5,
-    "sensor_height": 15.7
+    "sensor_width": 17.5,
+    "sensor_height": 13
   },
   "location": {
-    "latitude": 51.5085,
-    "longitude": -0.1257,
-    "city_name": "London"
+    "latitude": 40.7128,
+    "longitude": -74.006,
+    "city_name": ""
   },
   "catalogs": [
-    "abell",
-    "barnard",
-    "berkeley",
-    "collinder",
-    "ic",
-    "messier",
-    "ngc",
-    "others",
-    "pk",
-    "ruprecht",
-    "sharpless",
-    "ugc"
+    "messier"
   ],
-  "min_altitude": 30,
+  "min_altitude": 20,
   "sort_key": "size",
   "profiles": {
-    "Newtonian 600": {
+    "Newt 600": {
       "telescope": {
         "focal_length": 600
       },
@@ -41,18 +30,7 @@
         "longitude": -80
       },
       "catalogs": [
-        "abell",
-        "barnard",
-        "berkeley",
-        "collinder",
-        "ic",
-        "messier",
-        "ngc",
-        "others",
-        "pk",
-        "ruprecht",
-        "sharpless",
-        "ugc"
+        "messier"
       ],
       "min_altitude": 30
     }
@@ -62,7 +40,5 @@
     "max_magnitude": 12,
     "min_size": 10,
     "selected_types": []
-  },
-  "min_hours": 0,
-  "download_mode": "selected"
+  }
 }

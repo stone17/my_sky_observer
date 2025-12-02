@@ -16,6 +16,7 @@ const objects = ref([]);
 const selectedObject = ref(null);
 const streamStatus = ref('Idle');
 const nightTimes = ref({});
+const activeDownloadMode = ref('none'); // none, filtered, all
 
 // Stream handling
 let eventSource = null;
@@ -46,6 +47,9 @@ const saveSettings = async (newSettings) => {
             client_settings: clientSettings.value // Ensure client settings are included
         };
 
+        // Remove obsolete download_mode if present
+        delete payload.download_mode;
+
         await fetch('/api/settings', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -58,7 +62,7 @@ const saveSettings = async (newSettings) => {
     } catch (e) { console.error(e); }
 };
 
-const startStream = (forceDownload = false) => {
+const startStream = (modeOverride = null) => {
     if (eventSource) eventSource.close();
 
     streamStatus.value = 'Connecting...';
@@ -81,8 +85,16 @@ const startStream = (forceDownload = false) => {
     params.append('image_padding', settings.value.image_padding || 1.05);
 
     // Download Mode Logic
-    let mode = settings.value.download_mode || 'selected';
-    if (forceDownload) mode = 'all'; // Override for "Fetch All" action
+    // Default to 'selected' unless overridden by buttons
+    let mode = modeOverride || 'selected';
+
+    // Update active mode state
+    if (mode === 'all' || mode === 'filtered') {
+        activeDownloadMode.value = mode;
+    } else {
+        activeDownloadMode.value = 'none';
+    }
+
     params.append('download_mode', mode);
 
     eventSource = new EventSource(`/api/stream-objects?${params.toString()}`);
@@ -150,12 +162,20 @@ const startStream = (forceDownload = false) => {
         streamStatus.value = 'Stream Complete';
         eventSource.close();
         eventSource = null;
+        // Reset active mode when finished naturally
+        if (activeDownloadMode.value !== 'none') {
+             // Keep it? Or reset? Usually completion means download done.
+             // But if we restart stream it resets.
+             // Let's reset it to indicate the process finished.
+             activeDownloadMode.value = 'none';
+        }
     });
 
     eventSource.addEventListener('error', (e) => {
         streamStatus.value = 'Error/Disconnected';
         if (eventSource) eventSource.close();
         eventSource = null;
+        activeDownloadMode.value = 'none';
     });
 };
 
@@ -165,6 +185,16 @@ const stopStream = () => {
         eventSource = null;
         streamStatus.value = 'Stopped';
     }
+    activeDownloadMode.value = 'none';
+};
+
+const handleStartDownload = (mode) => {
+    startStream(mode);
+};
+
+const handleStopDownload = () => {
+    // Restarting with 'selected' effectively stops the bulk download but keeps the list live
+    startStream('selected');
 };
 
 // Handle cache purge reload
@@ -228,7 +258,7 @@ const streamParams = computed(() => {
         tel: settings.value.telescope,
         cam: settings.value.camera,
         cats: settings.value.catalogs,
-        mode: settings.value.download_mode,
+        // mode: settings.value.download_mode, // REMOVED: download_mode is now action-based
         min_alt: settings.value.min_altitude,
         min_hrs: settings.value.min_hours,
         pad: settings.value.image_padding
@@ -307,8 +337,9 @@ onUnmounted(() => {
 
 <template>
     <div class="app-container">
-        <TopBar :settings="settings" :streamStatus="streamStatus" @update-settings="saveSettings"
-            @start-stream="startStream" @stop-stream="stopStream" @purge-cache="handlePurge" />
+        <TopBar :settings="settings" :streamStatus="streamStatus" :activeDownloadMode="activeDownloadMode" @update-settings="saveSettings"
+            @start-stream="startStream" @stop-stream="stopStream" @purge-cache="handlePurge"
+            @start-download="handleStartDownload" @stop-download="handleStopDownload" />
 
         <div class="main-layout">
             <!-- Left: Main Framing -->
@@ -339,7 +370,7 @@ onUnmounted(() => {
                     <ObjectList :objects="objects" :selectedId="selectedObject?.name" :settings="settings"
                         :clientSettings="clientSettings" :nightTimes="nightTimes" @select="selectedObject = $event"
                         @update-settings="saveSettings" @update-client-settings="Object.assign(clientSettings, $event)"
-                        @fetch-all="startStream(true)" />
+                        @fetch-all="handleStartDownload('all')" />
                 </div>
             </aside>
         </div>

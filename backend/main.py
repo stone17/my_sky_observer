@@ -432,14 +432,9 @@ async def event_stream(request: Request, settings: dict):
             if is_cached:
                 image_url, status = (cache_url, "cached")
             else:
-                # Download Mode Logic
-                download_mode = settings.get('download_mode', 'selected')
-                if download_mode == 'all':
-                    objects_to_download.append(obj_dict)
-                else:
-                    # 'selected' or 'filtered' (without fetch-all trigger)
-                    # Do not download automatically
-                    status = "pending"
+                # 'selected' or 'filtered' (without fetch-all trigger)
+                # Do not download automatically
+                status = "pending"
             
             # Send ONLY the fields that need updating or are heavy
             detail_obj = {
@@ -454,6 +449,26 @@ async def event_stream(request: Request, settings: dict):
                 "status": status,
             }
             yield f"event: object_details\ndata: {json.dumps(detail_obj)}\n\n"
+
+        # Populate download queue based on mode
+        download_mode = settings.get('download_mode', 'selected')
+        if download_mode in ['all', 'filtered']:
+            print(f"--- Populating download queue for mode: {download_mode} ---")
+            for obj_dict in processed_objects:
+                should_add = False
+                if download_mode == 'all':
+                    should_add = True
+                elif download_mode == 'filtered':
+                    # Filter based on Min Altitude and Min Hours
+                    # Note: These values are pre-calculated in processed_objects
+                    ma = obj_dict.get('max_altitude', 0)
+                    hv = obj_dict.get('hours_visible', 0)
+
+                    if ma >= min_altitude and hv >= min_hours:
+                        should_add = True
+
+                if should_add:
+                    objects_to_download.append(obj_dict)
 
         print(f"\n--- Starting download for {len(objects_to_download)} images ---")
 

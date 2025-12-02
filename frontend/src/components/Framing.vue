@@ -209,8 +209,9 @@ onUnmounted(() => {
         <!-- Image Layer -->
         <div class="image-wrapper" :style="{ width: wrapperSize + 'px', height: wrapperSize + 'px' }">
              <div class="image-container" :style="imageStyle">
-                  <img v-if="customImageUrl || object.image_url" :src="customImageUrl || object.image_url" class="sky-image" />
-                  <div v-else class="sky-image placeholder-text">No Image</div>
+                  <div v-if="object.status === 'downloading'" class="sky-image placeholder-text">Downloading...</div>
+                  <img v-else-if="customImageUrl || object.image_url" :src="customImageUrl || object.image_url" class="sky-image" />
+                  <div v-else class="sky-image placeholder-text">Image not present</div>
              </div>
 
              <!-- Sensor Layer -->
