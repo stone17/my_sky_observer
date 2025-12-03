@@ -412,8 +412,21 @@ async def event_stream(request: Request, settings: dict):
             height_percent=(fov_h_deg / download_fov) * 100.0
         )
 
+        download_mode = settings.get('download_mode', 'selected')
         objects_to_download = []
+        if download_mode == 'all':
+            objects_to_download = processed_objects
+        elif download_mode == 'filtered':
+             min_h = settings.get('min_hours', 0.0)
+             min_a = settings.get('min_altitude', 30.0)
+             objects_to_download = [
+                 o for o in processed_objects
+                 if (o.get('max_altitude', 0) >= min_a and o.get('hours_visible', 0) >= min_h)
+             ]
         
+        # Set of IDs to download to mark status in details loop
+        download_ids = set(o['id'] for o in objects_to_download)
+
         for obj_dict in top_objects:
             if await request.is_disconnected(): break
             object_id = obj_dict['id']
@@ -428,18 +441,11 @@ async def event_stream(request: Request, settings: dict):
             # Calculate hours above min based on graph
             hours_above_min = await asyncio.to_thread(calculator.calculate_time_above_altitude, altitude_data['target'], min_altitude, twilight)
 
-            image_url, status = ("", "queued")
+            image_url, status = ("", "pending")
             if is_cached:
                 image_url, status = (cache_url, "cached")
-            else:
-                # Download Mode Logic
-                download_mode = settings.get('download_mode', 'selected')
-                if download_mode == 'all':
-                    objects_to_download.append(obj_dict)
-                else:
-                    # 'selected' or 'filtered' (without fetch-all trigger)
-                    # Do not download automatically
-                    status = "pending"
+            elif object_id in download_ids:
+                status = "queued"
             
             # Send ONLY the fields that need updating or are heavy
             detail_obj = {
@@ -457,46 +463,51 @@ async def event_stream(request: Request, settings: dict):
 
         print(f"\n--- Starting download for {len(objects_to_download)} images ---")
 
+        # Filter out already cached items from objects_to_download to avoid redundant work/messages
+        # (Though download_image handles it, we want accurate progress counts)
+        final_download_list = []
+        for obj in objects_to_download:
+             _, cache_fp, _ = get_cache_info(obj['id'], setup_hash)
+             if not os.path.exists(cache_fp):
+                 final_download_list.append(obj)
+
+        total_downloads = len(final_download_list)
+        # Yield initial progress
+        yield f"event: download_progress\ndata: {json.dumps({'current': 0, 'total': total_downloads})}\n\n"
+
         # Parallel Download Management
         download_queue = asyncio.Queue()
         semaphore = asyncio.Semaphore(5) # Limit to 5 concurrent downloads
+        completed_count = 0
 
         async def worker(obj_dict):
+             nonlocal completed_count
              async with semaphore:
                 if await request.is_disconnected(): return
 
                 object_id = obj_dict['id']
-                cache_url, cache_filepath, setup_dir = get_cache_info(object_id, setup_hash)
+                # cache_url, cache_filepath, setup_dir = get_cache_info(object_id, setup_hash)
 
                 await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'downloading'})}\n\n")
 
                 try:
-                    # Use unified download function
-                    # Note: download_image returns the URL, but we also need to know if it was cached or downloaded for the status update.
-                    # Since download_image handles cache check internally, we can just call it.
-                    # However, to maintain the specific status messages ('downloading' vs 'cached'), we might want to check cache first or modify download_image to return status.
-                    # But the user asked to streamline. Let's trust download_image.
-                    # Actually, for the UI feedback "downloading...", we want to emit that event BEFORE calling download_image if it's not cached.
-                    # But download_image checks cache.
-                    # Let's just emit "downloading" (it's harmless if it returns instantly from cache) or check cache here too.
-                    # The outer loop already checked cache and only added to queue if not cached.
-                    # So we can assume it needs downloading (or race condition, which is fine).
-                    
-                    await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'downloading'})}\n\n")
-                    
                     url = await download_image(obj_dict['ra'], obj_dict['dec'], download_fov, object_id, setup_hash)
                     
-                    await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'cached', 'url': url})}\n\n")
+                    await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'cached', 'url': url, 'image_fov': download_fov})}\n\n")
                 except Exception as download_error:
                     print(f"  -> FAILED: {object_id} - {download_error}")
                     await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'error'})}\n\n")
+                finally:
+                    completed_count += 1
+                    await download_queue.put(f"event: download_progress\ndata: {json.dumps({'current': completed_count, 'total': total_downloads})}\n\n")
 
         # Start workers
-        workers = [asyncio.create_task(worker(obj)) for obj in objects_to_download]
+        workers = [asyncio.create_task(worker(obj)) for obj in final_download_list]
 
         # Monitor completion
         async def monitor_completion():
-            await asyncio.gather(*workers)
+            if workers:
+                await asyncio.gather(*workers)
             await download_queue.put(None) # Signal end
 
         asyncio.create_task(monitor_completion())
