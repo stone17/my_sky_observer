@@ -17,6 +17,7 @@ const selectedObject = ref(null);
 const streamStatus = ref('Idle');
 const nightTimes = ref({});
 const activeDownloadMode = ref('none'); // none, filtered, all
+const downloadProgress = ref({ current: 0, total: 0 });
 
 // Stream handling
 let eventSource = null;
@@ -91,6 +92,7 @@ const startStream = (modeOverride = null) => {
     // Update active mode state
     if (mode === 'all' || mode === 'filtered') {
         activeDownloadMode.value = mode;
+        downloadProgress.value = { current: 0, total: 0 };
     } else {
         activeDownloadMode.value = 'none';
     }
@@ -156,6 +158,12 @@ const startStream = (modeOverride = null) => {
             obj.status = statusData.status;
             if (statusData.url) obj.image_url = statusData.url;
         }
+    });
+
+    eventSource.addEventListener('download_progress', (e) => {
+        try {
+            downloadProgress.value = JSON.parse(e.data);
+        } catch(e) { console.error(e); }
     });
 
     eventSource.addEventListener('close', (e) => {
@@ -337,7 +345,8 @@ onUnmounted(() => {
 
 <template>
     <div class="app-container">
-        <TopBar :settings="settings" :streamStatus="streamStatus" :activeDownloadMode="activeDownloadMode" @update-settings="saveSettings"
+        <TopBar :settings="settings" :streamStatus="streamStatus" :activeDownloadMode="activeDownloadMode" :downloadProgress="downloadProgress"
+            @update-settings="saveSettings"
             @start-stream="startStream" @stop-stream="stopStream" @purge-cache="handlePurge"
             @start-download="handleStartDownload" @stop-download="handleStopDownload" />
 

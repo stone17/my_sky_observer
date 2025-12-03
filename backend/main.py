@@ -461,8 +461,8 @@ async def event_stream(request: Request, settings: dict):
                 elif download_mode == 'filtered':
                     # Filter based on Min Altitude and Min Hours
                     # Note: These values are pre-calculated in processed_objects
-                    ma = obj_dict.get('max_altitude', 0)
-                    hv = obj_dict.get('hours_visible', 0)
+                    ma = obj_dict.get('max_altitude') or 0.0
+                    hv = obj_dict.get('hours_visible') or 0.0
 
                     if ma >= min_altitude and hv >= min_hours:
                         should_add = True
@@ -470,11 +470,15 @@ async def event_stream(request: Request, settings: dict):
                 if should_add:
                     objects_to_download.append(obj_dict)
 
-        print(f"\n--- Starting download for {len(objects_to_download)} images ---")
+        total_downloads = len(objects_to_download)
+        print(f"\n--- Starting download for {total_downloads} images ---")
 
         # Parallel Download Management
         download_queue = asyncio.Queue()
         semaphore = asyncio.Semaphore(5) # Limit to 5 concurrent downloads
+
+        # Shared progress counter
+        progress_counter = {"current": 0}
 
         async def worker(obj_dict):
              async with semaphore:
@@ -483,28 +487,20 @@ async def event_stream(request: Request, settings: dict):
                 object_id = obj_dict['id']
                 cache_url, cache_filepath, setup_dir = get_cache_info(object_id, setup_hash)
 
+                # Send downloading status
                 await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'downloading'})}\n\n")
 
                 try:
                     # Use unified download function
-                    # Note: download_image returns the URL, but we also need to know if it was cached or downloaded for the status update.
-                    # Since download_image handles cache check internally, we can just call it.
-                    # However, to maintain the specific status messages ('downloading' vs 'cached'), we might want to check cache first or modify download_image to return status.
-                    # But the user asked to streamline. Let's trust download_image.
-                    # Actually, for the UI feedback "downloading...", we want to emit that event BEFORE calling download_image if it's not cached.
-                    # But download_image checks cache.
-                    # Let's just emit "downloading" (it's harmless if it returns instantly from cache) or check cache here too.
-                    # The outer loop already checked cache and only added to queue if not cached.
-                    # So we can assume it needs downloading (or race condition, which is fine).
-                    
-                    await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'downloading'})}\n\n")
-                    
                     url = await download_image(obj_dict['ra'], obj_dict['dec'], download_fov, object_id, setup_hash)
-                    
                     await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'cached', 'url': url})}\n\n")
                 except Exception as download_error:
                     print(f"  -> FAILED: {object_id} - {download_error}")
                     await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'error'})}\n\n")
+                finally:
+                    # Update progress
+                    progress_counter["current"] += 1
+                    await download_queue.put(f"event: download_progress\ndata: {json.dumps({'current': progress_counter['current'], 'total': total_downloads})}\n\n")
 
         # Start workers
         workers = [asyncio.create_task(worker(obj)) for obj in objects_to_download]

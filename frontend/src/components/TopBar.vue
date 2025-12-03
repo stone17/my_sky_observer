@@ -4,7 +4,8 @@ import { ref, onMounted, onUnmounted, watch, computed } from 'vue';
 const props = defineProps({
   settings: Object,
   streamStatus: String,
-  activeDownloadMode: String
+  activeDownloadMode: String,
+  downloadProgress: Object
 });
 
 const emit = defineEmits(['update-settings', 'start-stream', 'stop-stream', 'purge-cache', 'start-download', 'stop-download']);
@@ -343,7 +344,7 @@ const locationDisplay = computed(() => {
              v-if="activeDownloadMode === 'filtered'"
              class="tb-btn active-download"
              @click="$emit('stop-download')"
-        >Stop Downloading</button>
+        >Stop Downloading <span v-if="downloadProgress && downloadProgress.total > 0">({{ downloadProgress.current }} / {{ downloadProgress.total }})</span></button>
         <button
              v-else
              class="tb-btn"
@@ -354,7 +355,7 @@ const locationDisplay = computed(() => {
              v-if="activeDownloadMode === 'all'"
              class="tb-btn active-download"
              @click="$emit('stop-download')"
-        >Stop Downloading</button>
+        >Stop Downloading <span v-if="downloadProgress && downloadProgress.total > 0">({{ downloadProgress.current }} / {{ downloadProgress.total }})</span></button>
         <button
              v-else
              class="tb-btn"
