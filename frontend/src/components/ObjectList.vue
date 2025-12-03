@@ -23,10 +23,13 @@ const sortOptions = [
 // Sync props to local state
 watch(() => props.settings, (newVal) => {
     if (newVal) {
-        localSettings.value = { ...newVal };
-        if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
-        if (localSettings.value.min_hours === undefined) localSettings.value.min_hours = 0.0;
-        if (!localSettings.value.sort_key) localSettings.value.sort_key = 'time';
+        // Only update if actually different to avoid cursor jumps
+        if (JSON.stringify(newVal) !== JSON.stringify(localSettings.value)) {
+            localSettings.value = { ...newVal };
+            if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
+            if (localSettings.value.min_hours === undefined) localSettings.value.min_hours = 0.0;
+            if (!localSettings.value.sort_key) localSettings.value.sort_key = 'time';
+        }
     }
 }, { immediate: true, deep: true });
 
@@ -222,11 +225,11 @@ const onSearchBlur = () => {
     <div class="filter-sidebar">
         <div class="filter-group">
             <label>Alt></label>
-            <input type="number" v-model.number="localSettings.min_altitude" @change="updateSettings" class="input-sm" />
+            <input type="number" v-model.number="localSettings.min_altitude" @input="updateSettings" class="input-sm" />
         </div>
         <div class="filter-group">
             <label>Hrs></label>
-            <input type="number" step="0.5" v-model.number="localSettings.min_hours" @change="updateSettings" class="input-sm" />
+            <input type="number" step="0.5" v-model.number="localSettings.min_hours" @input="updateSettings" class="input-sm" />
         </div>
         <div class="filter-group">
             <label>Mag<</label>

@@ -38,26 +38,29 @@ const fetchSettings = async () => {
     } catch (e) { console.error(e); }
 };
 
-const saveSettings = async (newSettings) => {
+let saveTimeout = null;
+const saveSettings = (newSettings) => {
     // console.log("DEBUG: saveSettings called with:", newSettings);
-    try {
-        // Ensure we send both main settings and client settings
-        const payload = {
-            ...settings.value, // Current global settings
-            ...newSettings,    // Overwrites from TopBar if any
-            client_settings: clientSettings.value // Ensure client settings are included
-        };
+    // Ensure we send both main settings and client settings
+    const payload = {
+        ...settings.value, // Current global settings
+        ...newSettings,    // Overwrites from TopBar if any
+        client_settings: clientSettings.value // Ensure client settings are included
+    };
 
-        await fetch('/api/settings', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
+    // Optimistic Update
+    settings.value = payload;
 
-        // Update local ref
-        settings.value = payload;
-
-    } catch (e) { console.error(e); }
+    if (saveTimeout) clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(async () => {
+        try {
+            await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+        } catch (e) { console.error(e); }
+    }, 500);
 };
 
 const startStream = (mode = 'selected') => {
