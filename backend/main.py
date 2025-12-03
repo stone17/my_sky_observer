@@ -336,6 +336,7 @@ async def event_stream(request: Request, settings: dict):
         camera = Camera(**settings['camera'])
         location = Location(**settings['location'])
         min_altitude = settings.get('min_altitude', 30.0)
+        min_hours = settings.get('min_hours', 0.0)
         image_padding = settings.get('image_padding', 1.05)
 
         fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
