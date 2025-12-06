@@ -70,30 +70,35 @@ def load_settings() -> dict:
         try:
             with open(SETTINGS_USER_FILE, 'r') as f:
                 user_settings = yaml.safe_load(f) or {}
-                
-            # Deep merge (simple version for top-level keys + client_settings)
-            # A full recursive merge might be better, but we know the structure.
+
             for key, val in user_settings.items():
                 if key == 'client_settings' and 'client_settings' in settings:
-                    settings['client_settings'].update(val)
-                elif key == 'telescope' and 'telescope' in settings: # Example of struct
-                     settings['telescope'].update(val)
+                    if isinstance(val, dict) and isinstance(settings['client_settings'], dict):
+                        settings['client_settings'].update(val)
+                elif key == 'telescope' and 'telescope' in settings: 
+                     if isinstance(val, dict) and isinstance(settings['telescope'], dict):
+                        settings['telescope'].update(val)
                 elif key == 'camera' and 'camera' in settings:
-                     settings['camera'].update(val)
+                     if isinstance(val, dict) and isinstance(settings['camera'], dict):
+                        settings['camera'].update(val)
                 elif key == 'location' and 'location' in settings:
-                     settings['location'].update(val)
-                # profiles is a dict of dicts, so simple update is fine (adds/replaces profiles)
-                elif key == 'profiles' and 'profiles' in settings: 
-                    settings['profiles'].update(val)
+                     if isinstance(val, dict) and isinstance(settings['location'], dict):
+                        settings['location'].update(val)
+                elif key == 'profiles' and 'profiles' in settings:
+                    if isinstance(val, dict) and isinstance(settings['profiles'], dict):
+                        settings['profiles'].update(val)
+                    elif isinstance(val, dict): # If settings['profiles'] is None/malformed
+                        settings['profiles'] = val
                 else:
-                    # Scalar or new key
                     settings[key] = val
                     
         except Exception as e:
             print(f"Error loading user settings: {e}")
+            traceback.print_exc()
 
-    # Ensure defaults/migrations for older User files if keys are missing from User but exist in Default
-    # (Already handled by loading Default first)
+    # Ensure profiles is initialized if still missing
+    if 'profiles' not in settings or not isinstance(settings['profiles'], dict):
+        settings['profiles'] = {}
 
     return settings
 

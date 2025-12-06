@@ -79,6 +79,11 @@ watch(() => props.settings, (newVal) => {
         // download_mode is no longer used in settings for buttons, but we keep it clean if present
         if (!localSettings.value.catalogs) localSettings.value.catalogs = ['messier'];
         if (localSettings.value.image_padding === undefined) localSettings.value.image_padding = 1.05;
+
+        // Sync active profile if present
+        if (localSettings.value.active_profile) {
+            selectedProfileName.value = localSettings.value.active_profile;
+        }
     }
 }, { immediate: true, deep: true });
 
@@ -127,6 +132,7 @@ const createProfile = async () => {
     const profileData = JSON.parse(JSON.stringify(localSettings.value));
     delete profileData.location;
     delete profileData.active_profile; // Don't store active_profile inside the profile definition itself
+    delete profileData.profiles;
 
     try {
         await fetch(`/api/profiles/${name}`, {
@@ -139,6 +145,10 @@ const createProfile = async () => {
         // Optimize: Switch to it immediately
         selectedProfileName.value = name;
         localSettings.value.active_profile = name;
+
+        // CRITICAL: Update localSettings.profiles to match
+        localSettings.value.profiles = JSON.parse(JSON.stringify(profiles.value));
+
         emit('update-settings', localSettings.value);
 
         newProfileName.value = "";
@@ -154,8 +164,12 @@ const deleteProfile = async () => {
 
         if (selectedProfileName.value === localSettings.value.active_profile) {
             localSettings.value.active_profile = null;
-            emit('update-settings', localSettings.value);
         }
+
+        // CRITICAL: Update localSettings.profiles to match
+        localSettings.value.profiles = JSON.parse(JSON.stringify(profiles.value));
+
+        emit('update-settings', localSettings.value);
         selectedProfileName.value = null;
     } catch (e) { console.error(e); }
 };
