@@ -2,6 +2,7 @@ import asyncio
 import json
 import traceback
 import os
+import sys
 import hashlib
 import requests
 import shutil
@@ -34,15 +35,22 @@ catalogs = CatalogManager()
 
 # --- Helper Functions ---
 
+def get_resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
+
 def load_settings() -> dict:
     import yaml
     
     settings = {}
     
     # 1. Load Defaults
-    if os.path.exists(SETTINGS_DEFAULT_FILE):
+    default_path = get_resource_path(SETTINGS_DEFAULT_FILE)
+    if os.path.exists(default_path):
         try:
-            with open(SETTINGS_DEFAULT_FILE, 'r') as f:
+            with open(default_path, 'r') as f:
                 settings = yaml.safe_load(f) or {}
         except Exception as e:
             print(f"Error loading default settings: {e}")
@@ -803,7 +811,8 @@ async def get_cached_image(setup_hash: str, image_filename: str):
     # Disable caching to prevent browser from holding onto wrong images during development/debugging
     return FileResponse(filepath, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
-static_dir = "frontend/dist" if os.path.exists("frontend/dist") else "frontend"
+static_relative = "frontend/dist" if os.path.exists("frontend/dist") or hasattr(sys, '_MEIPASS') else "frontend"
+static_dir = get_resource_path(static_relative)
 app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
 
 import httpx

@@ -351,17 +351,19 @@ onUnmounted(() => {
     background: #000;
     color: white;
     border: 1px solid #4b5563;
-    padding: 2px;
-    font-size: 0.8rem;
-    width: 40px;
+    padding: 0 4px;
+    font-size: 0.9rem;
+    width: 48px;
     text-align: center;
     border-radius: 2px;
+    height: 26px;
+    line-height: 24px;
+    box-sizing: border-box;
 }
-
 .mini {
-    padding: 2px 6px;
-    font-size: 0.8rem;
-    height: 22px;
+    padding: 2px 8px;
+    font-size: 0.9rem;
+    height: 26px;
     line-height: 1;
 }
 
