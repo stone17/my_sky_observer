@@ -3,10 +3,12 @@ import { ref, onMounted, onUnmounted, watch, computed } from 'vue';
 
 const props = defineProps({
   settings: Object,
-  streamStatus: String
+  streamStatus: String,
+  isDownloading: Boolean,
+  downloadProgress: String
 });
 
-const emit = defineEmits(['update-settings', 'start-stream', 'stop-stream', 'purge-cache']);
+const emit = defineEmits(['update-settings', 'start-stream', 'stop-stream', 'purge-cache', 'download-filtered', 'download-all', 'stop-download']);
 
 const localSettings = ref({});
 const profiles = ref({});
@@ -75,7 +77,7 @@ watch(() => props.settings, (newVal) => {
         // Ensure defaults
         if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
         if (localSettings.value.min_hours === undefined) localSettings.value.min_hours = 0.0;
-        if (!localSettings.value.download_mode) localSettings.value.download_mode = 'selected';
+        // download_mode is no longer used in settings for buttons, but we keep it clean if present
         if (!localSettings.value.catalogs) localSettings.value.catalogs = ['messier'];
         if (localSettings.value.image_padding === undefined) localSettings.value.image_padding = 1.05;
     }
@@ -317,21 +319,6 @@ const locationDisplay = computed(() => {
       <span>FOV: {{ fovDisplay }}</span>
     </div>
 
-    <!-- Download Mode -->
-    <div class="tb-item relative">
-      <button class="tb-btn" @click="toggleDropdown('download')">
-        Mode: {{ localSettings.download_mode || 'Selected' }} ▼
-      </button>
-      <div class="dropdown-menu" v-if="activeDropdown === 'download'">
-          <label><strong>Download Mode</strong></label>
-          <div class="radio-group">
-              <label><input type="radio" value="selected" v-model="localSettings.download_mode" @change="$emit('update-settings', localSettings)"> Selected Only</label>
-              <label><input type="radio" value="filtered" v-model="localSettings.download_mode" @change="$emit('update-settings', localSettings)"> Filtered (Manual)</label>
-              <label><input type="radio" value="all" v-model="localSettings.download_mode" @change="$emit('update-settings', localSettings)"> All (Auto)</label>
-          </div>
-      </div>
-    </div>
-
     <!-- Catalogs -->
     <div class="tb-item relative">
       <button class="tb-btn" @click="toggleDropdown('catalogs')">
@@ -349,6 +336,16 @@ const locationDisplay = computed(() => {
               </label>
           </div>
       </div>
+    </div>
+
+    <!-- Download Buttons -->
+    <div class="tb-item" v-if="!isDownloading">
+       <button class="tb-btn" @click="$emit('download-filtered')">Download Filtered</button>
+       <button class="tb-btn" @click="$emit('download-all')">Download All</button>
+    </div>
+    <div class="tb-item" v-else>
+       <button class="tb-btn danger" @click="$emit('stop-download')">Stop Downloading</button>
+       <span class="status-text" style="margin-left: 10px;">{{ downloadProgress }}</span>
     </div>
 
     <!-- Cache -->

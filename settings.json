@@ -63,6 +63,5 @@
     "min_size": 10,
     "selected_types": []
   },
-  "min_hours": 0,
-  "download_mode": "selected"
+  "min_hours": 0
 }

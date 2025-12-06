@@ -16,6 +16,8 @@ const objects = ref([]);
 const selectedObject = ref(null);
 const streamStatus = ref('Idle');
 const nightTimes = ref({});
+const isDownloading = ref(false);
+const downloadProgress = ref("");
 
 // Stream handling
 let eventSource = null;
@@ -36,32 +38,42 @@ const fetchSettings = async () => {
     } catch (e) { console.error(e); }
 };
 
-const saveSettings = async (newSettings) => {
+let saveTimeout = null;
+const saveSettings = (newSettings) => {
     // console.log("DEBUG: saveSettings called with:", newSettings);
-    try {
-        // Ensure we send both main settings and client settings
-        const payload = {
-            ...settings.value, // Current global settings
-            ...newSettings,    // Overwrites from TopBar if any
-            client_settings: clientSettings.value // Ensure client settings are included
-        };
+    // Ensure we send both main settings and client settings
+    const payload = {
+        ...settings.value, // Current global settings
+        ...newSettings,    // Overwrites from TopBar if any
+        client_settings: clientSettings.value // Ensure client settings are included
+    };
 
-        await fetch('/api/settings', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
+    // Optimistic Update
+    settings.value = payload;
 
-        // Update local ref
-        settings.value = payload;
-
-    } catch (e) { console.error(e); }
+    if (saveTimeout) clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(async () => {
+        try {
+            await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+        } catch (e) { console.error(e); }
+    }, 500);
 };
 
-const startStream = (forceDownload = false) => {
+const startStream = (mode = 'selected') => {
     if (eventSource) eventSource.close();
 
     streamStatus.value = 'Connecting...';
+    if (mode === 'filtered' || mode === 'all') {
+        isDownloading.value = true;
+        downloadProgress.value = "Starting...";
+    } else {
+        isDownloading.value = false;
+        downloadProgress.value = "";
+    }
 
     const params = new URLSearchParams();
     if (settings.value.telescope) params.append('focal_length', settings.value.telescope.focal_length);
@@ -81,14 +93,21 @@ const startStream = (forceDownload = false) => {
     params.append('image_padding', settings.value.image_padding || 1.05);
 
     // Download Mode Logic
-    let mode = settings.value.download_mode || 'selected';
-    if (forceDownload) mode = 'all'; // Override for "Fetch All" action
     params.append('download_mode', mode);
 
     eventSource = new EventSource(`/api/stream-objects?${params.toString()}`);
 
     eventSource.addEventListener('total', (e) => {
         streamStatus.value = `Found ${e.data} objects.`;
+    });
+
+    eventSource.addEventListener('download_progress', (e) => {
+        try {
+            const progress = JSON.parse(e.data);
+            if (progress.current !== undefined && progress.total !== undefined) {
+                downloadProgress.value = `Downloading ${progress.current} of ${progress.total} images`;
+            }
+        } catch (err) { console.error("Error parsing progress", err); }
     });
 
     eventSource.addEventListener('night_times', (e) => {
@@ -143,17 +162,20 @@ const startStream = (forceDownload = false) => {
         if (obj) {
             obj.status = statusData.status;
             if (statusData.url) obj.image_url = statusData.url;
+            if (statusData.image_fov) obj.image_fov = statusData.image_fov;
         }
     });
 
     eventSource.addEventListener('close', (e) => {
         streamStatus.value = 'Stream Complete';
+        isDownloading.value = false;
         eventSource.close();
         eventSource = null;
     });
 
     eventSource.addEventListener('error', (e) => {
         streamStatus.value = 'Error/Disconnected';
+        isDownloading.value = false;
         if (eventSource) eventSource.close();
         eventSource = null;
     });
@@ -164,6 +186,7 @@ const stopStream = () => {
         eventSource.close();
         eventSource = null;
         streamStatus.value = 'Stopped';
+        isDownloading.value = false;
     }
 };
 
@@ -171,7 +194,7 @@ const stopStream = () => {
 const handlePurge = () => {
     objects.value = [];
     selectedObject.value = null;
-    startStream(); // Restart automatically
+    startStream('selected'); // Restart automatically
 };
 
 // Watch selection to persist and fetch image if needed
@@ -228,7 +251,7 @@ const streamParams = computed(() => {
         tel: settings.value.telescope,
         cam: settings.value.camera,
         cats: settings.value.catalogs,
-        mode: settings.value.download_mode,
+        // mode: settings.value.download_mode, // Removed download_mode dependency
         min_alt: settings.value.min_altitude,
         min_hrs: settings.value.min_hours,
         pad: settings.value.image_padding
@@ -257,7 +280,7 @@ watch(streamParams, (newVal, oldVal) => {
 
         restartTimer = setTimeout(() => {
             console.log("Stream params changed, restarting stream...");
-            startStream();
+            startStream('selected'); // Reset to selected mode on parameter change
         }, 1000);
     } else {
         // console.log("DEBUG: Stream params watcher fired but no changes detected.");
@@ -291,7 +314,7 @@ onMounted(async () => {
     // No longer loading from localStorage
 
     await fetchSettings();
-    startStream(); // Auto-start
+    startStream('selected'); // Auto-start
 });
 
 // Watch for changes to persist client settings
@@ -307,8 +330,10 @@ onUnmounted(() => {
 
 <template>
     <div class="app-container">
-        <TopBar :settings="settings" :streamStatus="streamStatus" @update-settings="saveSettings"
-            @start-stream="startStream" @stop-stream="stopStream" @purge-cache="handlePurge" />
+        <TopBar :settings="settings" :streamStatus="streamStatus" :isDownloading="isDownloading" :downloadProgress="downloadProgress"
+            @update-settings="saveSettings"
+            @start-stream="startStream" @stop-stream="stopStream" @purge-cache="handlePurge"
+            @download-filtered="startStream('filtered')" @download-all="startStream('all')" @stop-download="stopStream" />
 
         <div class="main-layout">
             <!-- Left: Main Framing -->
@@ -339,7 +364,7 @@ onUnmounted(() => {
                     <ObjectList :objects="objects" :selectedId="selectedObject?.name" :settings="settings"
                         :clientSettings="clientSettings" :nightTimes="nightTimes" @select="selectedObject = $event"
                         @update-settings="saveSettings" @update-client-settings="Object.assign(clientSettings, $event)"
-                        @fetch-all="startStream(true)" />
+                        @fetch-all="startStream('all')" />
                 </div>
             </aside>
         </div>
