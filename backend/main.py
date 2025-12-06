@@ -735,6 +735,9 @@ class FetchImageRequest(BaseModel):
     ra: Union[float, str]
     dec: Union[float, str]
     fov: float # in degrees
+    resolution: int = 512
+    source: str = "dss2r"
+    timeout: int = 60
 
 @app.post("/api/fetch-custom-image")
 async def fetch_custom_image(req: FetchImageRequest):
@@ -746,13 +749,14 @@ async def fetch_custom_image(req: FetchImageRequest):
         except Exception:
              # Fallback or error, though SkyCoord usually handles standard string formats
              pass
-    setup_hash = f"custom_fov_{req.fov:.4f}"
+    
+    setup_hash = f"custom_fov_{req.fov:.4f}_res{req.resolution}_{req.source}"
     name = f"RADEC_{req.ra}_{req.dec}"
     
-    print(f"Fetching custom image: FOV={req.fov}, Hash={setup_hash}")
+    print(f"Fetching custom image: FOV={req.fov}, Res={req.resolution}, Source={req.source}")
 
     try:
-        url = await download_image(req.ra, req.dec, req.fov, name, setup_hash)
+        url = await download_image(req.ra, req.dec, req.fov, name, setup_hash, resolution=req.resolution, source=req.source, timeout=req.timeout)
         return {"url": url}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

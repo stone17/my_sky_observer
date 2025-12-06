@@ -37,7 +37,7 @@ profiles: {}
 
 image_server:
   resolution: 512
-  timeout: 60
+  timeout: 120
   source: "dss2r"
 
 client_settings:

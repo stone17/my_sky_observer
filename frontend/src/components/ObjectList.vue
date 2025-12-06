@@ -1,11 +1,9 @@
 <script setup>
 import { computed, ref, watch, nextTick } from 'vue';
 
-const props = defineProps(['objects', 'selectedId', 'settings', 'clientSettings', 'nightTimes']);
+const props = defineProps(['objects', 'selectedId', 'settings', 'clientSettings', 'nightTimes', 'searchQuery']);
 const emit = defineEmits(['select', 'fetch-all', 'update-settings', 'update-client-settings']);
 
-const searchQuery = ref('');
-const showSuggestions = ref(false);
 const showInfoModal = ref(false);
 const infoObject = ref(null);
 
@@ -64,30 +62,7 @@ const openInfo = (obj) => {
     showInfoModal.value = true;
 };
 
-const suggestionList = computed(() => {
-    const q = searchQuery.value.trim();
-    // Allow any non-empty search
-    if (!q) return [];
 
-    const lowerQ = q.toLowerCase().replace(/\s+/g, '');
-
-    // Filter objects that match
-    const matches = props.objects.filter(o => {
-        const id = o.name.toLowerCase().replace(/\s+/g, '');
-        const common = (o.common_name || '').toLowerCase();
-        const other = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
-        return id.startsWith(lowerQ) || common.includes(q.toLowerCase()) || other.includes(lowerQ);
-    });
-
-    // Return top 10 objects
-    return matches.slice(0, 10);
-});
-
-const selectSuggestion = (obj) => {
-    searchQuery.value = obj.name;
-    showSuggestions.value = false;
-    emit('select', obj);
-};
 
 const filteredAndSortedObjects = computed(() => {
     const minAlt = props.settings?.min_altitude || 30;
@@ -108,7 +83,7 @@ const filteredAndSortedObjects = computed(() => {
         // console.log("DEBUG: First Object Metadata:", result[0].obj);
     }
 
-    const q = searchQuery.value.trim().toLowerCase();
+    const q = (props.searchQuery || '').trim().toLowerCase();
 
     result = result.filter(item => {
         const o = item.obj;
@@ -212,11 +187,7 @@ const getInfoTooltip = (obj) => {
     return parts.join('\n');
 };
 
-const onSearchBlur = () => {
-    setTimeout(() => {
-        showSuggestions.value = false;
-    }, 200);
-};
+
 </script>
 
 <template>
@@ -262,17 +233,7 @@ const onSearchBlur = () => {
         <div class="list-content">
             <!-- Search Box -->
             <div class="list-header">
-                <div class="search-box">
-                    <input type="text" v-model="searchQuery" placeholder="Search object..." class="search-input"
-                        @focus="showSuggestions = true" @blur="onSearchBlur" />
-                    <div v-if="showSuggestions && suggestionList.length > 0" class="suggestions-dropdown">
-                        <div v-for="s in suggestionList" :key="s.name" class="suggestion-item"
-                            @click="selectSuggestion(s)">
-                            {{ s.name }} <span v-if="s.common_name && s.common_name !== 'N/A'"
-                                style="color: #9ca3af; font-size: 0.8em;">- {{ s.common_name }}</span>
-                        </div>
-                    </div>
-                </div>
+                <!-- Search Box Removed (Moved to Framing) -->
                 <div class="list-stats">
                     Showing {{ filteredAndSortedObjects.length }} / {{ props.objects.length }}
                 </div>

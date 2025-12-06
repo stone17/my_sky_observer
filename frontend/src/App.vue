@@ -19,6 +19,7 @@ const streamStatus = ref('Idle');
 const nightTimes = ref({});
 const isDownloading = ref(false);
 const downloadProgress = ref("");
+const searchQuery = ref("");
 
 // Stream handling
 let eventSource = null;
@@ -363,7 +364,9 @@ onUnmounted(() => {
             <!-- Left: Main Framing -->
             <section class="framing-section">
                 <div v-if="selectedObject" class="fill-height">
-                    <Framing :object="selectedObject" :settings="settings" :clientSettings="clientSettings"
+                    <Framing :object="selectedObject" :objects="objects" :settings="settings"
+                        :clientSettings="clientSettings" :searchQuery="searchQuery"
+                        @update-search="searchQuery = $event" @select-object="selectedObject = $event"
                         @update-settings="saveSettings"
                         @update-client-settings="Object.assign(clientSettings, $event)" />
                 </div>
@@ -386,8 +389,9 @@ onUnmounted(() => {
                 </div>
                 <div class="list-panel">
                     <ObjectList :objects="objects" :selectedId="selectedObject?.name" :settings="settings"
-                        :clientSettings="clientSettings" :nightTimes="nightTimes" @select="selectedObject = $event"
-                        @update-settings="saveSettings" @update-client-settings="Object.assign(clientSettings, $event)"
+                        :searchQuery="searchQuery" :clientSettings="clientSettings" :nightTimes="nightTimes"
+                        @select="selectedObject = $event" @update-settings="saveSettings"
+                        @update-client-settings="Object.assign(clientSettings, $event)"
                         @fetch-all="startStream('all')" />
                 </div>
             </aside>
