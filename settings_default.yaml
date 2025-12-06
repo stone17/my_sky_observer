@@ -35,6 +35,11 @@ active_profile: null
 
 profiles: {}
 
+image_server:
+  resolution: 512
+  timeout: 60
+  source: "dss2r"
+
 client_settings:
   max_magnitude: 12.0
   min_size: 10.0

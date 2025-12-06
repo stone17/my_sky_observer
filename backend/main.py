@@ -84,6 +84,9 @@ def load_settings() -> dict:
                 elif key == 'location' and 'location' in settings:
                      if isinstance(val, dict) and isinstance(settings['location'], dict):
                         settings['location'].update(val)
+                elif key == 'image_server' and 'image_server' in settings:
+                     if isinstance(val, dict) and isinstance(settings['image_server'], dict):
+                        settings['image_server'].update(val)
                 elif key == 'profiles' and 'profiles' in settings:
                     if isinstance(val, dict) and isinstance(settings['profiles'], dict):
                         settings['profiles'].update(val)
@@ -109,11 +112,10 @@ def save_settings(settings: dict):
     with open(SETTINGS_USER_FILE, 'w') as f: 
         yaml.dump(settings, f, default_flow_style=False)
 
-def get_setup_hash(fov_w_deg: float, fov_h_deg: float, image_padding: float) -> str:
+def get_setup_hash(fov_w_deg: float, fov_h_deg: float, image_padding: float, resolution: int = 512, source: str = "dss2r") -> str:
     # Readable cache folder name based on FOV and padding
-    # Format: fov_W.WW_H.HH_pP.PP
-    # We use 2 decimal places for the folder name to keep it clean but sufficiently unique
-    return f"fov_{fov_w_deg:.2f}_{fov_h_deg:.2f}_p{image_padding:.2f}"
+    # Format: fov_W.WW_H.HH_pP.PP_resNNN_srcSSS
+    return f"fov_{fov_w_deg:.2f}_{fov_h_deg:.2f}_p{image_padding:.2f}_r{resolution}_{source}"
 
 def get_cache_info(object_name: str, setup_hash: str) -> Tuple[str, str, str]:
     # Sanitize filename aggressively to prevent OS errors (especially on Windows)
@@ -132,12 +134,12 @@ def get_cache_info(object_name: str, setup_hash: str) -> Tuple[str, str, str]:
     url = f"/cache/{setup_hash}/{filename}"
     return url, filepath, setup_dir
 
-async def download_and_cache_image(image_url: str, filepath: str, setup_dir: str):
+async def download_and_cache_image(image_url: str, filepath: str, setup_dir: str, timeout: int = 60):
     try:
         if not os.path.exists(setup_dir): os.makedirs(setup_dir, exist_ok=True)
         if not os.path.exists(filepath):
             print(f"    -> Downloading from {image_url}")
-            response = await asyncio.to_thread(requests.get, image_url, timeout=60)
+            response = await asyncio.to_thread(requests.get, image_url, timeout=timeout)
             response.raise_for_status()
 
             # Check for non-image content (SkyView often returns 200 OK with HTML error)
@@ -160,7 +162,7 @@ async def download_and_cache_image(image_url: str, filepath: str, setup_dir: str
         print(f"    -> ERROR in download_and_cache_image: {e}")
         raise e
 
-async def download_image(ra: float, dec: float, fov: float, object_id: str, setup_hash: str) -> str:
+async def download_image(ra: float, dec: float, fov: float, object_id: str, setup_hash: str, resolution: int = 512, source: str = "dss2r", timeout: int = 60) -> str:
     """
     Unified function to download or retrieve an image from cache.
     Returns the web-accessible URL of the image.
@@ -171,15 +173,15 @@ async def download_image(ra: float, dec: float, fov: float, object_id: str, setu
         return url
 
     # Not in cache, download it
-    live_url = get_sky_survey_url(ra, dec, fov)
-    await download_and_cache_image(live_url, filepath, setup_dir)
+    live_url = get_sky_survey_url(ra, dec, fov, resolution, source)
+    await download_and_cache_image(live_url, filepath, setup_dir, timeout)
     return url
 
-def get_sky_survey_url(ra_deg: float, dec_deg: float, fov_in_degrees: float) -> str:
+def get_sky_survey_url(ra_deg: float, dec_deg: float, fov_in_degrees: float, resolution: int = 512, source: str = "dss2r") -> str:
     coords = SkyCoord(ra_deg, dec_deg, unit=(u.deg, u.deg))
     download_fov = max(fov_in_degrees, 0.25)
     base_url = "https://skyview.gsfc.nasa.gov/current/cgi/runquery.pl"
-    params = f"Survey=dss2r&Position={coords.ra.deg:.5f},{coords.dec.deg:.5f}&Size={download_fov:.4f}&Pixels=512&Return=JPG"
+    params = f"Survey={source}&Position={coords.ra.deg:.5f},{coords.dec.deg:.5f}&Size={download_fov:.4f}&Pixels={resolution}&Return=JPG"
     return f"{base_url}?{params}"
 
 # --- Logic Extraction ---
@@ -354,10 +356,14 @@ async def event_stream(request: Request, settings: dict):
         min_altitude = settings.get('min_altitude', 30.0)
         image_padding = settings.get('image_padding', 1.05)
 
+        img_res = settings.get('image_resolution', 512)
+        img_timeout = settings.get('image_timeout', 60)
+        img_source = settings.get('image_source', 'dss2r')
+
         fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
         fov_w_deg, fov_h_deg = fov_w_arcmin / 60.0, fov_h_arcmin / 60.0
         
-        setup_hash = get_setup_hash(fov_w_deg, fov_h_deg, image_padding)
+        setup_hash = get_setup_hash(fov_w_deg, fov_h_deg, image_padding, resolution=img_res, source=img_source)
         
         processed_objects = await asyncio.to_thread(get_sorted_objects, settings, telescope, camera, location)
         
@@ -577,7 +583,7 @@ async def event_stream(request: Request, settings: dict):
                 await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'downloading'})}\n\n")
 
                 try:
-                    url = await download_image(obj_dict['ra'], obj_dict['dec'], download_fov, object_id, setup_hash)
+                    url = await download_image(obj_dict['ra'], obj_dict['dec'], download_fov, object_id, setup_hash, resolution=img_res, source=img_source, timeout=img_timeout)
                     
                     await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'cached', 'url': url, 'image_fov': download_fov})}\n\n")
                 except Exception as download_error:
@@ -641,7 +647,7 @@ async def geocode_city(city: str):
         return JSONResponse(content={"error": f"Geocoding API error: {e}"}, status_code=500)
 
 @app.get("/api/stream-objects")
-async def stream_objects(request: Request, focal_length: float, sensor_width: float, sensor_height: float, latitude: float, longitude: float, catalogs: str, sort_key: str, min_altitude: float = 30.0, min_hours: float = 0.0, image_padding: float = 1.1, download_mode: str = 'selected', max_magnitude: float = 12.0, min_size: float = 0.0, selected_types: str = ""):
+async def stream_objects(request: Request, focal_length: float, sensor_width: float, sensor_height: float, latitude: float, longitude: float, catalogs: str, sort_key: str, min_altitude: float = 30.0, min_hours: float = 0.0, image_padding: float = 1.1, download_mode: str = 'selected', max_magnitude: float = 12.0, min_size: float = 0.0, selected_types: str = "", image_resolution: int = 512, image_timeout: int = 60, image_source: str = "dss2r"):
     settings = {
         "telescope": {"focal_length": focal_length},
         "camera": {"sensor_width": sensor_width, "sensor_height": sensor_height},
@@ -654,7 +660,10 @@ async def stream_objects(request: Request, focal_length: float, sensor_width: fl
         "download_mode": download_mode,
         "max_magnitude": max_magnitude,
         "min_size": min_size,
-        "selected_types": selected_types.split(',') if selected_types else []
+        "selected_types": selected_types.split(',') if selected_types else [],
+        "image_resolution": image_resolution,
+        "image_timeout": image_timeout,
+        "image_source": image_source
     }
     return StreamingResponse(event_stream(request, settings), media_type="text/event-stream")
 
@@ -758,17 +767,23 @@ async def download_object_endpoint(request: Request):
         camera = Camera(**data['settings']['camera'])
         image_padding = data['settings'].get('image_padding', 1.05)
         
+        # Extract Image Params
+        img_srv = data['settings'].get('image_server', {})
+        img_res = img_srv.get('resolution', 512)
+        img_timeout = img_srv.get('timeout', 60)
+        img_source = img_srv.get('source', 'dss2r')
+        
         fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
         fov_w_deg, fov_h_deg = fov_w_arcmin / 60.0, fov_h_arcmin / 60.0
         
-        setup_hash = get_setup_hash(fov_w_deg, fov_h_deg, image_padding)
+        setup_hash = get_setup_hash(fov_w_deg, fov_h_deg, image_padding, resolution=img_res, source=img_source)
         max_fov_deg = max(fov_w_deg, fov_h_deg)
         download_fov = max(max_fov_deg * image_padding, 0.25)
         
         obj = data['object']
-        print(f"On-demand download for {obj['name']} (FOV: {download_fov:.4f})")
+        print(f"On-demand download for {obj['name']} (FOV: {download_fov:.4f}, Res: {img_res})")
         
-        url = await download_image(obj['ra'], obj['dec'], download_fov, obj['name'], setup_hash)
+        url = await download_image(obj['ra'], obj['dec'], download_fov, obj['name'], setup_hash, resolution=img_res, source=img_source, timeout=img_timeout)
         return {"url": url, "status": "cached"}
     except Exception as e:
         print(f"Error in on-demand download: {e}")

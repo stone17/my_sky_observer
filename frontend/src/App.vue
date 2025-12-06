@@ -93,6 +93,15 @@ const startStream = (mode = 'selected') => {
     // params.append('min_hours', settings.value.min_hours || 0.0); // REMOVED from root
     params.append('image_padding', settings.value.image_padding || 1.05);
 
+    // Image Server Params
+    if (settings.value.image_server) {
+        params.append('image_resolution', settings.value.image_server.resolution || 512);
+        params.append('image_timeout', settings.value.image_server.timeout || 60);
+        params.append('image_source', settings.value.image_server.source || 'dss2r');
+    }
+
+    console.log("DEBUG: startStream params:", params.toString());
+
     // Download Mode Logic
     params.append('download_mode', mode);
 
@@ -267,7 +276,8 @@ const streamParams = computed(() => {
         // mode: settings.value.download_mode, // Removed download_mode dependency
         min_alt: settings.value.min_altitude,
         min_hrs: clientSettings.value.min_hours, // Updated source
-        pad: settings.value.image_padding
+        pad: settings.value.image_padding,
+        img_srv: settings.value.image_server // Trigger restart on image settings change
     };
 });
 

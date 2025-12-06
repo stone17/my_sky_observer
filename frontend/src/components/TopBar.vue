@@ -79,6 +79,9 @@ watch(() => props.settings, (newVal) => {
         // download_mode is no longer used in settings for buttons, but we keep it clean if present
         if (!localSettings.value.catalogs) localSettings.value.catalogs = ['messier'];
         if (localSettings.value.image_padding === undefined) localSettings.value.image_padding = 1.05;
+        if (!localSettings.value.image_server) {
+            localSettings.value.image_server = { resolution: 512, timeout: 60, source: 'dss2r' };
+        }
 
         // Sync active profile if present
         if (localSettings.value.active_profile) {
@@ -126,6 +129,11 @@ const loadProfile = (name) => {
     } else {
         console.error(`DEBUG: Profile '${name}' not found.`);
     }
+};
+
+const updateImageSettings = () => {
+    console.log("DEBUG: updateImageSettings called. State:", localSettings.value.image_server);
+    emit('update-settings', localSettings.value);
 };
 
 const createProfile = async () => {
@@ -369,6 +377,40 @@ const locationDisplay = computed(() => {
                             @change="$emit('update-settings', localSettings)">
                         {{ cat }}
                     </label>
+                </div>
+            </div>
+        </div>
+
+        <!-- Image Config -->
+        <div class="tb-item relative">
+            <button class="tb-btn" @click="toggleDropdown('image_server')">
+                Image Server ▼
+            </button>
+            <div class="dropdown-menu" v-if="activeDropdown === 'image_server'">
+                <div class="field-group" v-if="localSettings.image_server">
+                    <label><strong>Resolution</strong></label>
+                    <select v-model.number="localSettings.image_server.resolution" @change="updateImageSettings"
+                        class="mini-select">
+                        <option :value="256">256 px</option>
+                        <option :value="512">512 px (Default)</option>
+                        <option :value="1024">1024 px</option>
+                        <option :value="2048">2048 px</option>
+                    </select>
+                </div>
+                <div class="field-group" v-if="localSettings.image_server">
+                    <label><strong>Timeout (sec)</strong></label>
+                    <input type="number" min="10" max="300" v-model.number="localSettings.image_server.timeout"
+                        @change="updateImageSettings" />
+                </div>
+                <div class="field-group" v-if="localSettings.image_server">
+                    <label><strong>Source / Survey</strong></label>
+                    <select v-model="localSettings.image_server.source" @change="updateImageSettings"
+                        class="mini-select">
+                        <option value="dss2r">DSS2 Red (Default)</option>
+                        <option value="dss2b">DSS2 Blue</option>
+                        <option value="dss2ir">DSS2 IR</option>
+                        <option value="sdss">SDSS (Where available)</option>
+                    </select>
                 </div>
             </div>
         </div>
