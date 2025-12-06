@@ -8,6 +8,8 @@ from urllib.request import urlopen
 # Import your FastAPI app instance
 from backend.main import app
 
+DEBUG = False
+
 def run_server():
     """Runs the Uvicorn server."""
     # Run uvicorn without capturing signals to prevent it from fighting with C# or webview
@@ -47,7 +49,7 @@ def main():
             resizable=True
         )
         # Blocks here until window is closed
-        webview.start(debug=True)
+        webview.start(debug=DEBUG)
     except Exception as e:
         print(f"Failed to create webview window: {e}")
     finally:

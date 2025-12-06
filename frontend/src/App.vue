@@ -276,7 +276,13 @@ const streamParams = computed(() => {
         cats: settings.value.catalogs,
         // mode: settings.value.download_mode, // Removed download_mode dependency
         min_alt: settings.value.min_altitude,
-        min_hrs: clientSettings.value.min_hours, // Updated source
+        min_hrs: clientSettings.value.min_hours,
+        // Added missing filters to trigger restart
+        sort: settings.value.sort_key,
+        max_mag: clientSettings.value.max_magnitude,
+        min_sz: clientSettings.value.min_size,
+        types: clientSettings.value.selected_types,
+
         pad: settings.value.image_padding,
         img_srv: settings.value.image_server // Trigger restart on image settings change
     };

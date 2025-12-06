@@ -36,7 +36,7 @@ active_profile: null
 profiles: {}
 
 image_server:
-  resolution: 512
+  resolution: 1024
   timeout: 120
   source: "dss2r"
 

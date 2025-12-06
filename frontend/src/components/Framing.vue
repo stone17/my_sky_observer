@@ -37,10 +37,7 @@ const selectSuggestion = (obj) => {
     emit('update-search', obj.name);
     emit('select-object', obj);
     showSuggestions.value = false;
-};
-
-const onSearchBlur = () => {
-    setTimeout(() => { showSuggestions.value = false; }, 200);
+    e.preventDefault();
 };
 
 // ResizeObserver State
@@ -49,58 +46,37 @@ const wrapperSize = ref(0);
 let resizeObserver = null;
 
 // FOV State
-const currentFov = ref(2.0); // Viewport FOV in degrees
-const imageFov = ref(2.0);   // FOV of the currently loaded image
+const currentFov = ref(0.1); // Viewport FOV in degrees (zoom level)
+const imageFov = ref(0.1);   // FOV of the currently loaded image (dimensions)
+const sensorFov = ref({ w: 0, h: 0 }); // Authoritative from backend
 
-// Calculate Sensor FOV in degrees
-const sensorFov = computed(() => {
-    if (!props.settings?.camera || !props.settings?.telescope) return { w: 0, h: 0 };
-    const fl = props.settings.telescope.focal_length;
-    const sw = props.settings.camera.sensor_width;
-    const sh = props.settings.camera.sensor_height;
-
-    // Use exact formula: 2 * atan(sensor / (2 * focal_length))
-    const fovW = 2 * Math.atan(sw / (2 * fl)) * (180 / Math.PI);
-    const fovH = 2 * Math.atan(sh / (2 * fl)) * (180 / Math.PI);
-
-    return { w: fovW, h: fovH };
-});
-
-// Initialize FOVs from object data
+// Initialize FOV from object (Single Source of Truth)
 const initFov = () => {
+    // 1. Authoritative Backend Data
     if (props.object) {
-        // PREFERRED: Use explicit image_fov if available (from new backend)
         if (props.object.image_fov) {
-            imageFov.value = props.object.image_fov;
-            currentFov.value = parseFloat(props.object.image_fov.toFixed(1));
+            const iFov = props.object.image_fov;
+            imageFov.value = iFov;
+            // Default Zoom to Image FOV
+            currentFov.value = parseFloat(iFov.toFixed(1));
         }
-        // FALLBACK: Use legacy fov_rectangle if image_fov not present
-        else if (props.object.fov_rectangle && sensorFov.value.w > 0) {
-            const wPct = props.object.fov_rectangle.width_percent;
-            if (wPct > 0) {
-                const calculatedImageFov = sensorFov.value.w / (wPct / 100);
-                imageFov.value = calculatedImageFov;
-                currentFov.value = parseFloat(calculatedImageFov.toFixed(1));
-            }
+        if (props.object.sensor_fov) {
+            sensorFov.value = props.object.sensor_fov;
         }
     }
 };
 
-// Watch object and sensorFov to initialize
-watch([() => props.object, () => props.object?.image_fov, sensorFov], () => {
-    initFov();
-}, { immediate: true });
-
-// Watch object specifically for resets
+// Watch for object updates (which include the new data fields)
 watch(() => props.object, () => {
-    customImageUrl.value = null;
-    offsetX.value = 0;
-    offsetY.value = 0;
-});
+    initFov();
+}, { deep: true, immediate: true });
 
-// Computed Styles
+// Computed Styles - STRICT scaling based on currentFov (Viewport)
 const imageStyle = computed(() => {
-    if (currentFov.value <= 0) return {};
+    if (currentFov.value <= 0.001 || imageFov.value <= 0.001) return { display: 'none' };
+
+    // Scale image relative to viewport
+    // If Viewport (current) == Image (image), scale is 1 (100%)
     const scale = imageFov.value / currentFov.value;
     return {
         width: `${scale * 100}%`,
@@ -113,7 +89,9 @@ const imageStyle = computed(() => {
 });
 
 const sensorStyle = computed(() => {
-    if (currentFov.value <= 0) return {};
+    if (currentFov.value <= 0.001 || sensorFov.value.w <= 0) return { display: 'none' };
+
+    // Scale sensor relative to viewport
     const wPct = (sensorFov.value.w / currentFov.value) * 100;
     const hPct = (sensorFov.value.h / currentFov.value) * 100;
     return {
@@ -148,7 +126,6 @@ const fetchCustomFov = async () => {
         if (res.ok) {
             const data = await res.json();
             customImageUrl.value = data.url + '?t=' + Date.now();
-            // Update imageFov to match the newly fetched FOV
             imageFov.value = currentFov.value;
         }
     } catch (e) {
@@ -157,12 +134,6 @@ const fetchCustomFov = async () => {
     } finally {
         isFetching.value = false;
     }
-};
-
-const startDrag = (e) => {
-    isDragging.value = true;
-    dragStart.value = { x: e.clientX - offsetX.value, y: e.clientY - offsetY.value };
-    e.preventDefault();
 };
 
 const onDrag = (e) => {
@@ -219,36 +190,40 @@ onUnmounted(() => {
             </div>
 
             <div class="header-center">
-                 <div class="group">
+                <div class="group">
                     <strong class="lbl">FOV</strong>
-                    <button class="outline mini" @click="currentFov = parseFloat((currentFov * 1.1).toFixed(1))">+</button>
+                    <button class="outline mini"
+                        @click="currentFov = parseFloat((currentFov * 1.1).toFixed(1))">+</button>
                     <input type="number" v-model.number="currentFov" step="0.1" class="input-mini" />
-                    <button class="outline mini" @click="currentFov = parseFloat((currentFov * 0.9).toFixed(1))">-</button>
-                    <button @click="fetchCustomFov" :disabled="isFetching" class="mini primary" :title="isFetching ? 'Loading' : 'Fetch Image'">{{ isFetching ? '...' : '↓' }}</button>
-                 </div>
-                 
-                 <div class="group">
+                    <button class="outline mini"
+                        @click="currentFov = parseFloat((currentFov * 0.9).toFixed(1))">-</button>
+                    <button @click="fetchCustomFov" :disabled="isFetching" class="mini primary"
+                        :title="isFetching ? 'Loading' : 'Fetch Image'">{{ isFetching ? '...' : '↓' }}</button>
+                </div>
+
+                <div class="group">
                     <strong class="lbl">Rot</strong>
                     <button class="outline mini" @click="rotation -= 5">↺</button>
                     <input type="number" v-model.number="rotation" class="input-mini" />
                     <button class="outline mini" @click="rotation += 5">↻</button>
-                 </div>
-                 
-                 <button class="primary mini" @click="sendToNina">NINA</button>
+                </div>
+
+                <button class="primary mini" @click="sendToNina">NINA</button>
             </div>
 
             <div class="header-right">
-                 <!-- Search -->
-                 <div class="search-container relative">
-                     <input type="text" :value="searchQuery" @input="onSearchInput" placeholder="Search..."
-                            @focus="showSuggestions = true" @blur="onSearchBlur" class="header-search" />
-                     <div v-if="showSuggestions && suggestionList.length > 0" class="suggestions-popover">
-                         <div v-for="s in suggestionList" :key="s.name" class="suggestion-item"
+                <!-- Search -->
+                <div class="search-container relative">
+                    <input type="text" :value="searchQuery" @input="onSearchInput" placeholder="Search..."
+                        @focus="showSuggestions = true" @blur="onSearchBlur" class="header-search" />
+                    <div v-if="showSuggestions && suggestionList.length > 0" class="suggestions-popover">
+                        <div v-for="s in suggestionList" :key="s.name" class="suggestion-item"
                             @click="selectSuggestion(s)">
-                            {{ s.name }} <span v-if="s.common_name && s.common_name !== 'N/A'" style="color: #9ca3af; font-size: 0.8em;">- {{ s.common_name }}</span>
-                         </div>
-                     </div>
-                 </div>
+                            {{ s.name }} <span v-if="s.common_name && s.common_name !== 'N/A'"
+                                style="color: #9ca3af; font-size: 0.8em;">- {{ s.common_name }}</span>
+                        </div>
+                    </div>
+                </div>
             </div>
         </header>
 
@@ -325,12 +300,14 @@ onUnmounted(() => {
     gap: 12px;
     align-items: center;
     justify-content: center;
-    flex: 1; /* Takes up remaining space to center itself relative to container if left/right are balanced, or roughly center */
+    flex: 1;
+    /* Takes up remaining space to center itself relative to container if left/right are balanced, or roughly center */
 }
 
 /* Ensure Name doesn't shrink */
 .header-left {
-    min-width: 200px; /* Balance with Right to help centering */
+    min-width: 200px;
+    /* Balance with Right to help centering */
 }
 
 .divider {
@@ -360,6 +337,7 @@ onUnmounted(() => {
     line-height: 24px;
     box-sizing: border-box;
 }
+
 .mini {
     padding: 2px 8px;
     font-size: 0.9rem;

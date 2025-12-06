@@ -4,7 +4,8 @@
 }
 
 body {
-  padding: 20px;
+  padding: 0;
+  margin: 0; /* Handled in App.vue but good to have here too */
 }
 
 header {

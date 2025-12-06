@@ -356,7 +356,9 @@ const locationDisplay = computed(() => {
             </div>
         </div>
 
-        <!-- FOV moved to Framing Panel -->
+        <div class="tb-item">
+            <span class="status-text" style="color: #e5e7eb; margin:0;">FOV: {{ fovDisplay }}</span>
+        </div>
 
         <!-- Catalogs -->
         <div class="tb-item relative">

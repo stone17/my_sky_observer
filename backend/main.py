@@ -489,8 +489,12 @@ async def event_stream(request: Request, settings: dict):
         # fov_w_deg and fov_h_deg already calculated above
         
         # Calculate download FOV: Max dimension + padding
+        # Calculate download FOV: Max dimension + padding
         max_fov_deg = max(fov_w_deg, fov_h_deg)
         download_fov = max(max_fov_deg * image_padding, 0.25)
+        
+        # Explicit Sensor FOV for Frontend (Single Source of Truth)
+        sensor_fov_data = {"w": fov_w_deg, "h": fov_h_deg}
         
         fov_rect = FOVRectangle(
             width_percent=(fov_w_deg / download_fov) * 100.0, 
@@ -508,9 +512,7 @@ async def event_stream(request: Request, settings: dict):
              min_s = settings.get('min_size', 0.0)
              sel_types = settings.get('selected_types', [])
              
-             # print(f"DEBUG: Filtering with max_m={max_m}, min_s={min_s}, types={sel_types}, min_a={min_a}, min_h={min_h}")
              for o in processed_objects:
-                 # Basic checks
                  if o.get('max_altitude', 0) < min_a: continue
                  if o.get('hours_visible', 0) < min_h: continue
                  
@@ -554,6 +556,7 @@ async def event_stream(request: Request, settings: dict):
                 "altitude_graph": [p.model_dump() for p in altitude_data['target']],
                 "moon_graph": [p.model_dump() for p in altitude_data['moon']],
                 "fov_rectangle": fov_rect.model_dump(),
+                "sensor_fov": sensor_fov_data, # NEW: Authoritative Sensor FOV
                 "image_fov": download_fov,
                 "hours_above_min": hours_above_min, 
                 "setup_hash": setup_hash, 
@@ -562,7 +565,7 @@ async def event_stream(request: Request, settings: dict):
             yield f"event: object_details\ndata: {json.dumps(detail_obj)}\n\n"
 
         print(f"\n--- Starting download for {len(objects_to_download)} images ---")
-
+        
         # Filter out already cached items from objects_to_download to avoid redundant work/messages
         # (Though download_image handles it, we want accurate progress counts)
         final_download_list = []

@@ -156,7 +156,7 @@ const filteredAndSortedObjects = computed(() => {
 
 // Helper to generate SVG path for altitude
 const getAltitudePath = (altitudeGraph) => {
-    if (!altitudeGraph || altitudeGraph.length === 0) return "";
+    if (!altitudeGraph || altitudeGraph.length < 2) return "";
 
     const width = 100;
     const height = 40;
