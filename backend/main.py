@@ -22,17 +22,11 @@ from .astro_utils import AstroCalculator, auto_stretch_image
 from astropy.time import Time
 
 CACHE_DIR = "image_cache"
-SETTINGS_FILE = "settings.json"
-EQUIPMENT_PRESETS = {
-    "cameras": {
-        "ASI1600MM Pro": {"width": 21.9, "height": 16.7},
-        "ASI294MC Pro": {"width": 19.1, "height": 13.0},
-        "ASI183MC Pro": {"width": 13.2, "height": 8.8},
-        "ASI533MC Pro": {"width": 11.3, "height": 11.3},
-        "ASI2600MC Pro": {"width": 23.5, "height": 15.7},
-        "ASI6200MC Pro": {"width": 36, "height": 24},
-    }
-}
+SETTINGS_USER_FILE = "settings_user.yaml"
+SETTINGS_DEFAULT_FILE = "settings_default.yaml"
+SETTINGS_JSON_LEGACY = "settings.json"
+COMPONENTS_FILE = "components.yaml"
+
 
 app = FastAPI()
 calculator = AstroCalculator()
@@ -41,60 +35,74 @@ catalogs = CatalogManager()
 # --- Helper Functions ---
 
 def load_settings() -> dict:
-    defaults = {
-        "telescope": {"focal_length": 1000},
-        "camera": {"sensor_width": 23.5, "sensor_height": 15.7},
-        "location": {"latitude": 51.50, "longitude": 0.12, "city_name": "London"},
-        "catalogs": ["messier"],
-        "min_altitude": 30.0,
-        "image_padding": 1.05,
-        "profiles": {},
-        "client_settings": {
-            "max_magnitude": 12.0,
-            "min_size": 10.0,
-            "selected_types": []
-        }
-    }
-
-    if os.path.exists(SETTINGS_FILE):
+    import yaml
+    
+    settings = {}
+    
+    # 1. Load Defaults
+    if os.path.exists(SETTINGS_DEFAULT_FILE):
         try:
-            with open(SETTINGS_FILE, 'r') as f:
-                settings = json.load(f)
-                
-            # Migration: Merge profiles.json if it exists and not yet in settings
-            if 'profiles' not in settings and os.path.exists(PROFILES_FILE):
-                print("Migrating profiles.json to settings.json...")
-                try:
-                    with open(PROFILES_FILE, 'r') as pf:
-                        old_profiles = json.load(pf)
-                        settings['profiles'] = old_profiles
-                except Exception as e:
-                    print(f"Error migrating profiles: {e}")
-                    settings['profiles'] = {}
-            
-            # Ensure defaults for missing keys
-            for key, val in defaults.items():
-                if key not in settings:
-                    settings[key] = val
-            
-            # Ensure nested defaults for client_settings
-            if 'client_settings' in settings:
-                 for k, v in defaults['client_settings'].items():
-                     if k not in settings['client_settings']:
-                         settings['client_settings'][k] = v
-            
-            # Ensure location city_name
-            if 'location' in settings and 'city_name' not in settings['location']:
-                 settings['location']['city_name'] = ""
-
-            return settings
+            with open(SETTINGS_DEFAULT_FILE, 'r') as f:
+                settings = yaml.safe_load(f) or {}
         except Exception as e:
-            print(f"Error loading settings: {e}")
-            return defaults
-    return defaults
+            print(f"Error loading default settings: {e}")
+            settings = {} # Should probably crash or warn, but empty dict is fallback
+            
+    # 2. Migration: legacy JSON to user YAML
+    if os.path.exists(SETTINGS_JSON_LEGACY) and not os.path.exists(SETTINGS_USER_FILE):
+        print("Migrating legacy settings.json to settings_user.yaml...")
+        try:
+            with open(SETTINGS_JSON_LEGACY, 'r') as f:
+                legacy_data = json.load(f)
+            
+            # Save as YAML
+            with open(SETTINGS_USER_FILE, 'w') as f:
+                yaml.dump(legacy_data, f, default_flow_style=False)
+            
+            # Rename legacy file to avoid re-migration
+            # os.rename(SETTINGS_JSON_LEGACY, SETTINGS_JSON_LEGACY + ".bak") # Optional: Keep it for safety or ignore it
+             
+        except Exception as e:
+            print(f"Error migrating legacy settings: {e}")
+
+    # 3. Load User Overrides
+    if os.path.exists(SETTINGS_USER_FILE):
+        try:
+            with open(SETTINGS_USER_FILE, 'r') as f:
+                user_settings = yaml.safe_load(f) or {}
+                
+            # Deep merge (simple version for top-level keys + client_settings)
+            # A full recursive merge might be better, but we know the structure.
+            for key, val in user_settings.items():
+                if key == 'client_settings' and 'client_settings' in settings:
+                    settings['client_settings'].update(val)
+                elif key == 'telescope' and 'telescope' in settings: # Example of struct
+                     settings['telescope'].update(val)
+                elif key == 'camera' and 'camera' in settings:
+                     settings['camera'].update(val)
+                elif key == 'location' and 'location' in settings:
+                     settings['location'].update(val)
+                # profiles is a dict of dicts, so simple update is fine (adds/replaces profiles)
+                elif key == 'profiles' and 'profiles' in settings: 
+                    settings['profiles'].update(val)
+                else:
+                    # Scalar or new key
+                    settings[key] = val
+                    
+        except Exception as e:
+            print(f"Error loading user settings: {e}")
+
+    # Ensure defaults/migrations for older User files if keys are missing from User but exist in Default
+    # (Already handled by loading Default first)
+
+    return settings
 
 def save_settings(settings: dict):
-    with open(SETTINGS_FILE, 'w') as f: json.dump(settings, f, indent=2)
+    import yaml
+    # We save the FULL state to user settings to ensure persistence. 
+    # Alternatively, we could diff against defaults, but that's complex and error-prone.
+    with open(SETTINGS_USER_FILE, 'w') as f: 
+        yaml.dump(settings, f, default_flow_style=False)
 
 def get_setup_hash(fov_w_deg: float, fov_h_deg: float, image_padding: float) -> str:
     # Readable cache folder name based on FOV and padding
@@ -187,7 +195,10 @@ def get_sorted_objects(settings: dict, telescope: Telescope, camera: Camera, loc
     processed_objects = []
     sort_key = settings.get('sort_key', 'time')
     min_altitude = settings.get('min_altitude', 30.0)
-    min_hours = settings.get('min_hours', 0.0)
+    
+    # Get min_hours from client_settings, defaulting to 0.0
+    client_settings = settings.get('client_settings', {})
+    min_hours = client_settings.get('min_hours', 0.0)
     
     # Pre-calculate twilight periods for sorting if needed
     night_start, night_end = None, None
@@ -619,7 +630,16 @@ def delete_profile(name: str):
     return JSONResponse(content={"error": "Profile not found"}, status_code=404)
 
 @app.get("/api/presets")
-def get_presets(): return EQUIPMENT_PRESETS
+def get_presets():
+    import yaml
+    if os.path.exists(COMPONENTS_FILE):
+        try:
+            with open(COMPONENTS_FILE, 'r') as f:
+                return yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"Error loading components: {e}")
+            return {}
+    return {}
 
 # Cache Management
 @app.get("/api/cache/status")

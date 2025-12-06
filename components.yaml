@@ -1,0 +1,33 @@
+# Component Library (Presets)
+
+cameras:
+  "ASI1600MM Pro":
+    width: 21.9
+    height: 16.7
+  "ASI294MC Pro":
+    width: 19.1
+    height: 13.0
+  "ASI183MC Pro":
+    width: 13.2
+    height: 8.8
+  "ASI533MC Pro":
+    width: 11.3
+    height: 11.3
+  "ASI2600MC Pro":
+    width: 23.5
+    height: 15.7
+  "ASI6200MC Pro":
+    width: 36.0
+    height: 24.0
+
+telescopes:
+  "Redcat 51":
+    focal_length: 250
+  "Redcat 71":
+    focal_length: 350
+  "RASA 8":
+    focal_length: 400
+  "Newtonian 600":
+    focal_length: 600
+  "EdgeHD 8":
+    focal_length: 2032

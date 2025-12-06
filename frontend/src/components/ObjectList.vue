@@ -14,10 +14,10 @@ const localSettings = ref({});
 const localClientSettings = ref({});
 
 const sortOptions = [
-    { value: 'time', label: 'Best Time' },
-    { value: 'hours_above', label: 'Longest Vis' },
-    { value: 'brightness', label: 'Brightest' },
-    { value: 'size', label: 'Largest' }
+    { value: 'time', label: 'Altitude' },
+    { value: 'hours_above', label: 'Visible' },
+    { value: 'brightness', label: 'Brightness' },
+    { value: 'size', label: 'Size' }
 ];
 
 // Sync props to local state
@@ -27,7 +27,7 @@ watch(() => props.settings, (newVal) => {
         if (JSON.stringify(newVal) !== JSON.stringify(localSettings.value)) {
             localSettings.value = { ...newVal };
             if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
-            if (localSettings.value.min_hours === undefined) localSettings.value.min_hours = 0.0;
+            // if (localSettings.value.min_hours === undefined) localSettings.value.min_hours = 0.0; // REMOVED
             if (!localSettings.value.sort_key) localSettings.value.sort_key = 'time';
         }
     }
@@ -70,7 +70,7 @@ const suggestionList = computed(() => {
     if (!q) return [];
 
     const lowerQ = q.toLowerCase().replace(/\s+/g, '');
-    
+
     // Filter objects that match
     const matches = props.objects.filter(o => {
         const id = o.name.toLowerCase().replace(/\s+/g, '');
@@ -91,7 +91,7 @@ const selectSuggestion = (obj) => {
 
 const filteredAndSortedObjects = computed(() => {
     const minAlt = props.settings?.min_altitude || 30;
-    const minHrs = props.settings?.min_hours || 0;
+    const minHrs = props.clientSettings?.min_hours || 0; // Updated source
     const maxMag = props.clientSettings?.max_magnitude ?? 12;
     const minSize = props.clientSettings?.min_size || 0;
     const sortKey = props.settings?.sort_key || 'time';
@@ -112,21 +112,21 @@ const filteredAndSortedObjects = computed(() => {
 
     result = result.filter(item => {
         const o = item.obj;
-        
+
         // Search Filter (Exclusive)
         if (q) {
             const matchId = o.name.toLowerCase().includes(q);
             const matchName = o.common_name && o.common_name.toLowerCase().includes(q);
             const matchOther = o.other_id && o.other_id.toLowerCase().includes(q);
-            
+
             const passes = matchId || matchName || matchOther;
-            
+
             // DEBUG: Log why the first item passes
             if (passes && result.indexOf(item) === 0) {
-                 console.log(`DEBUG: First item '${o.name}' passed search '${q}'. MatchId=${matchId}, MatchName=${matchName}, MatchOther=${matchOther}`);
-                 console.log("DEBUG: Object data:", o);
+                console.log(`DEBUG: First item '${o.name}' passed search '${q}'. MatchId=${matchId}, MatchName=${matchName}, MatchOther=${matchOther}`);
+                console.log("DEBUG: Object data:", o);
             }
-            
+
             // If searching, ONLY show matches. Ignore other filters.
             return passes;
         }
@@ -134,7 +134,7 @@ const filteredAndSortedObjects = computed(() => {
         // Standard Filters (Only apply if NOT searching)
         if (minHrs > 0 && item.dynamicHoursVisible < minHrs) return false;
         if (minAlt > 0 && (o.max_altitude || 0) < minAlt) return false;
-        
+
         // Max Magnitude (Fainter than X is filtered out)
         if (maxMag !== undefined && o.mag !== undefined && o.mag > maxMag) return false;
 
@@ -184,7 +184,7 @@ const getAltitudePath = (altitudeGraph) => {
     if (!altitudeGraph || altitudeGraph.length === 0) return "";
 
     const width = 100;
-    const height = 40; 
+    const height = 40;
     const maxAlt = 90;
 
     const stepX = width / (altitudeGraph.length - 1);
@@ -220,146 +220,141 @@ const onSearchBlur = () => {
 </script>
 
 <template>
-  <div class="list-wrapper">
-    <!-- Left Sidebar: Filters -->
-    <div class="filter-sidebar">
-        <div class="filter-group">
-            <label>Alt></label>
-            <input type="number" v-model.number="localSettings.min_altitude" @input="updateSettings" class="input-sm" />
-        </div>
-        <div class="filter-group">
-            <label>Hrs></label>
-            <input type="number" step="0.5" v-model.number="localSettings.min_hours" @input="updateSettings" class="input-sm" />
-        </div>
-        <div class="filter-group">
-            <label>Mag<</label>
-            <input type="number" step="0.5" v-model.number="localClientSettings.max_magnitude" @change="updateClientSettings" class="input-sm" />
-        </div>
-        <div class="filter-group">
-            <label>Size></label>
-            <input type="number" step="1" v-model.number="localClientSettings.min_size" @change="updateClientSettings" class="input-sm" />
-        </div>
-        <div class="filter-group">
-            <label>Sort</label>
-            <select v-model="localSettings.sort_key" @change="updateSettings" class="input-sm sort-select">
-                <option v-for="opt in sortOptions" :key="opt.value" :value="opt.value">
-                    {{ opt.label }}
-                </option>
-            </select>
-        </div>
-        
-        <button
-           v-if="localSettings.download_mode === 'filtered'"
-           class="small primary fetch-btn"
-           @click="$emit('fetch-all')"
-        >
-           Fetch All
-        </button>
-    </div>
-
-    <!-- Right Content: Search + List -->
-    <div class="list-content">
-        <!-- Search Box -->
-        <div class="list-header">
-             <div class="search-box">
-                 <input 
-                    type="text" 
-                    v-model="searchQuery" 
-                    placeholder="Search object..." 
-                    class="search-input"
-                    @focus="showSuggestions = true"
-                    @blur="onSearchBlur"
-                 />
-                 <div v-if="showSuggestions && suggestionList.length > 0" class="suggestions-dropdown">
-                     <div 
-                        v-for="s in suggestionList" 
-                        :key="s.name" 
-                        class="suggestion-item"
-                        @click="selectSuggestion(s)"
-                     >
-                        {{ s.name }} <span v-if="s.common_name && s.common_name !== 'N/A'" style="color: #9ca3af; font-size: 0.8em;">- {{ s.common_name }}</span>
-                     </div>
-                 </div>
-             </div>
-             <div class="list-stats">
-                 Showing {{ filteredAndSortedObjects.length }} / {{ props.objects.length }}
-             </div>
-        </div>
-
-        <!-- Scrollable List -->
-        <div class="scrollable-list">
-            <div
-                v-for="item in filteredAndSortedObjects"
-                :key="item.obj.name"
-                :id="`obj-card-${item.obj.name}`"
-                class="object-card"
-                :class="{ active: selectedId === item.obj.name }"
-                @click="$emit('select', item.obj)"
-            >
-              <div class="card-content">
-                  <!-- Left: Info -->
-                  <div class="info-col">
-                      <div style="display: flex; align-items: center; gap: 5px; width: 100%;">
-                          <h4 :title="item.obj.name">{{ item.obj.name }}</h4>
-                          <div class="info-icon" @click.stop="openInfo(item.obj)">ⓘ</div>
-                      </div>
-                      <div v-if="item.obj.common_name && item.obj.common_name !== 'N/A'" class="common-name" :title="item.obj.common_name">
-                          {{ item.obj.common_name }}
-                      </div>
-                      <small>
-                        Mag: {{ item.obj.mag }}<br/>
-                        Size: {{ item.obj.size }}<br/>
-                        <span class="vis-time">
-                            Vis: {{ item.dynamicHoursVisible || 0 }}h
-                        </span>
-                      </small>
-                      <span :class="['status-badge', `status-${item.obj.status}`]">{{ item.obj.status }}</span>
-                  </div>
-
-                  <!-- Center: Image -->
-                  <div class="img-col">
-                      <img v-if="item.obj.image_url" :src="item.obj.image_url" class="list-thumb" loading="lazy" />
-                      <div v-else class="img-placeholder"></div>
-                  </div>
-
-                  <!-- Right: Graph -->
-                  <div class="graph-col">
-                      <div class="altitude-chart" v-if="item.obj.altitude_graph && item.obj.altitude_graph.length">
-                          <svg viewBox="0 0 100 40" preserveAspectRatio="none" width="100%" height="40">
-                              <line x1="0" y1="26" x2="100" y2="26" stroke="#444" stroke-width="1" stroke-dasharray="2" />
-                              <path :d="getAltitudePath(item.obj.altitude_graph)" fill="rgba(0, 255, 0, 0.2)" stroke="#0f0" stroke-width="1" />
-                          </svg>
-                      </div>
-                  </div>
-              </div>
+    <div class="list-wrapper">
+        <!-- Left Sidebar: Filters -->
+        <div class="filter-sidebar">
+            <div class="filter-group">
+                <label>Alt></label>
+                <input type="number" v-model.number="localSettings.min_altitude" @input="updateSettings"
+                    class="input-sm" />
             </div>
-            <div v-if="filteredAndSortedObjects.length === 0" style="text-align: center; color: gray; padding: 20px;">
-                No objects match filters.
+            <div class="filter-group">
+                <label>Hrs&gt;</label>
+                <input type="number" step="0.5" v-model.number="localClientSettings.min_hours"
+                    @change="updateClientSettings" class="input-sm" />
+            </div>
+            <div class="filter-group">
+                <label>Mag&lt;</label>
+                <input type="number" step="0.5" v-model.number="localClientSettings.max_magnitude"
+                    @change="updateClientSettings" class="input-sm" />
+            </div>
+            <div class="filter-group">
+                <label>Size></label>
+                <input type="number" step="1" v-model.number="localClientSettings.min_size"
+                    @change="updateClientSettings" class="input-sm" />
+            </div>
+            <div class="filter-group">
+                <label>Sort</label>
+                <select v-model="localSettings.sort_key" @change="updateSettings" class="input-sm sort-select">
+                    <option v-for="opt in sortOptions" :key="opt.value" :value="opt.value">
+                        {{ opt.label }}
+                    </option>
+                </select>
+            </div>
+
+            <button v-if="localSettings.download_mode === 'filtered'" class="small primary fetch-btn"
+                @click="$emit('fetch-all')">
+                Fetch All
+            </button>
+        </div>
+
+        <!-- Right Content: Search + List -->
+        <div class="list-content">
+            <!-- Search Box -->
+            <div class="list-header">
+                <div class="search-box">
+                    <input type="text" v-model="searchQuery" placeholder="Search object..." class="search-input"
+                        @focus="showSuggestions = true" @blur="onSearchBlur" />
+                    <div v-if="showSuggestions && suggestionList.length > 0" class="suggestions-dropdown">
+                        <div v-for="s in suggestionList" :key="s.name" class="suggestion-item"
+                            @click="selectSuggestion(s)">
+                            {{ s.name }} <span v-if="s.common_name && s.common_name !== 'N/A'"
+                                style="color: #9ca3af; font-size: 0.8em;">- {{ s.common_name }}</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="list-stats">
+                    Showing {{ filteredAndSortedObjects.length }} / {{ props.objects.length }}
+                </div>
+            </div>
+
+            <!-- Scrollable List -->
+            <div class="scrollable-list">
+                <div v-for="item in filteredAndSortedObjects" :key="item.obj.name" :id="`obj-card-${item.obj.name}`"
+                    class="object-card" :class="{ active: selectedId === item.obj.name }"
+                    @click="$emit('select', item.obj)">
+                    <div class="card-content">
+                        <!-- Left: Info -->
+                        <div class="info-col">
+                            <div style="display: flex; align-items: center; gap: 5px; width: 100%;">
+                                <h4 :title="item.obj.name">{{ item.obj.name }}</h4>
+                                <div class="info-icon" @click.stop="openInfo(item.obj)">ⓘ</div>
+                            </div>
+                            <div v-if="item.obj.common_name && item.obj.common_name !== 'N/A'" class="common-name"
+                                :title="item.obj.common_name">
+                                {{ item.obj.common_name }}
+                            </div>
+                            <small>
+                                Mag: {{ item.obj.mag }}<br />
+                                Size: {{ item.obj.size }}<br />
+                                <span class="vis-time">
+                                    Vis: {{ item.dynamicHoursVisible || 0 }}h
+                                </span>
+                            </small>
+                            <span :class="['status-badge', `status-${item.obj.status}`]">{{ item.obj.status }}</span>
+                        </div>
+
+                        <!-- Center: Image -->
+                        <div class="img-col">
+                            <img v-if="item.obj.image_url" :src="item.obj.image_url" class="list-thumb"
+                                loading="lazy" />
+                            <div v-else class="img-placeholder"></div>
+                        </div>
+
+                        <!-- Right: Graph -->
+                        <div class="graph-col">
+                            <div class="altitude-chart"
+                                v-if="item.obj.altitude_graph && item.obj.altitude_graph.length">
+                                <svg viewBox="0 0 100 40" preserveAspectRatio="none" width="100%" height="40">
+                                    <line x1="0" y1="26" x2="100" y2="26" stroke="#444" stroke-width="1"
+                                        stroke-dasharray="2" />
+                                    <path :d="getAltitudePath(item.obj.altitude_graph)" fill="rgba(0, 255, 0, 0.2)"
+                                        stroke="#0f0" stroke-width="1" />
+                                </svg>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div v-if="filteredAndSortedObjects.length === 0"
+                    style="text-align: center; color: gray; padding: 20px;">
+                    No objects match filters.
+                </div>
             </div>
         </div>
-    </div>
 
-    <!-- Info Modal -->
-    <div v-if="showInfoModal" class="modal-overlay" @click="showInfoModal = false">
-        <div class="modal-content" @click.stop>
-            <h3>{{ infoObject?.name }}</h3>
-            <p v-if="infoObject?.common_name && infoObject?.common_name !== 'N/A'"><strong>Name:</strong> {{ infoObject.common_name }}</p>
-            <p><strong>Type:</strong> {{ infoObject?.type }}</p>
-            <p><strong>Constellation:</strong> {{ infoObject?.constellation }}</p>
-            <p><strong>Magnitude:</strong> {{ infoObject?.mag }}</p>
-            <p><strong>Size:</strong> {{ infoObject?.size }}</p>
-            <p><strong>Surface Brightness:</strong> {{ infoObject?.surface_brightness }}</p>
-            <p><strong>Other ID:</strong> {{ infoObject?.other_id }}</p>
-            <button @click="showInfoModal = false" class="close-btn">Close</button>
+        <!-- Info Modal -->
+        <div v-if="showInfoModal" class="modal-overlay" @click="showInfoModal = false">
+            <div class="modal-content" @click.stop>
+                <h3>{{ infoObject?.name }}</h3>
+                <p v-if="infoObject?.common_name && infoObject?.common_name !== 'N/A'"><strong>Name:</strong> {{
+                    infoObject.common_name }}</p>
+                <p><strong>Type:</strong> {{ infoObject?.type }}</p>
+                <p><strong>Constellation:</strong> {{ infoObject?.constellation }}</p>
+                <p><strong>Magnitude:</strong> {{ infoObject?.mag }}</p>
+                <p><strong>Size:</strong> {{ infoObject?.size }}</p>
+                <p><strong>Surface Brightness:</strong> {{ infoObject?.surface_brightness }}</p>
+                <p><strong>Other ID:</strong> {{ infoObject?.other_id }}</p>
+                <button @click="showInfoModal = false" class="close-btn">Close</button>
+            </div>
         </div>
     </div>
-  </div>
 </template>
 
 <style scoped>
 .list-wrapper {
     display: flex;
-    flex-direction: row; /* Side by side */
+    flex-direction: row;
+    /* Side by side */
     height: 100%;
     position: relative;
     overflow: hidden;
@@ -416,7 +411,7 @@ const onSearchBlur = () => {
     z-index: 100;
     max-height: 200px;
     overflow-y: auto;
-    box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
 }
 
 .suggestion-item {
@@ -424,6 +419,7 @@ const onSearchBlur = () => {
     cursor: pointer;
     border-bottom: 1px solid #374151;
 }
+
 .suggestion-item:hover {
     background: #374151;
 }
@@ -482,7 +478,11 @@ const onSearchBlur = () => {
     cursor: pointer;
     border-radius: 4px;
 }
-.object-card:hover { background: #1f2937; }
+
+.object-card:hover {
+    background: #1f2937;
+}
+
 .object-card.active {
     border-color: #10b981;
     background: #1f2937;
@@ -490,7 +490,8 @@ const onSearchBlur = () => {
 
 .card-content {
     display: flex;
-    height: 80px; /* Fixed height for consistency */
+    height: 80px;
+    /* Fixed height for consistency */
 }
 
 .info-col {
@@ -540,14 +541,18 @@ const onSearchBlur = () => {
     overflow: hidden;
     text-overflow: ellipsis;
     color: #f3f4f6;
-    flex-shrink: 0; /* Prevent collapsing */
-    min-height: 1.2em; /* Ensure height */
+    flex-shrink: 0;
+    /* Prevent collapsing */
+    min-height: 1.2em;
+    /* Ensure height */
 }
+
 .info-col small {
     font-size: 0.75rem;
     color: #9ca3af;
     line-height: 1.2;
 }
+
 .vis-time {
     color: #10b981;
     font-weight: bold;
@@ -561,9 +566,18 @@ const onSearchBlur = () => {
     margin-top: auto;
     align-self: flex-start;
 }
-.status-cached { color: #10b981; }
-.status-downloading { color: #f59e0b; }
-.status-error { color: #ef4444; }
+
+.status-cached {
+    color: #10b981;
+}
+
+.status-downloading {
+    color: #f59e0b;
+}
+
+.status-error {
+    color: #ef4444;
+}
 
 .altitude-chart {
     width: 100%;
@@ -637,6 +651,7 @@ const onSearchBlur = () => {
     border-radius: 4px;
     cursor: pointer;
 }
+
 .close-btn:hover {
     background: #4b5563;
 }

@@ -10,6 +10,7 @@ const settings = ref({});
 const clientSettings = ref({
     max_magnitude: 12.0,
     min_size: 0.0,
+    min_hours: 0.0,
     selected_types: []
 });
 const objects = ref([]);
@@ -89,7 +90,7 @@ const startStream = (mode = 'selected') => {
 
     params.append('sort_key', settings.value.sort_key || 'time');
     params.append('min_altitude', settings.value.min_altitude || 30.0);
-    params.append('min_hours', settings.value.min_hours || 0.0);
+    // params.append('min_hours', settings.value.min_hours || 0.0); // REMOVED from root
     params.append('image_padding', settings.value.image_padding || 1.05);
 
     // Download Mode Logic
@@ -100,6 +101,9 @@ const startStream = (mode = 'selected') => {
     // Client-side filters (for backend filtering)
     if (clientSettings.value.max_magnitude !== undefined) params.append('max_magnitude', clientSettings.value.max_magnitude);
     if (clientSettings.value.min_size !== undefined) params.append('min_size', clientSettings.value.min_size);
+    // Added min_hours here
+    if (clientSettings.value.min_hours !== undefined) params.append('min_hours', clientSettings.value.min_hours);
+
     if (clientSettings.value.selected_types && clientSettings.value.selected_types.length > 0) {
         params.append('selected_types', clientSettings.value.selected_types.join(','));
     }
@@ -262,7 +266,7 @@ const streamParams = computed(() => {
         cats: settings.value.catalogs,
         // mode: settings.value.download_mode, // Removed download_mode dependency
         min_alt: settings.value.min_altitude,
-        min_hrs: settings.value.min_hours,
+        min_hrs: clientSettings.value.min_hours, // Updated source
         pad: settings.value.image_padding
     };
 });
