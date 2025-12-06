@@ -419,10 +419,25 @@ async def event_stream(request: Request, settings: dict):
         elif download_mode == 'filtered':
              min_h = settings.get('min_hours', 0.0)
              min_a = settings.get('min_altitude', 30.0)
-             objects_to_download = [
-                 o for o in processed_objects
-                 if (o.get('max_altitude', 0) >= min_a and o.get('hours_visible', 0) >= min_h)
-             ]
+             max_m = settings.get('max_magnitude', 12.0)
+             min_s = settings.get('min_size', 0.0)
+             sel_types = settings.get('selected_types', [])
+             
+             # print(f"DEBUG: Filtering with max_m={max_m}, min_s={min_s}, types={sel_types}, min_a={min_a}, min_h={min_h}")
+             for o in processed_objects:
+                 # Basic checks
+                 if o.get('max_altitude', 0) < min_a: continue
+                 if o.get('hours_visible', 0) < min_h: continue
+                 
+                 # New filters
+                 # Allow unknown magnitude (99) to pass, matching frontend logic
+                 mag = o.get('magnitude', 99)
+                 if mag < 99 and mag > max_m: continue
+                 
+                 if o.get('size', 0) < min_s: continue
+                 if sel_types and o.get('type') not in sel_types: continue
+                 
+                 objects_to_download.append(o)
         
         # Set of IDs to download to mark status in details loop
         download_ids = set(o['id'] for o in objects_to_download)
@@ -555,7 +570,7 @@ async def geocode_city(city: str):
         return JSONResponse(content={"error": f"Geocoding API error: {e}"}, status_code=500)
 
 @app.get("/api/stream-objects")
-async def stream_objects(request: Request, focal_length: float, sensor_width: float, sensor_height: float, latitude: float, longitude: float, catalogs: str, sort_key: str, min_altitude: float = 30.0, min_hours: float = 0.0, image_padding: float = 1.1, download_mode: str = 'selected'):
+async def stream_objects(request: Request, focal_length: float, sensor_width: float, sensor_height: float, latitude: float, longitude: float, catalogs: str, sort_key: str, min_altitude: float = 30.0, min_hours: float = 0.0, image_padding: float = 1.1, download_mode: str = 'selected', max_magnitude: float = 12.0, min_size: float = 0.0, selected_types: str = ""):
     settings = {
         "telescope": {"focal_length": focal_length},
         "camera": {"sensor_width": sensor_width, "sensor_height": sensor_height},
@@ -565,7 +580,10 @@ async def stream_objects(request: Request, focal_length: float, sensor_width: fl
         "min_hours": min_hours,
         "sort_key": sort_key,
         "image_padding": image_padding,
-        "download_mode": download_mode
+        "download_mode": download_mode,
+        "max_magnitude": max_magnitude,
+        "min_size": min_size,
+        "selected_types": selected_types.split(',') if selected_types else []
     }
     return StreamingResponse(event_stream(request, settings), media_type="text/event-stream")
 

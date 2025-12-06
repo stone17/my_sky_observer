@@ -59,6 +59,10 @@ class CatalogManager:
                     'size': 'maj_ax'
                 })
 
+                # Parse size column to numeric (arcminutes)
+                if 'maj_ax' in df.columns:
+                    df['maj_ax'] = df['maj_ax'].apply(cls.parse_size)
+
                 # Fill N/A names
                 df['name'] = df['name'].fillna('N/A')
                 

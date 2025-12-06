@@ -95,6 +95,15 @@ const startStream = (mode = 'selected') => {
     // Download Mode Logic
     params.append('download_mode', mode);
 
+
+
+    // Client-side filters (for backend filtering)
+    if (clientSettings.value.max_magnitude !== undefined) params.append('max_magnitude', clientSettings.value.max_magnitude);
+    if (clientSettings.value.min_size !== undefined) params.append('min_size', clientSettings.value.min_size);
+    if (clientSettings.value.selected_types && clientSettings.value.selected_types.length > 0) {
+        params.append('selected_types', clientSettings.value.selected_types.join(','));
+    }
+
     eventSource = new EventSource(`/api/stream-objects?${params.toString()}`);
 
     eventSource.addEventListener('total', (e) => {
@@ -330,10 +339,10 @@ onUnmounted(() => {
 
 <template>
     <div class="app-container">
-        <TopBar :settings="settings" :streamStatus="streamStatus" :isDownloading="isDownloading" :downloadProgress="downloadProgress"
-            @update-settings="saveSettings"
-            @start-stream="startStream" @stop-stream="stopStream" @purge-cache="handlePurge"
-            @download-filtered="startStream('filtered')" @download-all="startStream('all')" @stop-download="stopStream" />
+        <TopBar :settings="settings" :streamStatus="streamStatus" :isDownloading="isDownloading"
+            :downloadProgress="downloadProgress" @update-settings="saveSettings" @start-stream="startStream"
+            @stop-stream="stopStream" @purge-cache="handlePurge" @download-filtered="startStream('filtered')"
+            @download-all="startStream('all')" @stop-download="stopStream" />
 
         <div class="main-layout">
             <!-- Left: Main Framing -->
