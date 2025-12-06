@@ -99,8 +99,10 @@ onMounted(() => {
 
 // Actions
 const loadProfile = (name) => {
+    console.log(`DEBUG: Loading profile '${name}'...`);
     if (profiles.value[name]) {
         const profileData = JSON.parse(JSON.stringify(profiles.value[name]));
+        console.log("DEBUG: Profile data:", profileData);
 
         // Preserve current location if it exists
         const savedLocation = localSettings.value.location;
@@ -118,9 +120,11 @@ const loadProfile = (name) => {
         }
 
         selectedProfileName.value = name;
-        // localStorage.removeItem('last_profile');
+        console.log("DEBUG: Updated localSettings:", localSettings.value);
         emit('update-settings', localSettings.value);
         closeDropdown();
+    } else {
+        console.error(`DEBUG: Profile '${name}' not found.`);
     }
 };
 

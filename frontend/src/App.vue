@@ -288,6 +288,7 @@ watch(streamParams, (newVal, oldVal) => {
         console.log("DEBUG: Stream params changed:", changes);
         console.log("Old:", oldVal);
         console.log("New:", newVal);
+        console.log("DEBUG: Settings telescope:", settings.value.telescope);
 
         if (restartTimer) clearTimeout(restartTimer);
 

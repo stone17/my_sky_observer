@@ -414,6 +414,61 @@ async def event_stream(request: Request, settings: dict):
 
         # 2. Stream Details (Graphs, Cache Check) for Top 50 objects (Slower)
         # This ensures the visible list gets populated with graphs quickly
+        
+        # PRIORITIZATION:
+        # We need to ensure that objects matching the current CLIENT filter settings are prioritized
+        # for details generation, otherwise they might be visible in the UI but lack graphs
+        # because they fell outside the global Top 50.
+        
+        # Extract filters from args which are now in settings dictionary or passed directly
+        # Note: stream_objects arguments are put into 'settings' dict in main.py before calling event_stream
+        p_min_h = settings.get('min_hours', 0.0)
+        p_min_a = settings.get('min_altitude', 30.0)
+        p_max_m = settings.get('max_magnitude', 12.0)
+        p_min_s = settings.get('min_size', 0.0)
+        p_sel_types = settings.get('selected_types', [])
+        if isinstance(p_sel_types, str) and p_sel_types: p_sel_types = p_sel_types.split(',')
+        if isinstance(p_sel_types, list): p_sel_types = [t.strip() for t in p_sel_types if t.strip()]
+
+        def score_priority(o):
+            # High score = High priority
+            score = 0
+            # Matches filters?
+            matches = True
+            
+            try:
+                # Safely cast and compare
+                o_max_alt = float(o.get('max_altitude', 0) or 0)
+                if o_max_alt < p_min_a: matches = False
+                
+                o_hours = float(o.get('hours_visible', 0) or 0)
+                if o_hours < p_min_h: matches = False
+                
+                # Mag might be 'NaN' or string
+                raw_mag = o.get('magnitude', 99)
+                try:
+                    mag = float(raw_mag)
+                except (ValueError, TypeError):
+                    mag = 99.0
+                    
+                if mag < 99 and mag > p_max_m: matches = False
+                
+                o_size = float(o.get('maj_ax', 0) or 0)
+                if o_size < p_min_s: matches = False
+                
+                if p_sel_types and o.get('type') not in p_sel_types: matches = False
+                
+            except Exception:
+                # If any comparison fails, treat as non-match but don't crash the stream
+                matches = False
+            
+            if matches: score += 1000
+            return score
+
+        # Python's sort is stable, so we just sort by priority score descending
+        # This keeps the original sort order (e.g. by time) within the priority groups
+        processed_objects.sort(key=score_priority, reverse=True)
+
         top_objects = processed_objects[:50]
         print(f"--- Streaming details for top {len(top_objects)} objects ---")
         
