@@ -1,11 +1,15 @@
 /* Custom styles to override or augment Pico */
 :root {
   --pico-font-size: 16px;
+  --bg-color: #111827;
+  /* <--- YOU WERE MISSING THIS LINE */
 }
 
 body {
   padding: 0;
-  margin: 0; /* Handled in App.vue but good to have here too */
+  margin: 0;
+  background-color: var(--bg-color);
+  color: #f3f4f6;
 }
 
 header {
@@ -73,10 +77,25 @@ header {
   float: right;
 }
 
-.status-cached { background-color: #2d6f34; color: white; }
-.status-downloading { background-color: #b8860b; color: white; }
-.status-queued { background-color: #555; color: #ccc; }
-.status-error { background-color: #8b0000; color: white; }
+.status-cached {
+  background-color: #2d6f34;
+  color: white;
+}
+
+.status-downloading {
+  background-color: #b8860b;
+  color: white;
+}
+
+.status-queued {
+  background-color: #555;
+  color: #ccc;
+}
+
+.status-error {
+  background-color: #8b0000;
+  color: white;
+}
 
 .framing-container {
   width: 100%;
