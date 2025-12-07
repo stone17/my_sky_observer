@@ -55,6 +55,26 @@ const currentFov = ref(0.1);
 const imageFov = ref(0.1);
 const sensorFov = ref({ w: 0, h: 0 });
 
+const updateSensorFov = () => {
+    let computed = false;
+    if (props.settings && props.settings.telescope && props.settings.camera) {
+        const fl = parseFloat(props.settings.telescope.focal_length);
+        const sw = parseFloat(props.settings.camera.sensor_width);
+        const sh = parseFloat(props.settings.camera.sensor_height);
+
+        if (!isNaN(fl) && fl > 0 && !isNaN(sw) && sw > 0 && !isNaN(sh) && sh > 0) {
+            const w = (sw / fl) * 57.2958;
+            const h = (sh / fl) * 57.2958;
+            sensorFov.value = { w, h };
+            computed = true;
+        }
+    }
+
+    if (!computed && props.object && props.object.sensor_fov) {
+        sensorFov.value = props.object.sensor_fov;
+    }
+};
+
 const initFov = () => {
     if (props.object) {
         if (props.object.image_fov) {
@@ -64,13 +84,12 @@ const initFov = () => {
                 currentFov.value = parseFloat(iFov.toFixed(1));
             }
         }
-        if (props.object.sensor_fov) {
-            sensorFov.value = props.object.sensor_fov;
-        }
     }
+    updateSensorFov();
 };
 
 watch(() => props.object, initFov, { deep: true, immediate: true });
+watch(() => props.settings, updateSensorFov, { deep: true });
 
 const imageStyle = computed(() => {
     if (currentFov.value <= 0.001 || imageFov.value <= 0.001) return { display: 'none' };
