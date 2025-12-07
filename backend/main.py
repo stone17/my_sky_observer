@@ -712,9 +712,12 @@ def delete_profile(name: str):
 @app.get("/api/presets")
 def get_presets():
     import yaml
-    if os.path.exists(COMPONENTS_FILE):
+    # FIX: Use get_resource_path to find the bundled file in the temp folder
+    comp_path = get_resource_path(COMPONENTS_FILE)
+    
+    if os.path.exists(comp_path):
         try:
-            with open(COMPONENTS_FILE, 'r') as f:
+            with open(comp_path, 'r') as f:
                 return yaml.safe_load(f) or {}
         except Exception as e:
             print(f"Error loading components: {e}")

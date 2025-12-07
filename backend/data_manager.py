@@ -1,13 +1,18 @@
 import pandas as pd
 import os
+import sys
 from typing import Dict, List
 import numpy as np
 
 class CatalogManager:
     """Handles loading and caching of astronomical catalog data."""
     _cache: Dict[str, pd.DataFrame] = {}
-    # Updated path to root 'catalogs' directory
-    _catalog_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'catalogs')
+    
+    # FIX: Check for PyInstaller temp folder (_MEIPASS)
+    if hasattr(sys, '_MEIPASS'):
+        _catalog_path = os.path.join(sys._MEIPASS, 'catalogs')
+    else:
+        _catalog_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'catalogs')
 
     @staticmethod
     def parse_size(size_str):

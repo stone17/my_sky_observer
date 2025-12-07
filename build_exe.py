@@ -25,9 +25,10 @@ def build_exe():
     # Define data to bundle
     # Format: "source;dest" (Windows)
     datas = [
-        ('frontend/dist;frontend/dist'),
-        ('settings_default.yaml;.'),
-        ('components.yaml;.')
+        ('frontend/dist', 'frontend/dist'),
+        ('settings_default.yaml', '.'),
+        ('components.yaml', '.'),
+        ('catalogs', 'catalogs'),
     ]
     
     # Hidden imports often needed
@@ -46,7 +47,7 @@ def build_exe():
     ]
     
     args = [
-        'desktop_app.py',
+        'run.py',
         '--name=MySkyObserver',
         '--onefile',
         '--clean',
