@@ -29,7 +29,7 @@ catalogs:
 - ugc
 
 min_altitude: 30.0
-image_padding: 1.05
+image_padding: 1.15
 
 active_profile: null
 

@@ -1,106 +1,60 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 
-const props = defineProps(['object', 'objects', 'settings', 'clientSettings', 'searchQuery', 'availableTypes']);
-const emit = defineEmits(['update-settings', 'update-client-settings', 'update-search', 'select-object']);
+const props = defineProps(['object', 'objects', 'settings', 'clientSettings', 'searchQuery', 'activeFov']);
+const emit = defineEmits(['update-settings', 'update-client-settings', 'update-search', 'select-object', 'update-fov']);
 
-const rotation = ref(0);
-const offsetX = ref(0);
-const offsetY = ref(0);
-const isDragging = ref(false);
-const dragStart = ref({ x: 0, y: 0 });
-const customImageUrl = ref(null);
-const isFetching = ref(false);
-const showSuggestions = ref(false);
+// --- LOCAL FOV STATE (Decoupled from App State) ---
+// Initialize with the active FOV, but allow independent manipulation
+const localFov = ref(props.activeFov || 1.0);
 
-// Search Logic (Normalized)
-const suggestionList = computed(() => {
-    const q = (props.searchQuery || '').trim();
-    if (!q) return [];
-    const normQ = q.toLowerCase().replace(/\s+/g, '');
-
-    const matches = (props.objects || []).filter(o => {
-        const normId = o.name.toLowerCase().replace(/\s+/g, '');
-        const normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
-        const normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
-        return normId.includes(normQ) || normCommon.includes(normQ) || normOther.includes(normQ);
-    });
-
-    matches.sort((a, b) => {
-        const normA = a.name.toLowerCase().replace(/\s+/g, '');
-        const normB = b.name.toLowerCase().replace(/\s+/g, '');
-        if (normA === normQ && normB !== normQ) return -1;
-        if (normB === normQ && normA !== normQ) return 1;
-        const aStarts = normA.startsWith(normQ);
-        const bStarts = normB.startsWith(normQ);
-        if (aStarts && !bStarts) return -1;
-        if (bStarts && !aStarts) return 1;
-        if (normA.length !== normB.length) return normA.length - normB.length;
-        return normA.localeCompare(normB);
-    });
-    return matches.slice(0, 10);
+// Sync localFov if the App's activeFov changes externally (e.g. Profile Reset)
+watch(() => props.activeFov, (newVal) => {
+    // Only sync if they differ significantly to avoid loop
+    if (Math.abs(newVal - localFov.value) > 0.01) {
+        localFov.value = newVal;
+    }
 });
 
-const onSearchInput = (e) => { emit('update-search', e.target.value); showSuggestions.value = true; };
-const selectSuggestion = (obj) => { emit('update-search', obj.name); emit('select-object', obj); showSuggestions.value = false; };
-const onSearchBlur = () => { setTimeout(() => { showSuggestions.value = false; }, 200); };
-
-// Resize
-const viewportRef = ref(null);
-const wrapperSize = ref(0);
-let resizeObserver = null;
-
-// FOV
-const currentFov = ref(0.1);
-const imageFov = ref(0.1);
-const sensorFov = ref({ w: 0, h: 0 });
-
-const updateSensorFov = () => {
-    let computed = false;
-    if (props.settings && props.settings.telescope && props.settings.camera) {
-        const fl = parseFloat(props.settings.telescope.focal_length);
-        const sw = parseFloat(props.settings.camera.sensor_width);
-        const sh = parseFloat(props.settings.camera.sensor_height);
-
-        if (!isNaN(fl) && fl > 0 && !isNaN(sw) && sw > 0 && !isNaN(sh) && sh > 0) {
-            const w = (sw / fl) * 57.2958;
-            const h = (sh / fl) * 57.2958;
-            sensorFov.value = { w, h };
-            computed = true;
-        }
-    }
-
-    if (!computed && props.object && props.object.sensor_fov) {
-        sensorFov.value = props.object.sensor_fov;
-    }
+// The Trigger: Only emit when user clicks the button
+const triggerDownload = () => {
+    emit('update-fov', localFov.value);
 };
 
-const initFov = () => {
-    if (props.object) {
-        if (props.object.image_fov) {
-            const iFov = props.object.image_fov;
-            imageFov.value = iFov;
-            if (currentFov.value <= 0.1 || Math.abs(currentFov.value - iFov) > 5.0) {
-                currentFov.value = parseFloat(iFov.toFixed(1));
-            }
-        }
-    }
-    updateSensorFov();
-};
+// --- VISUALIZATION LOGIC ---
 
-watch(() => props.object, initFov, { deep: true, immediate: true });
-watch(() => props.settings, updateSensorFov, { deep: true });
-
+// 1. Image Sizing
+// As you increase FOV (zoom out), the *current* image (which is smaller) should shrink visually.
 const imageStyle = computed(() => {
-    if (currentFov.value <= 0.001 || imageFov.value <= 0.001) return { display: 'none' };
-    const scale = imageFov.value / currentFov.value;
-    return { width: `${scale * 100}%`, height: `${scale * 100}%`, position: 'absolute', top: '50%', left: '50%', transform: `translate(-50%, -50%)` };
+    // The FOV of the image currently displayed (fallback to local if missing)
+    const imgFov = props.object?.image_fov || props.activeFov || 1.0;
+
+    // Scale = (Image Actual FOV) / (User Requested FOV)
+    // Example: Image is 1.0°. User requests 2.0°. Scale = 0.5 (Image takes 50% of view)
+    const scale = imgFov / localFov.value;
+
+    if (scale <= 0.001) return { display: 'none' };
+
+    return {
+        width: `${scale * 100}%`,
+        height: `${scale * 100}%`,
+        position: 'absolute',
+        top: '50%',
+        left: '50%',
+        transform: `translate(-50%, -50%)`,
+        transition: 'width 0.2s, height 0.2s' // Smooth preview
+    };
 });
 
+// 2. Sensor Rectangle Sizing
+// The Sensor is fixed physical size. As FOV increases, it takes up less % of screen.
 const sensorStyle = computed(() => {
-    if (currentFov.value <= 0.001 || sensorFov.value.w <= 0) return { display: 'none' };
-    const wPct = (sensorFov.value.w / currentFov.value) * 100;
-    const hPct = (sensorFov.value.h / currentFov.value) * 100;
+    const sFov = props.object?.sensor_fov || { w: 0, h: 0 };
+    if (sFov.w <= 0 || localFov.value <= 0.001) return { display: 'none' };
+
+    const wPct = (sFov.w / localFov.value) * 100;
+    const hPct = (sFov.h / localFov.value) * 100;
+
     return {
         width: `${wPct}%`,
         height: `${hPct}%`,
@@ -110,15 +64,42 @@ const sensorStyle = computed(() => {
         transform: `translate(-50%, -50%) rotate(${rotation.value}deg)`,
         border: '2px solid red',
         boxShadow: '0 0 10px rgba(255,0,0,0.5)',
-        cursor: 'move'
+        cursor: 'move',
+        transition: 'width 0.2s, height 0.2s'
     };
 });
 
-const fetchCustomFov = async () => { /* Logic hidden for brevity */ };
+// --- STANDARD LOGIC (Search, Drag, etc.) ---
+const rotation = ref(0);
+const offsetX = ref(0);
+const offsetY = ref(0);
+const isDragging = ref(false);
+const dragStart = ref({ x: 0, y: 0 });
+const showSuggestions = ref(false);
+
+const suggestionList = computed(() => {
+    const q = (props.searchQuery || '').trim();
+    if (!q) return [];
+    const normQ = q.toLowerCase().replace(/\s+/g, '');
+    const matches = (props.objects || []).filter(o => {
+        const normId = o.name.toLowerCase().replace(/\s+/g, '');
+        const normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
+        return normId.includes(normQ) || normCommon.includes(normQ);
+    });
+    return matches.slice(0, 10);
+});
+
+const onSearchInput = (e) => { emit('update-search', e.target.value); showSuggestions.value = true; };
+const selectSuggestion = (obj) => { emit('update-search', obj.name); emit('select-object', obj); showSuggestions.value = false; };
+const onSearchBlur = () => { setTimeout(() => { showSuggestions.value = false; }, 200); };
+
+const viewportRef = ref(null);
+const wrapperSize = ref(0);
+let resizeObserver = null;
+
 const onDrag = (e) => { if (isDragging.value) { offsetX.value = e.clientX - dragStart.value.x; offsetY.value = e.clientY - dragStart.value.y; } };
 const startDrag = (e) => { isDragging.value = true; dragStart.value = { x: e.clientX - offsetX.value, y: e.clientY - offsetY.value }; e.preventDefault(); };
 const stopDrag = () => { isDragging.value = false; };
-const sendToNina = async () => { /* Logic hidden for brevity */ };
 
 onMounted(() => {
     if (viewportRef.value) {
@@ -141,11 +122,16 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
             <div class="header-center">
                 <div class="group">
                     <strong class="lbl">FOV</strong>
-                    <button class="outline mini"
-                        @click="currentFov = parseFloat((currentFov * 1.1).toFixed(1))">+</button>
-                    <input type="number" v-model.number="currentFov" step="0.1" class="input-mini" />
-                    <button class="outline mini"
-                        @click="currentFov = parseFloat((currentFov * 0.9).toFixed(1))">-</button>
+                    <button class="outline mini" @click="localFov = parseFloat((localFov * 1.1).toFixed(1))">+</button>
+
+                    <input type="number" v-model.number="localFov" step="0.1" class="input-mini" />
+
+                    <button class="outline mini" @click="localFov = parseFloat((localFov * 0.9).toFixed(1))">-</button>
+
+                    <button class="outline mini primary-action" @click="triggerDownload"
+                        title="Download image with this FOV">
+                        ⟳
+                    </button>
                 </div>
             </div>
             <div class="header-right">
@@ -155,8 +141,7 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
                     <div v-if="showSuggestions && suggestionList.length > 0" class="suggestions-popover">
                         <div v-for="s in suggestionList" :key="s.name" class="suggestion-item"
                             @click="selectSuggestion(s)">
-                            {{ s.name }} <span v-if="s.common_name && s.common_name !== 'N/A'"
-                                style="color: #9ca3af; font-size: 0.8em;">- {{ s.common_name }}</span>
+                            {{ s.name }}
                         </div>
                     </div>
                 </div>
@@ -166,30 +151,28 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
         <div class="framing-viewport" ref="viewportRef" @mousemove="onDrag" @mouseup="stopDrag" @mouseleave="stopDrag">
             <div class="image-wrapper" :style="{ width: wrapperSize + 'px', height: wrapperSize + 'px' }">
                 <div class="image-container" :style="imageStyle">
-                    <img v-if="customImageUrl || object.image_url" :src="customImageUrl || object.image_url"
-                        class="sky-image" />
+                    <img v-if="object.image_url" :src="object.image_url" class="sky-image" />
                     <div v-else class="sky-image placeholder-text">
                         <span v-if="object.status === 'downloading'">Downloading...</span>
                         <span v-else>No Image</span>
                     </div>
                 </div>
+
                 <div v-if="object && settings" :style="sensorStyle" @mousedown="startDrag">
                     <div class="crosshair">+</div>
                 </div>
             </div>
 
-            <div
-                style="position: absolute; bottom: 0; left: 0; background: rgba(0,0,0,0.8); color: lime; font-size: 11px; padding: 4px; pointer-events: none; z-index: 100; text-align: left;">
+            <div class="osd-overlay">
                 <div>Object: {{ object.name }}</div>
-                <div>Sensor FOV: {{ sensorFov.w.toFixed(3) }}° x {{ sensorFov.h.toFixed(3) }}°</div>
-                <div>Settings FL: {{ settings?.telescope?.focal_length }}</div>
+                <div>Target FOV: {{ localFov.toFixed(2) }}°</div>
+                <div>Sensor: {{ object.sensor_fov?.w.toFixed(2) }}° x {{ object.sensor_fov?.h.toFixed(2) }}°</div>
             </div>
         </div>
     </article>
 </template>
 
 <style scoped>
-/* (Same styles as before) */
 .framing-panel {
     height: 100%;
     display: flex;
@@ -263,6 +246,21 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
     font-size: 0.9rem;
     height: 26px;
     line-height: 1;
+    border: 1px solid #4b5563;
+    background: transparent;
+    color: #fff;
+    cursor: pointer;
+}
+
+.mini:hover {
+    background: #374151;
+}
+
+.primary-action {
+    color: #10b981;
+    border-color: #10b981;
+    margin-left: 5px;
+    font-weight: bold;
 }
 
 .search-container {
@@ -337,6 +335,7 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
     display: flex;
     justify-content: center;
     align-items: center;
+    overflow: hidden;
 }
 
 .sky-image {
@@ -364,5 +363,18 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
     color: red;
     pointer-events: none;
     font-size: 20px;
+}
+
+.osd-overlay {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    background: rgba(0, 0, 0, 0.8);
+    color: lime;
+    font-size: 11px;
+    padding: 4px;
+    pointer-events: none;
+    z-index: 100;
+    text-align: left;
 }
 </style>

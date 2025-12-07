@@ -5,7 +5,8 @@ const props = defineProps({
     settings: Object,
     streamStatus: String,
     isDownloading: Boolean,
-    downloadProgress: String
+    downloadProgress: String,
+    activeFov: Number // Received from App.vue
 });
 
 const emit = defineEmits(['update-settings', 'start-stream', 'stop-stream', 'purge-cache', 'download-filtered', 'download-all', 'stop-download']);
@@ -75,8 +76,6 @@ watch(() => props.settings, (newVal) => {
         localSettings.value = JSON.parse(JSON.stringify(newVal));
         // Ensure defaults
         if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
-        // min_hours removed
-        // download_mode is no longer used in settings for buttons, but we keep it clean if present
         if (!localSettings.value.catalogs) localSettings.value.catalogs = ['messier'];
         if (localSettings.value.image_padding === undefined) localSettings.value.image_padding = 1.05;
         if (!localSettings.value.image_server) {
@@ -102,10 +101,8 @@ onMounted(() => {
 
 // Actions
 const loadProfile = (name) => {
-    console.log(`DEBUG: Loading profile '${name}'...`);
     if (profiles.value[name]) {
         const profileData = JSON.parse(JSON.stringify(profiles.value[name]));
-        console.log("DEBUG: Profile data:", profileData);
 
         // Preserve current location if it exists
         const savedLocation = localSettings.value.location;
@@ -123,7 +120,6 @@ const loadProfile = (name) => {
         }
 
         selectedProfileName.value = name;
-        console.log("DEBUG: Updated localSettings:", localSettings.value);
         emit('update-settings', localSettings.value);
         closeDropdown();
     } else {
@@ -132,7 +128,6 @@ const loadProfile = (name) => {
 };
 
 const updateImageSettings = () => {
-    console.log("DEBUG: updateImageSettings called. State:", localSettings.value.image_server);
     emit('update-settings', localSettings.value);
 };
 
@@ -143,7 +138,7 @@ const createProfile = async () => {
     // Create profile data excluding location
     const profileData = JSON.parse(JSON.stringify(localSettings.value));
     delete profileData.location;
-    delete profileData.active_profile; // Don't store active_profile inside the profile definition itself
+    delete profileData.active_profile;
     delete profileData.profiles;
 
     try {
@@ -154,15 +149,11 @@ const createProfile = async () => {
         });
         await fetchProfiles();
 
-        // Optimize: Switch to it immediately
         selectedProfileName.value = name;
         localSettings.value.active_profile = name;
-
-        // CRITICAL: Update localSettings.profiles to match
         localSettings.value.profiles = JSON.parse(JSON.stringify(profiles.value));
 
         emit('update-settings', localSettings.value);
-
         newProfileName.value = "";
     } catch (e) { console.error(e); }
 };
@@ -178,7 +169,6 @@ const deleteProfile = async () => {
             localSettings.value.active_profile = null;
         }
 
-        // CRITICAL: Update localSettings.profiles to match
         localSettings.value.profiles = JSON.parse(JSON.stringify(profiles.value));
 
         emit('update-settings', localSettings.value);
@@ -195,7 +185,6 @@ const applyPreset = (cameraName) => {
     }
 };
 
-// Computed property for the camera preset select
 const selectedCameraPreset = computed({
     get() {
         if (!localSettings.value.camera || !presets.value.cameras) return "";
@@ -249,14 +238,9 @@ const selectCity = (city) => {
 };
 
 const fovDisplay = computed(() => {
-    if (!localSettings.value.telescope || !localSettings.value.camera) return "-";
-    const fl = localSettings.value.telescope.focal_length;
-    const sw = localSettings.value.camera.sensor_width;
-    const sh = localSettings.value.camera.sensor_height;
-    if (!fl) return "-";
-    const w = ((sw / fl) * 57.2958).toFixed(2);
-    const h = ((sh / fl) * 57.2958).toFixed(2);
-    return `${w}° x ${h}°`;
+    // Just display what App.vue passed down
+    if (props.activeFov) return `${props.activeFov.toFixed(2)}°`;
+    return "-";
 });
 
 const locationDisplay = computed(() => {
@@ -272,7 +256,6 @@ const locationDisplay = computed(() => {
 
 <template>
     <div class="top-bar">
-        <!-- Profile -->
         <div class="tb-item relative">
             <button class="tb-btn" @click="toggleDropdown('profile')">
                 Profile: {{ selectedProfileName || 'Custom' }} ▼
@@ -325,7 +308,6 @@ const locationDisplay = computed(() => {
             </div>
         </div>
 
-        <!-- Location -->
         <div class="tb-item relative">
             <button class="tb-btn" @click="toggleDropdown('location')">
                 {{ locationDisplay }} ▼
@@ -360,7 +342,6 @@ const locationDisplay = computed(() => {
             <span class="status-text" style="color: #e5e7eb; margin:0;">FOV: {{ fovDisplay }}</span>
         </div>
 
-        <!-- Catalogs -->
         <div class="tb-item relative">
             <button class="tb-btn" @click="toggleDropdown('catalogs')">
                 Catalogs ▼
@@ -380,7 +361,6 @@ const locationDisplay = computed(() => {
             </div>
         </div>
 
-        <!-- Image Config -->
         <div class="tb-item relative">
             <button class="tb-btn" @click="toggleDropdown('image_server')">
                 Image Server ▼
@@ -414,7 +394,6 @@ const locationDisplay = computed(() => {
             </div>
         </div>
 
-        <!-- Download Buttons -->
         <div class="tb-item" v-if="!isDownloading">
             <button class="tb-btn" @click="$emit('download-filtered')">Download Filtered</button>
             <button class="tb-btn" @click="$emit('download-all')">Download All</button>
@@ -424,7 +403,6 @@ const locationDisplay = computed(() => {
             <span class="status-text" style="margin-left: 10px;">{{ downloadProgress }}</span>
         </div>
 
-        <!-- Cache -->
         <div class="tb-item relative push-right">
             <button class="tb-btn" @click="toggleDropdown('cache')">
                 Cache: {{ cacheStatus.size_mb }} MB ▼
@@ -436,7 +414,6 @@ const locationDisplay = computed(() => {
             </div>
         </div>
 
-        <!-- Stream Status -->
         <div class="tb-item">
             <span class="status-text">{{ streamStatus }}</span>
         </div>
