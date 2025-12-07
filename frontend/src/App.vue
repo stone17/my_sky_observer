@@ -30,34 +30,85 @@ const systemFov = computed(() => {
     return parseFloat(((sw / fl) * 57.2958).toFixed(2));
 });
 
+const getDownloadFocalLength = () => {
+    // Calculate Virtual FL if Manual Mode is active
+    if (isManualFov.value && activeFov.value > 0 && settings.value.camera?.sensor_width) {
+        return (settings.value.camera.sensor_width / activeFov.value) * 57.2958;
+    }
+    return settings.value.telescope?.focal_length;
+};
+
+// --- CORE DOWNLOAD LOGIC ---
+const downloadImage = async (obj) => {
+    if (!obj) return;
+
+    obj.status = 'downloading'; // Immediate UI update
+
+    try {
+        const dlFocalLength = getDownloadFocalLength();
+        // Capture the requested FOV to enforce it later if needed
+        const requestedFov = isManualFov.value ? activeFov.value : systemFov.value;
+
+        const res = await fetch('/api/download-object', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                object: obj,
+                settings: {
+                    ...settings.value,
+                    telescope: { ...settings.value.telescope, focal_length: dlFocalLength }
+                }
+            })
+        });
+
+        if (res.ok) {
+            const data = await res.json();
+            obj.image_url = data.url;
+            obj.status = data.status;
+
+            // CRITICAL FIX: Ensure image_fov matches what we just downloaded.
+            // If API returns it, good. If not, use the requestedFov we used to generate it.
+            obj.image_fov = data.image_fov || requestedFov;
+
+        } else {
+            obj.status = 'error';
+        }
+    } catch (e) {
+        console.error(e);
+        obj.status = 'error';
+    }
+};
+
 // Watcher 1: Profile Changes
 watch(() => settings.value, (newVal, oldVal) => {
     const newFl = newVal?.telescope?.focal_length;
     const oldFl = oldVal?.telescope?.focal_length;
     const newSw = newVal?.camera?.sensor_width;
     const oldSw = oldVal?.camera?.sensor_width;
-    // Only reset if hardware specs actually change
     if (newFl !== oldFl || newSw !== oldSw) {
         isManualFov.value = false;
         activeFov.value = systemFov.value;
     }
 }, { deep: true });
 
-// Watcher 2: Object Selection Changes
+// Watcher 2: Object Selection
 watch(selectedObject, (newVal, oldVal) => {
-    // CRITICAL FIX: Only reset FOV if the Object IDENTITY changes.
-    // This prevents resets when the object stream merely updates status/details.
     if (newVal?.name !== oldVal?.name) {
         isManualFov.value = false;
         activeFov.value = systemFov.value;
+        if (newVal && (!newVal.image_url || newVal.status === 'pending')) {
+            downloadImage(newVal);
+        }
     }
 });
 
-// Called when user clicks "Download" in Framing.vue
+// Watcher 3: Manual FOV Update
 const handleFovUpdate = (newFov) => {
     isManualFov.value = true;
     activeFov.value = newFov;
-    // This will trigger streamParams -> watch -> startStream
+    if (selectedObject.value) {
+        downloadImage(selectedObject.value);
+    }
 };
 
 // --- STREAMING LOGIC ---
@@ -92,7 +143,6 @@ const saveSettings = (newSettings) => {
 
 const startStream = (mode = 'selected') => {
     if (eventSource) eventSource.close();
-
     streamStatus.value = 'Connecting...';
     if (mode === 'filtered' || mode === 'all') {
         isDownloading.value = true;
@@ -103,17 +153,7 @@ const startStream = (mode = 'selected') => {
     }
 
     const params = new URLSearchParams();
-
-    // --- VIRTUAL FOCAL LENGTH CALCULATION ---
-    let effectiveFL = settings.value.telescope?.focal_length;
-    if (isManualFov.value && activeFov.value > 0 && settings.value.camera?.sensor_width) {
-        // FL = (Sensor / FOV) * 57.3
-        effectiveFL = (settings.value.camera.sensor_width / activeFov.value) * 57.2958;
-    }
-
-    if (effectiveFL) params.append('focal_length', effectiveFL);
-    // ----------------------------------------
-
+    if (settings.value.telescope) params.append('focal_length', settings.value.telescope.focal_length);
     if (settings.value.camera) {
         params.append('sensor_width', settings.value.camera.sensor_width);
         params.append('sensor_height', settings.value.camera.sensor_height);
@@ -158,7 +198,7 @@ const startStream = (mode = 'selected') => {
             if (currentId) {
                 const found = objects.value.find(o => o.name === currentId);
                 if (found) selectedObject.value = found;
-            } else if (objects.value.length > 0) {
+            } else if (objects.value.length > 0 && !selectedObject.value) {
                 selectedObject.value = objects.value[0];
             }
             streamStatus.value = `Loaded ${newObjects.length} objects.`;
@@ -177,9 +217,14 @@ const startStream = (mode = 'selected') => {
         const s = JSON.parse(e.data);
         const o = objects.value.find(o => o.name === s.name);
         if (o) {
-            o.status = s.status;
-            if (s.url) o.image_url = s.url;
-            if (s.image_fov) o.image_fov = s.image_fov;
+            const isSelected = selectedObject.value && selectedObject.value.name === o.name;
+            if (isSelected && isManualFov.value) {
+                o.status = s.status; // Don't overwrite URL if manual
+            } else {
+                o.status = s.status;
+                if (s.url) o.image_url = s.url;
+                if (s.image_fov) o.image_fov = s.image_fov;
+            }
         }
     });
 
@@ -192,39 +237,6 @@ const stopStream = () => {
 };
 
 const handlePurge = () => { objects.value = []; selectedObject.value = null; startStream('selected'); };
-
-// Download Logic
-watch(selectedObject, async (newVal) => {
-    if (newVal) {
-        if (!newVal.image_url || newVal.status === 'pending') {
-            newVal.status = 'downloading';
-            try {
-                // Determine FL for download (Manual or Default)
-                let dlFocalLength = settings.value.telescope?.focal_length;
-                if (isManualFov.value && activeFov.value > 0) {
-                    dlFocalLength = (settings.value.camera.sensor_width / activeFov.value) * 57.2958;
-                }
-
-                const res = await fetch('/api/download-object', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        object: newVal,
-                        settings: {
-                            ...settings.value,
-                            telescope: { ...settings.value.telescope, focal_length: dlFocalLength }
-                        }
-                    })
-                });
-                if (res.ok) {
-                    const data = await res.json();
-                    newVal.image_url = data.url;
-                    newVal.status = data.status;
-                } else { newVal.status = 'error'; }
-            } catch (e) { newVal.status = 'error'; }
-        }
-    }
-});
 
 const availableTypes = computed(() => {
     const types = new Set();
@@ -245,7 +257,6 @@ const streamParams = computed(() => ({
     types: clientSettings.value.selected_types,
     pad: settings.value.image_padding,
     img_srv: settings.value.image_server,
-    activeFov: isManualFov.value ? activeFov.value : 'auto' // Dependency trigger
 }));
 
 let restartTimer = null;
@@ -344,7 +355,6 @@ onUnmounted(() => { window.removeEventListener('keydown', handleKeydown); });
     --border-color: #374151;
 }
 
-/* FIX: Set HTML background to match app background to prevent white borders */
 html {
     background-color: var(--bg-color);
 }

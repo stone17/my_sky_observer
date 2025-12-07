@@ -4,56 +4,46 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 const props = defineProps(['object', 'objects', 'settings', 'clientSettings', 'searchQuery', 'activeFov']);
 const emit = defineEmits(['update-settings', 'update-client-settings', 'update-search', 'select-object', 'update-fov']);
 
-// --- LOCAL FOV STATE (Decoupled from App State) ---
-// Initialize with the active FOV, but allow independent manipulation
+// --- LOCAL STATE ---
 const localFov = ref(props.activeFov || 1.0);
 
-// Sync localFov if the App's activeFov changes externally (e.g. Profile Reset)
 watch(() => props.activeFov, (newVal) => {
-    // Only sync if they differ significantly to avoid loop
-    if (Math.abs(newVal - localFov.value) > 0.01) {
-        localFov.value = newVal;
+    if (Math.abs(newVal - localFov.value) > 0.01) localFov.value = newVal;
+});
+
+const isObjectDownloading = computed(() => {
+    return props.object && props.object.status === 'downloading';
+});
+
+// --- PHYSICAL SENSOR CALCULATION ---
+// Calculates the sensor size in degrees based on HARDWARE settings.
+const systemSensorFov = computed(() => {
+    const tel = props.settings?.telescope;
+    const cam = props.settings?.camera;
+    if (!tel?.focal_length || !cam?.sensor_width || !cam?.sensor_height) {
+        return { w: 0, h: 0 };
     }
+
+    // (Sensor / FL) * 57.3
+    const w = (cam.sensor_width / tel.focal_length) * 57.2958;
+    const h = (cam.sensor_height / tel.focal_length) * 57.2958;
+    return { w, h };
 });
 
-// The Trigger: Only emit when user clicks the button
-const triggerDownload = () => {
-    emit('update-fov', localFov.value);
-};
-
-// --- VISUALIZATION LOGIC ---
-
-// 1. Image Sizing
-// As you increase FOV (zoom out), the *current* image (which is smaller) should shrink visually.
-const imageStyle = computed(() => {
-    // The FOV of the image currently displayed (fallback to local if missing)
-    const imgFov = props.object?.image_fov || props.activeFov || 1.0;
-
-    // Scale = (Image Actual FOV) / (User Requested FOV)
-    // Example: Image is 1.0°. User requests 2.0°. Scale = 0.5 (Image takes 50% of view)
-    const scale = imgFov / localFov.value;
-
-    if (scale <= 0.001) return { display: 'none' };
-
-    return {
-        width: `${scale * 100}%`,
-        height: `${scale * 100}%`,
-        position: 'absolute',
-        top: '50%',
-        left: '50%',
-        transform: `translate(-50%, -50%)`,
-        transition: 'width 0.2s, height 0.2s' // Smooth preview
-    };
-});
-
-// 2. Sensor Rectangle Sizing
-// The Sensor is fixed physical size. As FOV increases, it takes up less % of screen.
+// --- SENSOR RECTANGLE STYLE ---
 const sensorStyle = computed(() => {
-    const sFov = props.object?.sensor_fov || { w: 0, h: 0 };
-    if (sFov.w <= 0 || localFov.value <= 0.001) return { display: 'none' };
+    const sFov = systemSensorFov.value;
 
-    const wPct = (sFov.w / localFov.value) * 100;
-    const hPct = (sFov.h / localFov.value) * 100;
+    // Denominator: The FOV of the background image.
+    // If we have a downloaded image, use its metadata (which App.vue ensures is correct).
+    // Fallback to localFov only if no image exists yet.
+    const baseFov = props.object?.image_fov || localFov.value;
+
+    if (sFov.w <= 0 || baseFov <= 0.001) return { display: 'none' };
+
+    // Calculate percentage relative to the BACKGROUND IMAGE size
+    const wPct = (sFov.w / baseFov) * 100;
+    const hPct = (sFov.h / baseFov) * 100;
 
     return {
         width: `${wPct}%`,
@@ -64,12 +54,11 @@ const sensorStyle = computed(() => {
         transform: `translate(-50%, -50%) rotate(${rotation.value}deg)`,
         border: '2px solid red',
         boxShadow: '0 0 10px rgba(255,0,0,0.5)',
-        cursor: 'move',
-        transition: 'width 0.2s, height 0.2s'
+        cursor: 'move'
     };
 });
 
-// --- STANDARD LOGIC (Search, Drag, etc.) ---
+// --- STANDARD LOGIC ---
 const rotation = ref(0);
 const offsetX = ref(0);
 const offsetY = ref(0);
@@ -123,14 +112,12 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
                 <div class="group">
                     <strong class="lbl">FOV</strong>
                     <button class="outline mini" @click="localFov = parseFloat((localFov * 1.1).toFixed(1))">+</button>
-
                     <input type="number" v-model.number="localFov" step="0.1" class="input-mini" />
-
                     <button class="outline mini" @click="localFov = parseFloat((localFov * 0.9).toFixed(1))">-</button>
 
-                    <button class="outline mini primary-action" @click="triggerDownload"
-                        title="Download image with this FOV">
-                        ⟳
+                    <button class="outline mini primary-action" @click="$emit('update-fov', localFov)"
+                        :disabled="isObjectDownloading" title="Download image with this FOV">
+                        {{ isObjectDownloading ? '...' : '⟳' }}
                     </button>
                 </div>
             </div>
@@ -150,23 +137,28 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
 
         <div class="framing-viewport" ref="viewportRef" @mousemove="onDrag" @mouseup="stopDrag" @mouseleave="stopDrag">
             <div class="image-wrapper" :style="{ width: wrapperSize + 'px', height: wrapperSize + 'px' }">
-                <div class="image-container" :style="imageStyle">
+
+                <div class="image-container">
                     <img v-if="object.image_url" :src="object.image_url" class="sky-image" />
                     <div v-else class="sky-image placeholder-text">
-                        <span v-if="object.status === 'downloading'">Downloading...</span>
-                        <span v-else>No Image</span>
+                        <span>No Image</span>
                     </div>
                 </div>
 
-                <div v-if="object && settings" :style="sensorStyle" @mousedown="startDrag">
+                <div v-if="isObjectDownloading" class="download-overlay">
+                    <div class="spinner"></div>
+                    <span>Downloading new view...</span>
+                </div>
+
+                <div v-if="object && settings && !isObjectDownloading" :style="sensorStyle" @mousedown="startDrag">
                     <div class="crosshair">+</div>
                 </div>
             </div>
 
             <div class="osd-overlay">
                 <div>Object: {{ object.name }}</div>
-                <div>Target FOV: {{ localFov.toFixed(2) }}°</div>
-                <div>Sensor: {{ object.sensor_fov?.w.toFixed(2) }}° x {{ object.sensor_fov?.h.toFixed(2) }}°</div>
+                <div>Image FOV: {{ (object.image_fov || localFov).toFixed(1) }}°</div>
+                <div>Sensor: {{ systemSensorFov.w.toFixed(1) }}° x {{ systemSensorFov.h.toFixed(1) }}°</div>
             </div>
         </div>
     </article>
@@ -332,10 +324,11 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
 }
 
 .image-container {
+    width: 100%;
+    height: 100%;
     display: flex;
     justify-content: center;
     align-items: center;
-    overflow: hidden;
 }
 
 .sky-image {
@@ -376,5 +369,40 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
     pointer-events: none;
     z-index: 100;
     text-align: left;
+}
+
+.download-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    color: #10b981;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+}
+
+.spinner {
+    border: 4px solid #374151;
+    border-top: 4px solid #10b981;
+    border-radius: 50%;
+    width: 30px;
+    height: 30px;
+    animation: spin 1s linear infinite;
+    margin-bottom: 10px;
+}
+
+@keyframes spin {
+    0% {
+        transform: rotate(0deg);
+    }
+
+    100% {
+        transform: rotate(360deg);
+    }
 }
 </style>
