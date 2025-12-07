@@ -3,137 +3,50 @@ import json
 import traceback
 import os
 import sys
-import hashlib
-import requests
 import shutil
 import numpy as np
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
-from typing import Dict, Tuple, List, Optional, Union
-import pandas as pd
+from typing import Dict, List, Optional, Union
+import httpx
+import requests
 from astropy.coordinates import SkyCoord, EarthLocation
 import astropy.units as u
+from astropy.time import Time
+from astroplan import Observer
 from pydantic import BaseModel
-import math
+import pandas as pd
 
 from .models import Telescope, Camera, Location, FOVRectangle
 from .data_manager import CatalogManager
 from .astro_utils import AstroCalculator, auto_stretch_image
-from astropy.time import Time
 
+# --- Configuration & Globals ---
 CACHE_DIR = "image_cache"
 SETTINGS_USER_FILE = "settings_user.yaml"
 SETTINGS_DEFAULT_FILE = "settings_default.yaml"
 SETTINGS_JSON_LEGACY = "settings.json"
 COMPONENTS_FILE = "components.yaml"
 
-
 app = FastAPI()
 calculator = AstroCalculator()
 catalogs = CatalogManager()
 
 # --- Helper Functions ---
-
 def get_resource_path(relative_path):
-    """ Get absolute path to resource, works for dev and for PyInstaller """
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
-def load_settings() -> dict:
-    import yaml
-    
-    settings = {}
-    
-    # 1. Load Defaults
-    default_path = get_resource_path(SETTINGS_DEFAULT_FILE)
-    if os.path.exists(default_path):
-        try:
-            with open(default_path, 'r') as f:
-                settings = yaml.safe_load(f) or {}
-        except Exception as e:
-            print(f"Error loading default settings: {e}")
-            settings = {} # Should probably crash or warn, but empty dict is fallback
-            
-    # 2. Migration: legacy JSON to user YAML
-    if os.path.exists(SETTINGS_JSON_LEGACY) and not os.path.exists(SETTINGS_USER_FILE):
-        print("Migrating legacy settings.json to settings_user.yaml...")
-        try:
-            with open(SETTINGS_JSON_LEGACY, 'r') as f:
-                legacy_data = json.load(f)
-            
-            # Save as YAML
-            with open(SETTINGS_USER_FILE, 'w') as f:
-                yaml.dump(legacy_data, f, default_flow_style=False)
-            
-            # Rename legacy file to avoid re-migration
-            # os.rename(SETTINGS_JSON_LEGACY, SETTINGS_JSON_LEGACY + ".bak") # Optional: Keep it for safety or ignore it
-             
-        except Exception as e:
-            print(f"Error migrating legacy settings: {e}")
-
-    # 3. Load User Overrides
-    if os.path.exists(SETTINGS_USER_FILE):
-        try:
-            with open(SETTINGS_USER_FILE, 'r') as f:
-                user_settings = yaml.safe_load(f) or {}
-
-            for key, val in user_settings.items():
-                if key == 'client_settings' and 'client_settings' in settings:
-                    if isinstance(val, dict) and isinstance(settings['client_settings'], dict):
-                        settings['client_settings'].update(val)
-                elif key == 'telescope' and 'telescope' in settings: 
-                     if isinstance(val, dict) and isinstance(settings['telescope'], dict):
-                        settings['telescope'].update(val)
-                elif key == 'camera' and 'camera' in settings:
-                     if isinstance(val, dict) and isinstance(settings['camera'], dict):
-                        settings['camera'].update(val)
-                elif key == 'location' and 'location' in settings:
-                     if isinstance(val, dict) and isinstance(settings['location'], dict):
-                        settings['location'].update(val)
-                elif key == 'image_server' and 'image_server' in settings:
-                     if isinstance(val, dict) and isinstance(settings['image_server'], dict):
-                        settings['image_server'].update(val)
-                elif key == 'profiles' and 'profiles' in settings:
-                    if isinstance(val, dict) and isinstance(settings['profiles'], dict):
-                        settings['profiles'].update(val)
-                    elif isinstance(val, dict): # If settings['profiles'] is None/malformed
-                        settings['profiles'] = val
-                else:
-                    settings[key] = val
-                    
-        except Exception as e:
-            print(f"Error loading user settings: {e}")
-            traceback.print_exc()
-
-    # Ensure profiles is initialized if still missing
-    if 'profiles' not in settings or not isinstance(settings['profiles'], dict):
-        settings['profiles'] = {}
-
-    return settings
-
-def save_settings(settings: dict):
-    import yaml
-    # We save the FULL state to user settings to ensure persistence. 
-    # Alternatively, we could diff against defaults, but that's complex and error-prone.
-    with open(SETTINGS_USER_FILE, 'w') as f: 
-        yaml.dump(settings, f, default_flow_style=False)
-
-def get_setup_hash(fov_w_deg: float, fov_h_deg: float, image_padding: float, resolution: int = 512, source: str = "dss2r") -> str:
-    # Readable cache folder name based on FOV and padding
-    # Format: fov_W.WW_H.HH_pP.PP_resNNN_srcSSS
+def get_setup_hash(fov_w_deg: float, fov_h_deg: float, image_padding: float, resolution: int, source: str) -> str:
     return f"fov_{fov_w_deg:.2f}_{fov_h_deg:.2f}_p{image_padding:.2f}_r{resolution}_{source}"
 
-def get_cache_info(object_name: str, setup_hash: str) -> Tuple[str, str, str]:
-    # Sanitize filename aggressively to prevent OS errors (especially on Windows)
-    # Remove chars: < > : " / \ | ? * and replace spaces/slashes
+def get_cache_info(object_name: str, setup_hash: str):
     invalid_chars = '<>:"/\\|?*'
     sanitized_name = object_name
     for char in invalid_chars:
         sanitized_name = sanitized_name.replace(char, "")
-
-    # Also clean up common coordinate symbols for cleaner filenames
     sanitized_name = sanitized_name.replace(" ", "_").replace("°", "d").replace("'", "m")
 
     filename = f"{sanitized_name}_{setup_hash}.jpg"
@@ -142,498 +55,339 @@ def get_cache_info(object_name: str, setup_hash: str) -> Tuple[str, str, str]:
     url = f"/cache/{setup_hash}/{filename}"
     return url, filepath, setup_dir
 
-async def download_and_cache_image(image_url: str, filepath: str, setup_dir: str, timeout: int = 60):
-    try:
-        if not os.path.exists(setup_dir): os.makedirs(setup_dir, exist_ok=True)
-        if not os.path.exists(filepath):
-            print(f"    -> Downloading from {image_url}")
-            response = await asyncio.to_thread(requests.get, image_url, timeout=timeout)
-            response.raise_for_status()
-
-            # Check for non-image content (SkyView often returns 200 OK with HTML error)
-            content_type = response.headers.get("Content-Type", "")
-            if content_type.startswith("text/"):
-                print(f"    -> SkyView returned text/html instead of image. Preview: {response.text[:200]}")
-                raise ValueError(f"SkyView returned non-image data: {content_type}")
-
-            print("    -> Download successful. Stretching image...")
-            try:
-                stretched_bytes = await asyncio.to_thread(auto_stretch_image, response.content)
-            except Exception as stretch_err:
-                # Log content snippet if image identification fails
-                print(f"    -> Auto-stretch failed. Content preview: {response.content[:100]}")
-                raise stretch_err
-
-            with open(filepath, 'wb') as f: f.write(stretched_bytes)
-            print(f"    -> Image saved to {filepath}")
-    except Exception as e:
-        print(f"    -> ERROR in download_and_cache_image: {e}")
-        raise e
-
 async def download_image(ra: float, dec: float, fov: float, object_id: str, setup_hash: str, resolution: int = 512, source: str = "dss2r", timeout: int = 60) -> str:
-    """
-    Unified function to download or retrieve an image from cache.
-    Returns the web-accessible URL of the image.
-    """
     url, filepath, setup_dir = get_cache_info(object_id, setup_hash)
-    
     if os.path.exists(filepath):
         return url
 
-    # Not in cache, download it
-    live_url = get_sky_survey_url(ra, dec, fov, resolution, source)
-    await download_and_cache_image(live_url, filepath, setup_dir, timeout)
-    return url
-
-def get_sky_survey_url(ra_deg: float, dec_deg: float, fov_in_degrees: float, resolution: int = 512, source: str = "dss2r") -> str:
-    coords = SkyCoord(ra_deg, dec_deg, unit=(u.deg, u.deg))
-    download_fov = max(fov_in_degrees, 0.25)
+    coords = SkyCoord(ra, dec, unit=(u.deg, u.deg))
+    download_fov = max(fov, 0.25)
     base_url = "https://skyview.gsfc.nasa.gov/current/cgi/runquery.pl"
     params = f"Survey={source}&Position={coords.ra.deg:.5f},{coords.dec.deg:.5f}&Size={download_fov:.4f}&Pixels={resolution}&Return=JPG"
-    return f"{base_url}?{params}"
+    live_url = f"{base_url}?{params}"
 
-# --- Logic Extraction ---
-
-def get_sorted_objects(settings: dict, telescope: Telescope, camera: Camera, location: Location) -> List[dict]:
-    """
-    Loads, filters, and sorts objects based on settings.
-    """
-    all_objects = catalogs.get_all_objects(settings.get('catalogs', []))
-    if all_objects.empty:
-        return []
-
-    fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
-    # filtered_objects = calculator.filter_objects_by_fov(all_objects, (fov_w_arcmin, fov_h_arcmin))
-    # We now send ALL objects to the frontend to allow searching hidden/large objects
-    filtered_objects = all_objects
-    
-    processed_objects = []
-    sort_key = settings.get('sort_key', 'time')
-    min_altitude = settings.get('min_altitude', 30.0)
-    
-    # Get min_hours from client_settings, defaulting to 0.0
-    client_settings = settings.get('client_settings', {})
-    min_hours = client_settings.get('min_hours', 0.0)
-    
-    # Pre-calculate twilight periods for sorting if needed
-    night_start, night_end = None, None
-    altaz_frame, night_duration = None, 0.0
-
-    # Always calculate twilight for hours_visible
     try:
-        twilight = calculator.get_twilight_periods(location)
-        if "night" in twilight:
-            night_start = Time(twilight["night"][0])
-            night_end = Time(twilight["night"][1])
+        if not os.path.exists(setup_dir): os.makedirs(setup_dir, exist_ok=True)
+        print(f"    -> Downloading {object_id} from SkyView...")
+        
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(live_url)
+            response.raise_for_status()
 
-            # Pre-calculate frame for fast batch processing
-            result = calculator.prepare_night_frame(location, night_start, night_end)
-            if result:
-                altaz_frame, night_duration = result
+            content_type = response.headers.get("Content-Type", "")
+            if "text" in content_type:
+                raise ValueError(f"SkyView returned text/html: {response.text[:100]}")
+            
+            stretched_bytes = await asyncio.to_thread(auto_stretch_image, response.content)
+            
+            with open(filepath, 'wb') as f: 
+                f.write(stretched_bytes)
+        return url
     except Exception as e:
-        print(f"Error calculating twilight: {e}")
+        print(f"    -> ERROR downloading {object_id}: {e}")
+        raise e
 
-    # Pre-computation for sorting
-    # --- Vectorized Calculation ---
+# --- Settings ---
+def load_settings() -> dict:
+    import yaml
+    settings = {}
+    default_path = get_resource_path(SETTINGS_DEFAULT_FILE)
+    if os.path.exists(default_path):
+        try:
+            with open(default_path, 'r') as f: settings = yaml.safe_load(f) or {}
+        except Exception: pass
+
+    if os.path.exists(SETTINGS_USER_FILE):
+        try:
+            with open(SETTINGS_USER_FILE, 'r') as f:
+                user = yaml.safe_load(f) or {}
+                for k, v in user.items():
+                    if isinstance(v, dict) and k in settings and isinstance(settings[k], dict):
+                        settings[k].update(v)
+                    else:
+                        settings[k] = v
+        except Exception: pass
+
+    if 'profiles' not in settings: settings['profiles'] = {}
+    return settings
+
+def save_settings(settings: dict):
+    import yaml
+    with open(SETTINGS_USER_FILE, 'w') as f:
+        yaml.dump(settings, f, default_flow_style=False)
+
+# --- Sort Logic ---
+def get_sorted_objects(settings: dict, location: Location, telescope: Telescope, camera: Camera) -> List[dict]:
+    raw_objects = catalogs.get_all_objects(settings.get('catalogs', []))
+    if raw_objects.empty: return []
+
+    observer = Observer(location=EarthLocation(lat=location.latitude*u.deg, lon=location.longitude*u.deg))
+    try:
+        session_start, session_end = calculator.get_observing_session(observer, Time.now())
+        altaz_frame, night_duration = calculator.prepare_night_frame(location, session_start, session_end)
+    except Exception:
+        altaz_frame, night_duration = None, 0.0
+
+    df = raw_objects.copy()
+    all_decs = pd.to_numeric(df['dec'], errors='coerce').fillna(0).values
+    df['max_altitude'] = calculator.batch_get_max_altitude(all_decs, location.latitude)
     
-    # 1. Max Altitude (Vectorized)
-    # Ensure columns are numeric
-    all_decs = pd.to_numeric(filtered_objects['dec'], errors='coerce').fillna(0).values
-    all_ras = pd.to_numeric(filtered_objects['ra'], errors='coerce').fillna(0).values
-    
-    max_alts = calculator.batch_get_max_altitude(all_decs, location.latitude)
-    filtered_objects['max_altitude'] = max_alts
-    
-    # 2. Nightly Hours (Vectorized)
     if altaz_frame is not None:
-        print(f"DEBUG: Calculating hours for {len(filtered_objects)} objects. Night duration: {night_duration}")
-        hours_vis = calculator.batch_calculate_nightly_hours(
-            all_ras, all_decs, altaz_frame, night_duration, min_altitude
-        )
-        print(f"DEBUG: Hours calculated. Shape: {hours_vis.shape}, Type: {type(hours_vis)}")
-        print(f"DEBUG: Hours sample (first 5): {hours_vis[:5]}")
-        filtered_objects['hours_visible'] = hours_vis
+        all_ras = pd.to_numeric(df['ra'], errors='coerce').fillna(0).values
+        min_alt = settings.get('min_altitude', 30.0)
+        df['hours_visible'] = calculator.batch_calculate_nightly_hours(all_ras, all_decs, altaz_frame, night_duration, min_alt)
     else:
-        print("DEBUG: altaz_frame is None. Setting hours_visible to 0.0")
-        filtered_objects['hours_visible'] = 0.0
+        df['hours_visible'] = 0.0
 
-    # 3. Priority & Formatting
-    # Vectorized priority assignment
-    filtered_objects['priority'] = 2
-    # Case-insensitive check for 'MESSIER'
-    if 'catalog' in filtered_objects.columns:
-        is_messier = filtered_objects['catalog'].astype(str).str.upper() == 'MESSIER'
-        filtered_objects.loc[is_messier, 'priority'] = 1
-        
-    # Ensure magnitude is numeric
-    filtered_objects['magnitude'] = pd.to_numeric(filtered_objects['mag'], errors='coerce').fillna(99)
-    # Ensure size is numeric
-    filtered_objects['size'] = pd.to_numeric(filtered_objects['maj_ax'], errors='coerce').fillna(0)
-
-    # Replace all NaN/Infinity with None for valid JSON
-    filtered_objects = filtered_objects.replace([np.nan, np.inf, -np.inf], None)
-
-    # DEBUG: Check columns before conversion
-    print(f"DEBUG: Columns before to_dict: {filtered_objects.columns.tolist()}")
-    if 'hours_visible' not in filtered_objects.columns:
-        print("CRITICAL: hours_visible column MISSING!")
-    else:
-        print(f"DEBUG: hours_visible column present. First value: {filtered_objects['hours_visible'].iloc[0]}")
-
-    # Convert to list of dicts
-    processed_objects = filtered_objects.to_dict('records')
+    df['magnitude'] = pd.to_numeric(df['mag'], errors='coerce').fillna(99)
+    df['size'] = pd.to_numeric(df['maj_ax'], errors='coerce').fillna(0)
+    df = df.replace([np.nan, np.inf, -np.inf], None)
     
-    if processed_objects:
-        print(f"DEBUG: First processed object keys: {list(processed_objects[0].keys())}")
-        print(f"DEBUG: First processed object hours_visible: {processed_objects[0].get('hours_visible')}")
-
+    objects = df.to_dict('records')
+    sort_key = settings.get('sort_key', 'time')
     sort_keys = sort_key.split(',') if sort_key else ['time']
+    
+    def sort_func(x):
+        res = []
+        for k in sort_keys:
+            if k == 'brightness': res.append(x.get('magnitude', 99))
+            elif k == 'size': res.append(-(x.get('size') or 0))
+            elif k == 'time' or k == 'altitude': res.append(-(x.get('max_altitude') or 0))
+            elif k == 'hours_above': res.append(-(x.get('hours_visible') or 0))
+        return tuple(res)
 
-    def sort_function(x):
-        result = []
-        for key in sort_keys:
-            if key == 'brightness':
-                result.append(x['magnitude']) # Ascending
-            elif key == 'size':
-                result.append(-x['size']) # Descending
-            elif key == 'time' or key == 'altitude':
-                result.append(-x['max_altitude']) # Descending
-            elif key == 'hours_above':
-                result.append(-x['hours_visible']) # Descending
+    objects.sort(key=sort_func)
+    return objects
 
-        # Fallback
-        result.append(x['priority'])
-        return tuple(result)
-
-    processed_objects.sort(key=sort_function)
+# --- Stream Session ---
+class StreamSession:
+    def __init__(self, request: Request, settings: dict):
+        self.request = request
+        self.settings = settings
+        self.telescope = Telescope(**settings['telescope'])
+        self.camera = Camera(**settings['camera'])
+        self.location = Location(**settings['location'])
         
-    # DEBUG: Add debug info to first object
-    if processed_objects:
-        processed_objects[0]['_debug_info'] = {
-            'columns_present': 'hours_visible' in filtered_objects.columns,
-            'hours_val': processed_objects[0].get('hours_visible'),
-            'night_duration': night_duration,
-            'altaz_frame_ok': altaz_frame is not None
-        }
-
-    return processed_objects
-
-# --- N.I.N.A Integration ---
-
-class NinaFramingRequest(BaseModel):
-    ra: Union[float, str]
-    dec: Union[float, str]
-    rotation: float = 0.0
-
-@app.post("/api/nina/framing")
-async def send_to_nina(request: NinaFramingRequest):
-    nina_url = "http://localhost:1888/api/v1/framing/manualtarget"
-    try:
-        if isinstance(request.ra, (float, int)) and isinstance(request.dec, (float, int)):
-             coords = SkyCoord(request.ra, request.dec, unit=(u.deg, u.deg))
-        else:
-             coords = SkyCoord(request.ra, request.dec, unit=(u.hourangle, u.deg))
-             
-        payload = {
-            "RightAscension": coords.ra.deg,
-            "Declination": coords.dec.deg,
-            "Rotation": request.rotation
-        }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid coordinates: {e}")
-
-    try:
-        async with httpx.AsyncClient() as client:
-             resp = await client.post(nina_url, json=payload, timeout=2.0)
-             if resp.status_code >= 400:
-                 print(f"NINA Error: {resp.status_code} - {resp.text}")
-                 raise HTTPException(status_code=502, detail=f"N.I.N.A returned error: {resp.status_code}")
-    except Exception as e:
-        print(f"Failed to contact NINA: {e}")
-        raise HTTPException(status_code=502, detail="Could not connect to N.I.N.A. Is it running on port 1888?")
-
-    return {"status": "success", "message": "Sent to N.I.N.A"}
-
-
-async def event_stream(request: Request, settings: dict):
-    try:
-        print("\n--- Event Stream Started ---")
-        telescope = Telescope(**settings['telescope'])
-        camera = Camera(**settings['camera'])
-        location = Location(**settings['location'])
-        min_altitude = settings.get('min_altitude', 30.0)
-        image_padding = settings.get('image_padding', 1.05)
-
-        img_res = settings.get('image_resolution', 512)
-        img_timeout = settings.get('image_timeout', 60)
-        img_source = settings.get('image_source', 'dss2r')
-
-        fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
-        fov_w_deg, fov_h_deg = fov_w_arcmin / 60.0, fov_h_arcmin / 60.0
+        self.img_res = settings.get('image_resolution', 512)
+        self.img_source = settings.get('image_source', 'dss2r')
+        self.img_padding = settings.get('image_padding', 1.05)
+        self.img_timeout = settings.get('image_timeout', 60)
         
-        setup_hash = get_setup_hash(fov_w_deg, fov_h_deg, image_padding, resolution=img_res, source=img_source)
+        fov_w_min, fov_h_min = calculator.calculate_fov(self.telescope, self.camera)
+        self.fov_w_deg = fov_w_min / 60.0
+        self.fov_h_deg = fov_h_min / 60.0
+        max_fov = max(self.fov_w_deg, self.fov_h_deg)
+        self.download_fov = max(max_fov * self.img_padding, 0.25)
         
-        processed_objects = await asyncio.to_thread(get_sorted_objects, settings, telescope, camera, location)
+        self.sensor_fov_data = {"w": self.fov_w_deg, "h": self.fov_h_deg}
+        self.fov_rect = FOVRectangle(
+            width_percent=(self.fov_w_deg / self.download_fov) * 100.0,
+            height_percent=(self.fov_h_deg / self.download_fov) * 100.0
+        )
         
-        if not processed_objects:
-            print("-> No objects found.")
-            yield "event: close\ndata: No objects found\n\n"; return
+        self.setup_hash = get_setup_hash(self.fov_w_deg, self.fov_h_deg, self.img_padding, self.img_res, self.img_source)
+        self.all_objects = []
+        self.top_objects = []
+        self.download_list = []
+        
+        observer = Observer(location=EarthLocation(lat=self.location.latitude*u.deg, lon=self.location.longitude*u.deg))
+        self.session_start, self.session_end = calculator.get_observing_session(observer, Time.now())
+        self.twilight = calculator.get_twilight_periods(self.location, self.session_start)
 
-        yield f"event: total\ndata: {len(processed_objects)}\n\n"
-        
-        # Calculate observing session times once
-        from astroplan import Observer
-        observer_loc = EarthLocation(lat=location.latitude * u.deg, lon=location.longitude * u.deg)
-        observer = Observer(location=observer_loc)
-        
-        session_start, session_end = await asyncio.to_thread(calculator.get_observing_session, observer, Time.now())
-        
-        # Get twilight periods relative to this session start
-        twilight = await asyncio.to_thread(calculator.get_twilight_periods, location, session_start)
-        yield f"event: twilight_info\ndata: {json.dumps(twilight)}\n\n"
+    async def generate_stream(self):
+        try:
+            self.all_objects = await asyncio.to_thread(
+                get_sorted_objects, self.settings, self.location, self.telescope, self.camera
+            )
+            
+            if not self.all_objects:
+                yield "event: close\ndata: No objects found\n\n"
+                return
 
-        # Also send current night times in a dedicated event for the UI to use globally
-        yield f"event: night_times\ndata: {json.dumps(twilight)}\n\n"
+            if await self.request.is_disconnected(): return
 
-        # 1. Stream Metadata for ALL objects (Fast)
-        # This allows the UI to populate the list and enable search immediately
-        print(f"--- Streaming metadata for {len(processed_objects)} objects ---")
-        metadata_list = []
-        for obj in processed_objects:
-             size_str = f"{obj['maj_ax']}'" + (f" x {obj['min_ax']}'" if 'min_ax' in obj and obj['min_ax'] > 0 else "")
-             metadata_list.append({
+            # Initial Metadata (yields basic info + full list)
+            yield f"event: total\ndata: {len(self.all_objects)}\n\n"
+            yield f"event: twilight_info\ndata: {json.dumps(self.twilight)}\n\n"
+            yield f"event: night_times\ndata: {json.dumps(self.twilight)}\n\n"
+            
+            # Use the helper to generate the huge JSON payload, then yield it
+            # This avoids the "return with value in generator" syntax error entirely
+            metadata_event = self.get_initial_metadata_event()
+            if await self.request.is_disconnected(): return
+            yield metadata_event
+            
+            # Details loop
+            self.prioritize_top_objects()
+            for item in self.stream_details():
+                if await self.request.is_disconnected(): return
+                yield item
+            
+            # Downloads loop
+            async for item in self.stream_downloads():
+                if await self.request.is_disconnected(): return
+                yield item
+            
+            if not await self.request.is_disconnected():
+                yield "event: close\ndata: Stream complete\n\n"
+
+        except Exception as e:
+            # Swallow connection errors to prevent log noise
+            if "Disconnect" not in str(e):
+                traceback.print_exc()
+                try: 
+                    if not await self.request.is_disconnected():
+                        yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+                except: pass
+
+    def get_initial_metadata_event(self):
+        # Renamed from stream_initial_metadata to clarify it returns a string, not a generator
+        metadata = []
+        for obj in self.all_objects:
+            size_str = f"{obj.get('maj_ax', 0)}'"
+            if obj.get('min_ax', 0) > 0:
+                size_str += f" x {obj['min_ax']}'"
+                
+            metadata.append({
                 "name": obj['id'],
                 "common_name": obj.get('name', 'N/A'),
                 "type": obj.get('type', ''),
                 "constellation": obj.get('constellation', ''),
                 "other_id": obj.get('other_id', ''),
-                "surface_brightness": obj.get('surface_brightness', ''),
                 "ra": obj['ra'],
                 "dec": obj['dec'],
-                "catalog": obj['catalog'],
+                "mag": obj.get('magnitude', 99),
                 "size": size_str,
-                "mag": obj.get('mag', 99),
-                "maj_ax": obj['maj_ax'],
+                "maj_ax": obj.get('maj_ax', 0),
                 "max_altitude": obj.get('max_altitude', 0),
                 "hours_visible": obj.get('hours_visible', 0),
-                "image_url": "", # Placeholder
-                "status": "pending", # Default
-                "altitude_graph": [], # Placeholder
-                "moon_graph": [], # Placeholder
-                "_debug_info": obj.get('_debug_info')
-             })
+                "status": "pending",
+                "sensor_fov": self.sensor_fov_data,
+                "image_fov": self.download_fov,
+            })
         
-        # Send all metadata in one go
-        yield f"event: catalog_metadata\ndata: {json.dumps(metadata_list)}\n\n"
+        return f"event: catalog_metadata\ndata: {json.dumps(metadata)}\n\n"
 
-        # 2. Stream Details (Graphs, Cache Check) for Top 50 objects (Slower)
-        # This ensures the visible list gets populated with graphs quickly
+    def prioritize_top_objects(self):
+        # Filter Logic to ensure graphs are generated for what the user is actually looking at
+        mode = self.settings.get('download_mode', 'selected')
         
-        # PRIORITIZATION:
-        # We need to ensure that objects matching the current CLIENT filter settings are prioritized
-        # for details generation, otherwise they might be visible in the UI but lack graphs
-        # because they fell outside the global Top 50.
+        # We always filter for the top_objects (graphs) to match the view
+        min_alt = self.settings.get('min_altitude', 30)
+        min_hours = self.settings.get('min_hours', 0.0)
+        max_mag = self.settings.get('max_magnitude', 12.0)
+        min_size = self.settings.get('min_size', 0.0)
+        sel_types = self.settings.get('selected_types', [])
         
-        # Extract filters from args which are now in settings dictionary or passed directly
-        # Note: stream_objects arguments are put into 'settings' dict in main.py before calling event_stream
-        p_min_h = settings.get('min_hours', 0.0)
-        p_min_a = settings.get('min_altitude', 30.0)
-        p_max_m = settings.get('max_magnitude', 12.0)
-        p_min_s = settings.get('min_size', 0.0)
-        p_sel_types = settings.get('selected_types', [])
-        if isinstance(p_sel_types, str) and p_sel_types: p_sel_types = p_sel_types.split(',')
-        if isinstance(p_sel_types, list): p_sel_types = [t.strip() for t in p_sel_types if t.strip()]
-
-        def score_priority(o):
-            # High score = High priority
-            score = 0
-            # Matches filters?
-            matches = True
+        def check_obj(o):
+            if o.get('max_altitude', 0) < min_alt: return False
+            if o.get('hours_visible', 0) < min_hours: return False
             
-            try:
-                # Safely cast and compare
-                o_max_alt = float(o.get('max_altitude', 0) or 0)
-                if o_max_alt < p_min_a: matches = False
-                
-                o_hours = float(o.get('hours_visible', 0) or 0)
-                if o_hours < p_min_h: matches = False
-                
-                # Mag might be 'NaN' or string
-                raw_mag = o.get('magnitude', 99)
-                try:
-                    mag = float(raw_mag)
-                except (ValueError, TypeError):
-                    mag = 99.0
-                    
-                if mag < 99 and mag > p_max_m: matches = False
-                
-                o_size = float(o.get('maj_ax', 0) or 0)
-                if o_size < p_min_s: matches = False
-                
-                if p_sel_types and o.get('type') not in p_sel_types: matches = False
-                
-            except Exception:
-                # If any comparison fails, treat as non-match but don't crash the stream
-                matches = False
+            mag = o.get('magnitude', 99)
+            if mag < 99 and mag > max_mag: return False
             
-            if matches: score += 1000
-            return score
-
-        # Python's sort is stable, so we just sort by priority score descending
-        # This keeps the original sort order (e.g. by time) within the priority groups
-        processed_objects.sort(key=score_priority, reverse=True)
-
-        top_objects = processed_objects[:50]
-        print(f"--- Streaming details for top {len(top_objects)} objects ---")
-        
-        # fov_w_deg and fov_h_deg already calculated above
-        
-        # Calculate download FOV: Max dimension + padding
-        # Calculate download FOV: Max dimension + padding
-        max_fov_deg = max(fov_w_deg, fov_h_deg)
-        download_fov = max(max_fov_deg * image_padding, 0.25)
-        
-        # Explicit Sensor FOV for Frontend (Single Source of Truth)
-        sensor_fov_data = {"w": fov_w_deg, "h": fov_h_deg}
-        
-        fov_rect = FOVRectangle(
-            width_percent=(fov_w_deg / download_fov) * 100.0, 
-            height_percent=(fov_h_deg / download_fov) * 100.0
-        )
-
-        download_mode = settings.get('download_mode', 'selected')
-        objects_to_download = []
-        if download_mode == 'all':
-            objects_to_download = processed_objects
-        elif download_mode == 'filtered':
-             min_h = settings.get('min_hours', 0.0)
-             min_a = settings.get('min_altitude', 30.0)
-             max_m = settings.get('max_magnitude', 12.0)
-             min_s = settings.get('min_size', 0.0)
-             sel_types = settings.get('selected_types', [])
-             
-             for o in processed_objects:
-                 if o.get('max_altitude', 0) < min_a: continue
-                 if o.get('hours_visible', 0) < min_h: continue
-                 
-                 # New filters
-                 # Allow unknown magnitude (99) to pass, matching frontend logic
-                 mag = o.get('magnitude', 99)
-                 if mag < 99 and mag > max_m: continue
-                 
-                 if o.get('size', 0) < min_s: continue
-                 if sel_types and o.get('type') not in sel_types: continue
-                 
-                 objects_to_download.append(o)
-        
-        # Set of IDs to download to mark status in details loop
-        download_ids = set(o['id'] for o in objects_to_download)
-
-        for obj_dict in top_objects:
-            if await request.is_disconnected(): break
-            object_id = obj_dict['id']
+            if o.get('size', 0) < min_size: return False
             
-            cache_url, cache_filepath, _ = get_cache_info(object_id, setup_hash)
-            is_cached = os.path.exists(cache_filepath)
-            
-            # Return dictionary with 'target' and 'moon' lists
-            # Pass the synchronized session times
-            altitude_data = await asyncio.to_thread(calculator.get_altitude_graph, obj_dict['ra'], obj_dict['dec'], location, 60, session_start, session_end)
+            if sel_types and o.get('type') not in sel_types: return False
+            return True
 
-            # Calculate hours above min based on graph
-            hours_above_min = await asyncio.to_thread(calculator.calculate_time_above_altitude, altitude_data['target'], min_altitude, twilight)
+        # Apply filter to find relevant objects
+        filtered_candidates = [o for o in self.all_objects if check_obj(o)]
+        
+        # Take Top 50 of the FILTERED list
+        self.top_objects = filtered_candidates[:50]
+        
+        # Set download list
+        if mode == 'all':
+            self.download_list = self.all_objects
+        elif mode == 'filtered':
+            self.download_list = filtered_candidates
+        else:
+            self.download_list = []
 
-            image_url, status = ("", "pending")
-            if is_cached:
-                image_url, status = (cache_url, "cached")
-            elif object_id in download_ids:
-                status = "queued"
+    def stream_details(self):
+        download_ids = set(o['id'] for o in self.download_list)
+        for obj in self.top_objects:
+            obj_id = obj['id']
+            url, filepath, _ = get_cache_info(obj_id, self.setup_hash)
+            is_cached = os.path.exists(filepath)
             
-            # Send ONLY the fields that need updating or are heavy
-            detail_obj = {
-                "name": object_id, # Key to match
-                "image_url": image_url, 
-                "altitude_graph": [p.model_dump() for p in altitude_data['target']],
-                "moon_graph": [p.model_dump() for p in altitude_data['moon']],
-                "fov_rectangle": fov_rect.model_dump(),
-                "sensor_fov": sensor_fov_data, # NEW: Authoritative Sensor FOV
-                "image_fov": download_fov,
-                "hours_above_min": hours_above_min, 
-                "setup_hash": setup_hash, 
-                "status": status,
+            alt_data = calculator.get_altitude_graph(
+                obj['ra'], obj['dec'], self.location, 60, self.session_start, self.session_end
+            )
+            hours = calculator.calculate_time_above_altitude(
+                alt_data['target'], self.settings.get('min_altitude', 30), self.twilight
+            )
+            
+            status = "cached" if is_cached else ("queued" if obj_id in download_ids else "pending")
+            image_url = url if is_cached else ""
+            
+            detail = {
+                "name": obj_id,
+                "image_url": image_url,
+                "altitude_graph": [p.model_dump() for p in alt_data['target']],
+                "moon_graph": [p.model_dump() for p in alt_data['moon']],
+                "fov_rectangle": self.fov_rect.model_dump(),
+                "sensor_fov": self.sensor_fov_data,
+                "image_fov": self.download_fov,
+                "hours_above_min": hours,
+                "setup_hash": self.setup_hash,
+                "status": status
             }
-            yield f"event: object_details\ndata: {json.dumps(detail_obj)}\n\n"
+            yield f"event: object_details\ndata: {json.dumps(detail)}\n\n"
 
-        print(f"\n--- Starting download for {len(objects_to_download)} images ---")
+    async def stream_downloads(self):
+        to_download = []
+        for obj in self.download_list:
+            _, filepath, _ = get_cache_info(obj['id'], self.setup_hash)
+            if not os.path.exists(filepath):
+                to_download.append(obj)
         
-        # Filter out already cached items from objects_to_download to avoid redundant work/messages
-        # (Though download_image handles it, we want accurate progress counts)
-        final_download_list = []
-        for obj in objects_to_download:
-             _, cache_fp, _ = get_cache_info(obj['id'], setup_hash)
-             if not os.path.exists(cache_fp):
-                 final_download_list.append(obj)
+        total = len(to_download)
+        if total == 0: return
 
-        total_downloads = len(final_download_list)
-        # Yield initial progress
-        yield f"event: download_progress\ndata: {json.dumps({'current': 0, 'total': total_downloads})}\n\n"
+        yield f"event: download_progress\ndata: {json.dumps({'current': 0, 'total': total})}\n\n"
 
-        # Parallel Download Management
-        download_queue = asyncio.Queue()
-        semaphore = asyncio.Semaphore(5) # Limit to 5 concurrent downloads
-        completed_count = 0
+        queue = asyncio.Queue()
+        semaphore = asyncio.Semaphore(5)
+        completed = 0
 
-        async def worker(obj_dict):
-             nonlocal completed_count
-             async with semaphore:
-                if await request.is_disconnected(): return
-
-                object_id = obj_dict['id']
-                # cache_url, cache_filepath, setup_dir = get_cache_info(object_id, setup_hash)
-
-                await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'downloading'})}\n\n")
-
+        async def worker(obj):
+            nonlocal completed
+            async with semaphore:
+                if await self.request.is_disconnected(): return
+                obj_id = obj['id']
+                await queue.put({"name": obj_id, "status": "downloading"})
+                
                 try:
-                    url = await download_image(obj_dict['ra'], obj_dict['dec'], download_fov, object_id, setup_hash, resolution=img_res, source=img_source, timeout=img_timeout)
-                    
-                    await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'cached', 'url': url, 'image_fov': download_fov})}\n\n")
-                except Exception as download_error:
-                    print(f"  -> FAILED: {object_id} - {download_error}")
-                    await download_queue.put(f"event: image_status\ndata: {json.dumps({'name': object_id, 'status': 'error'})}\n\n")
+                    url = await download_image(
+                        obj['ra'], obj['dec'], self.download_fov, obj_id, self.setup_hash, 
+                        self.img_res, self.img_source, self.img_timeout
+                    )
+                    await queue.put({"name": obj_id, "status": "cached", "url": url})
+                except Exception:
+                    await queue.put({"name": obj_id, "status": "error"})
                 finally:
-                    completed_count += 1
-                    await download_queue.put(f"event: download_progress\ndata: {json.dumps({'current': completed_count, 'total': total_downloads})}\n\n")
+                    completed += 1
+                    await queue.put({"progress": True, "current": completed, "total": total})
 
-        # Start workers
-        workers = [asyncio.create_task(worker(obj)) for obj in final_download_list]
+        tasks = [asyncio.create_task(worker(o)) for o in to_download]
+        
+        async def monitor():
+            if tasks: await asyncio.gather(*tasks)
+            await queue.put(None)
+        
+        asyncio.create_task(monitor())
 
-        # Monitor completion
-        async def monitor_completion():
-            if workers:
-                await asyncio.gather(*workers)
-            await download_queue.put(None) # Signal end
-
-        asyncio.create_task(monitor_completion())
-
-        # Stream events from queue
         while True:
-            if await request.is_disconnected():
-                break
-            
-            event = await download_queue.get()
-            if event is None: break
-            
-            yield event
+            msg = await queue.get()
+            if msg is None: break
+            if "progress" in msg:
+                yield f"event: download_progress\ndata: {json.dumps(msg)}\n\n"
+            else:
+                yield f"event: image_status\ndata: {json.dumps(msg)}\n\n"
 
-        print("--- Event Stream Finished ---")
-        yield "event: close\ndata: Stream complete\n\n"
-    except Exception as e:
-        print("\n--- ERROR IN EVENT STREAM ---")
-        traceback.print_exc()
-        yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
-
-# --- Endpoints ---
-
+# --- API Endpoints ---
 @app.get("/api/settings")
 def get_settings(): return JSONResponse(content=load_settings())
 
@@ -645,57 +399,58 @@ async def set_settings(request: Request):
 @app.get("/api/geocode")
 async def geocode_city(city: str):
     if not city or len(city) < 2: return JSONResponse(content={"error": "City name is too short"}, status_code=400)
-    GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
+    url = "https://geocoding-api.open-meteo.com/v1/search"
     params = {"name": city, "count": 10, "language": "en", "format": "json"}
     try:
-        response = requests.get(GEOCODING_URL, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, params=params, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
         if "results" not in data: return JSONResponse(content=[], status_code=200)
-        results = [{"name": res.get("name"), "country": res.get("country"), "admin1": res.get("admin1", ""), "latitude": round(res.get("latitude"), 4), "longitude": round(res.get("longitude"), 4)} for res in data["results"]]
+        results = [{"name": r.get("name"), "country": r.get("country"), "admin1": r.get("admin1", ""), "latitude": round(r.get("latitude"), 4), "longitude": round(r.get("longitude"), 4)} for r in data["results"]]
         return JSONResponse(content=results)
-    except requests.RequestException as e:
-        return JSONResponse(content={"error": f"Geocoding API error: {e}"}, status_code=500)
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 @app.get("/api/stream-objects")
-async def stream_objects(request: Request, focal_length: float, sensor_width: float, sensor_height: float, latitude: float, longitude: float, catalogs: str, sort_key: str, min_altitude: float = 30.0, min_hours: float = 0.0, image_padding: float = 1.1, download_mode: str = 'selected', max_magnitude: float = 12.0, min_size: float = 0.0, selected_types: str = "", image_resolution: int = 512, image_timeout: int = 60, image_source: str = "dss2r"):
-    settings = {
+async def stream_objects_endpoint(request: Request, focal_length: float, sensor_width: float, sensor_height: float, latitude: float, longitude: float, catalogs: str, sort_key: str):
+    settings = load_settings()
+    settings.update({
         "telescope": {"focal_length": focal_length},
         "camera": {"sensor_width": sensor_width, "sensor_height": sensor_height},
         "location": {"latitude": latitude, "longitude": longitude},
         "catalogs": catalogs.split(',') if catalogs else [],
-        "min_altitude": min_altitude,
-        "min_hours": min_hours,
-        "sort_key": sort_key,
-        "image_padding": image_padding,
-        "download_mode": download_mode,
-        "max_magnitude": max_magnitude,
-        "min_size": min_size,
-        "selected_types": selected_types.split(',') if selected_types else [],
-        "image_resolution": image_resolution,
-        "image_timeout": image_timeout,
-        "image_source": image_source
-    }
-    return StreamingResponse(event_stream(request, settings), media_type="text/event-stream")
-
-# Profile Management
-PROFILES_FILE = "profiles.json"
+        "sort_key": sort_key
+    })
+    
+    # Parse query parameters for filters
+    qp = request.query_params
+    if 'min_altitude' in qp: settings['min_altitude'] = float(qp['min_altitude'])
+    if 'min_hours' in qp: settings['min_hours'] = float(qp['min_hours'])
+    if 'image_resolution' in qp: settings['image_resolution'] = int(qp['image_resolution'])
+    if 'max_magnitude' in qp: settings['max_magnitude'] = float(qp['max_magnitude'])
+    if 'min_size' in qp: settings['min_size'] = float(qp['min_size'])
+    if 'image_padding' in qp: settings['image_padding'] = float(qp['image_padding'])
+    if 'image_timeout' in qp: settings['image_timeout'] = int(qp['image_timeout'])
+    if 'download_mode' in qp: settings['download_mode'] = qp['download_mode']
+    if 'image_source' in qp: settings['image_source'] = qp['image_source']
+    
+    if 'selected_types' in qp and qp['selected_types']:
+        settings['selected_types'] = qp['selected_types'].split(',')
+    
+    session = StreamSession(request, settings)
+    return StreamingResponse(session.generate_stream(), media_type="text/event-stream")
 
 @app.get("/api/catalogs")
-def get_catalogs():
-    return CatalogManager.get_available_catalogs()
+def get_catalogs(): return CatalogManager.get_available_catalogs()
 
 @app.get("/api/profiles")
-def get_profiles():
-    settings = load_settings()
-    return settings.get('profiles', {})
+def get_profiles(): return load_settings().get('profiles', {})
 
 @app.post("/api/profiles/{name}")
 async def save_profile(name: str, request: Request):
     data = await request.json()
     settings = load_settings()
-    if 'profiles' not in settings: settings['profiles'] = {}
-    
     settings['profiles'][name] = data
     save_settings(settings)
     return {"status": "saved"}
@@ -707,68 +462,44 @@ def delete_profile(name: str):
         del settings['profiles'][name]
         save_settings(settings)
         return {"status": "deleted"}
-    return JSONResponse(content={"error": "Profile not found"}, status_code=404)
+    return JSONResponse(content={"error": "Not found"}, status_code=404)
 
 @app.get("/api/presets")
 def get_presets():
     import yaml
-    # FIX: Use get_resource_path to find the bundled file in the temp folder
     comp_path = get_resource_path(COMPONENTS_FILE)
-    
     if os.path.exists(comp_path):
         try:
-            with open(comp_path, 'r') as f:
-                return yaml.safe_load(f) or {}
-        except Exception as e:
-            print(f"Error loading components: {e}")
-            return {}
+            with open(comp_path, 'r') as f: return yaml.safe_load(f) or {}
+        except Exception: pass
     return {}
 
-# Cache Management
 @app.get("/api/cache/status")
 def get_cache_status():
     if not os.path.exists(CACHE_DIR): return {"size_mb": 0, "count": 0}
-    total_size = 0
-    count = 0
-    for root, dirs, files in os.walk(CACHE_DIR):
-        for f in files:
-            fp = os.path.join(root, f)
-            total_size += os.path.getsize(fp)
-            count += 1
+    total_size = sum(os.path.getsize(os.path.join(r, f)) for r, _, files in os.walk(CACHE_DIR) for f in files)
+    count = sum(len(files) for _, _, files in os.walk(CACHE_DIR))
     return {"size_mb": round(total_size / (1024*1024), 2), "count": count}
 
 @app.post("/api/cache/purge")
 def purge_cache():
-    if os.path.exists(CACHE_DIR):
-        shutil.rmtree(CACHE_DIR)
+    if os.path.exists(CACHE_DIR): shutil.rmtree(CACHE_DIR)
     os.makedirs(CACHE_DIR, exist_ok=True)
     return {"status": "purged"}
 
-# Fetch Custom Image (with specific FOV)
 class FetchImageRequest(BaseModel):
-    ra: Union[float, str]
-    dec: Union[float, str]
-    fov: float # in degrees
-    resolution: int = 512
-    source: str = "dss2r"
-    timeout: int = 60
+    ra: Union[float, str]; dec: Union[float, str]; fov: float; resolution: int = 512; source: str = "dss2r"; timeout: int = 60
 
 @app.post("/api/fetch-custom-image")
 async def fetch_custom_image(req: FetchImageRequest):
     if isinstance(req.ra, str):
         try:
             coords = SkyCoord(req.ra, req.dec, unit=(u.hourangle, u.deg))
-            req.ra = coords.ra.deg
-            req.dec = coords.dec.deg
-        except Exception:
-             # Fallback or error, though SkyCoord usually handles standard string formats
-             pass
+            req.ra = coords.ra.deg; req.dec = coords.dec.deg
+        except Exception: pass
     
     setup_hash = f"custom_fov_{req.fov:.4f}_res{req.resolution}_{req.source}"
     name = f"RADEC_{req.ra}_{req.dec}"
-    
-    print(f"Fetching custom image: FOV={req.fov}, Res={req.resolution}, Source={req.source}")
-
     try:
         url = await download_image(req.ra, req.dec, req.fov, name, setup_hash, resolution=req.resolution, source=req.source, timeout=req.timeout)
         return {"url": url}
@@ -779,46 +510,47 @@ async def fetch_custom_image(req: FetchImageRequest):
 async def download_object_endpoint(request: Request):
     try:
         data = await request.json()
-        
-        # Reconstruct settings to match stream logic
         telescope = Telescope(**data['settings']['telescope'])
         camera = Camera(**data['settings']['camera'])
-        image_padding = data['settings'].get('image_padding', 1.05)
-        
-        # Extract Image Params
+        padding = data['settings'].get('image_padding', 1.05)
         img_srv = data['settings'].get('image_server', {})
-        img_res = img_srv.get('resolution', 512)
-        img_timeout = img_srv.get('timeout', 60)
-        img_source = img_srv.get('source', 'dss2r')
         
-        fov_w_arcmin, fov_h_arcmin = calculator.calculate_fov(telescope, camera)
-        fov_w_deg, fov_h_deg = fov_w_arcmin / 60.0, fov_h_arcmin / 60.0
-        
-        setup_hash = get_setup_hash(fov_w_deg, fov_h_deg, image_padding, resolution=img_res, source=img_source)
-        max_fov_deg = max(fov_w_deg, fov_h_deg)
-        download_fov = max(max_fov_deg * image_padding, 0.25)
+        fov_w_min, fov_h_min = calculator.calculate_fov(telescope, camera)
+        fov_w, fov_h = fov_w_min/60.0, fov_h_min/60.0
+        setup_hash = get_setup_hash(fov_w, fov_h, padding, img_srv.get('resolution', 512), img_srv.get('source', 'dss2r'))
+        download_fov = max(max(fov_w, fov_h) * padding, 0.25)
         
         obj = data['object']
-        print(f"On-demand download for {obj['name']} (FOV: {download_fov:.4f}, Res: {img_res})")
-        
-        url = await download_image(obj['ra'], obj['dec'], download_fov, obj['name'], setup_hash, resolution=img_res, source=img_source, timeout=img_timeout)
+        url = await download_image(obj['ra'], obj['dec'], download_fov, obj['name'], setup_hash, resolution=img_srv.get('resolution', 512), source=img_srv.get('source', 'dss2r'), timeout=img_srv.get('timeout', 60))
         return {"url": url, "status": "cached"}
     except Exception as e:
-        print(f"Error in on-demand download: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+class NinaFramingRequest(BaseModel):
+    ra: Union[float, str]; dec: Union[float, str]; rotation: float = 0.0
 
-if not os.path.exists("frontend"): os.makedirs("frontend", exist_ok=True)
+@app.post("/api/nina/framing")
+async def send_to_nina(request: NinaFramingRequest):
+    nina_url = "http://localhost:1888/api/v1/framing/manualtarget"
+    try:
+        if isinstance(request.ra, (float, int)) and isinstance(request.dec, (float, int)):
+             coords = SkyCoord(request.ra, request.dec, unit=(u.deg, u.deg))
+        else:
+             coords = SkyCoord(request.ra, request.dec, unit=(u.hourangle, u.deg))
+        
+        async with httpx.AsyncClient() as client:
+             resp = await client.post(nina_url, json={"RightAscension": coords.ra.deg, "Declination": coords.dec.deg, "Rotation": request.rotation}, timeout=2.0)
+             if resp.status_code >= 400: raise HTTPException(status_code=502, detail=f"N.I.N.A error: {resp.status_code}")
+        return {"status": "success", "message": "Sent to N.I.N.A"}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail="Could not connect to N.I.N.A.")
 
 @app.get("/cache/{setup_hash}/{image_filename}")
 async def get_cached_image(setup_hash: str, image_filename: str):
     filepath = os.path.join(CACHE_DIR, setup_hash, image_filename)
     if not os.path.exists(filepath): return JSONResponse(content={"error": "File not found"}, status_code=404)
-    # Disable caching to prevent browser from holding onto wrong images during development/debugging
     return FileResponse(filepath, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
-static_relative = "frontend/dist" if os.path.exists("frontend/dist") or hasattr(sys, '_MEIPASS') else "frontend"
+static_relative = "frontend/dist" if hasattr(sys, '_MEIPASS') or os.path.exists("frontend/dist") else "frontend"
 static_dir = get_resource_path(static_relative)
 app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
-
-import httpx
