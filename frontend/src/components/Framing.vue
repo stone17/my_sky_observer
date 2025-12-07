@@ -1,87 +1,50 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 
-const props = defineProps(['object', 'objects', 'settings', 'clientSettings', 'searchQuery', 'availableTypes']);
-const emit = defineEmits(['update-settings', 'update-client-settings', 'update-search', 'select-object']);
+const props = defineProps(['object', 'objects', 'settings', 'clientSettings', 'searchQuery', 'activeFov']);
+const emit = defineEmits(['update-settings', 'update-client-settings', 'update-search', 'select-object', 'update-fov']);
 
-const rotation = ref(0);
-const offsetX = ref(0);
-const offsetY = ref(0);
-const isDragging = ref(false);
-const dragStart = ref({ x: 0, y: 0 });
-const customImageUrl = ref(null);
-const isFetching = ref(false);
-const showSuggestions = ref(false);
+// --- LOCAL STATE ---
+const localFov = ref(props.activeFov || 1.0);
 
-// Search Logic (Normalized)
-const suggestionList = computed(() => {
-    const q = (props.searchQuery || '').trim();
-    if (!q) return [];
-    const normQ = q.toLowerCase().replace(/\s+/g, '');
-
-    const matches = (props.objects || []).filter(o => {
-        const normId = o.name.toLowerCase().replace(/\s+/g, '');
-        const normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
-        const normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
-        return normId.includes(normQ) || normCommon.includes(normQ) || normOther.includes(normQ);
-    });
-
-    matches.sort((a, b) => {
-        const normA = a.name.toLowerCase().replace(/\s+/g, '');
-        const normB = b.name.toLowerCase().replace(/\s+/g, '');
-        if (normA === normQ && normB !== normQ) return -1;
-        if (normB === normQ && normA !== normQ) return 1;
-        const aStarts = normA.startsWith(normQ);
-        const bStarts = normB.startsWith(normQ);
-        if (aStarts && !bStarts) return -1;
-        if (bStarts && !aStarts) return 1;
-        if (normA.length !== normB.length) return normA.length - normB.length;
-        return normA.localeCompare(normB);
-    });
-    return matches.slice(0, 10);
+watch(() => props.activeFov, (newVal) => {
+    if (Math.abs(newVal - localFov.value) > 0.01) localFov.value = newVal;
 });
 
-const onSearchInput = (e) => { emit('update-search', e.target.value); showSuggestions.value = true; };
-const selectSuggestion = (obj) => { emit('update-search', obj.name); emit('select-object', obj); showSuggestions.value = false; };
-const onSearchBlur = () => { setTimeout(() => { showSuggestions.value = false; }, 200); };
+const isObjectDownloading = computed(() => {
+    return props.object && props.object.status === 'downloading';
+});
 
-// Resize
-const viewportRef = ref(null);
-const wrapperSize = ref(0);
-let resizeObserver = null;
-
-// FOV
-const currentFov = ref(0.1);
-const imageFov = ref(0.1);
-const sensorFov = ref({ w: 0, h: 0 });
-
-const initFov = () => {
-    if (props.object) {
-        if (props.object.image_fov) {
-            const iFov = props.object.image_fov;
-            imageFov.value = iFov;
-            if (currentFov.value <= 0.1 || Math.abs(currentFov.value - iFov) > 5.0) {
-                currentFov.value = parseFloat(iFov.toFixed(1));
-            }
-        }
-        if (props.object.sensor_fov) {
-            sensorFov.value = props.object.sensor_fov;
-        }
+// --- PHYSICAL SENSOR CALCULATION ---
+// Calculates the sensor size in degrees based on HARDWARE settings.
+const systemSensorFov = computed(() => {
+    const tel = props.settings?.telescope;
+    const cam = props.settings?.camera;
+    if (!tel?.focal_length || !cam?.sensor_width || !cam?.sensor_height) {
+        return { w: 0, h: 0 };
     }
-};
 
-watch(() => props.object, initFov, { deep: true, immediate: true });
-
-const imageStyle = computed(() => {
-    if (currentFov.value <= 0.001 || imageFov.value <= 0.001) return { display: 'none' };
-    const scale = imageFov.value / currentFov.value;
-    return { width: `${scale * 100}%`, height: `${scale * 100}%`, position: 'absolute', top: '50%', left: '50%', transform: `translate(-50%, -50%)` };
+    // (Sensor / FL) * 57.3
+    const w = (cam.sensor_width / tel.focal_length) * 57.2958;
+    const h = (cam.sensor_height / tel.focal_length) * 57.2958;
+    return { w, h };
 });
 
+// --- SENSOR RECTANGLE STYLE ---
 const sensorStyle = computed(() => {
-    if (currentFov.value <= 0.001 || sensorFov.value.w <= 0) return { display: 'none' };
-    const wPct = (sensorFov.value.w / currentFov.value) * 100;
-    const hPct = (sensorFov.value.h / currentFov.value) * 100;
+    const sFov = systemSensorFov.value;
+
+    // Denominator: The FOV of the background image.
+    // If we have a downloaded image, use its metadata (which App.vue ensures is correct).
+    // Fallback to localFov only if no image exists yet.
+    const baseFov = props.object?.image_fov || localFov.value;
+
+    if (sFov.w <= 0 || baseFov <= 0.001) return { display: 'none' };
+
+    // Calculate percentage relative to the BACKGROUND IMAGE size
+    const wPct = (sFov.w / baseFov) * 100;
+    const hPct = (sFov.h / baseFov) * 100;
+
     return {
         width: `${wPct}%`,
         height: `${hPct}%`,
@@ -95,11 +58,37 @@ const sensorStyle = computed(() => {
     };
 });
 
-const fetchCustomFov = async () => { /* Logic hidden for brevity */ };
+// --- STANDARD LOGIC ---
+const rotation = ref(0);
+const offsetX = ref(0);
+const offsetY = ref(0);
+const isDragging = ref(false);
+const dragStart = ref({ x: 0, y: 0 });
+const showSuggestions = ref(false);
+
+const suggestionList = computed(() => {
+    const q = (props.searchQuery || '').trim();
+    if (!q) return [];
+    const normQ = q.toLowerCase().replace(/\s+/g, '');
+    const matches = (props.objects || []).filter(o => {
+        const normId = o.name.toLowerCase().replace(/\s+/g, '');
+        const normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
+        return normId.includes(normQ) || normCommon.includes(normQ);
+    });
+    return matches.slice(0, 10);
+});
+
+const onSearchInput = (e) => { emit('update-search', e.target.value); showSuggestions.value = true; };
+const selectSuggestion = (obj) => { emit('update-search', obj.name); emit('select-object', obj); showSuggestions.value = false; };
+const onSearchBlur = () => { setTimeout(() => { showSuggestions.value = false; }, 200); };
+
+const viewportRef = ref(null);
+const wrapperSize = ref(0);
+let resizeObserver = null;
+
 const onDrag = (e) => { if (isDragging.value) { offsetX.value = e.clientX - dragStart.value.x; offsetY.value = e.clientY - dragStart.value.y; } };
 const startDrag = (e) => { isDragging.value = true; dragStart.value = { x: e.clientX - offsetX.value, y: e.clientY - offsetY.value }; e.preventDefault(); };
 const stopDrag = () => { isDragging.value = false; };
-const sendToNina = async () => { /* Logic hidden for brevity */ };
 
 onMounted(() => {
     if (viewportRef.value) {
@@ -122,11 +111,14 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
             <div class="header-center">
                 <div class="group">
                     <strong class="lbl">FOV</strong>
-                    <button class="outline mini"
-                        @click="currentFov = parseFloat((currentFov * 1.1).toFixed(1))">+</button>
-                    <input type="number" v-model.number="currentFov" step="0.1" class="input-mini" />
-                    <button class="outline mini"
-                        @click="currentFov = parseFloat((currentFov * 0.9).toFixed(1))">-</button>
+                    <button class="outline mini" @click="localFov = parseFloat((localFov * 1.1).toFixed(1))">+</button>
+                    <input type="number" v-model.number="localFov" step="0.1" class="input-mini" />
+                    <button class="outline mini" @click="localFov = parseFloat((localFov * 0.9).toFixed(1))">-</button>
+
+                    <button class="outline mini primary-action" @click="$emit('update-fov', localFov)"
+                        :disabled="isObjectDownloading" title="Download image with this FOV">
+                        {{ isObjectDownloading ? '...' : '⟳' }}
+                    </button>
                 </div>
             </div>
             <div class="header-right">
@@ -136,8 +128,7 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
                     <div v-if="showSuggestions && suggestionList.length > 0" class="suggestions-popover">
                         <div v-for="s in suggestionList" :key="s.name" class="suggestion-item"
                             @click="selectSuggestion(s)">
-                            {{ s.name }} <span v-if="s.common_name && s.common_name !== 'N/A'"
-                                style="color: #9ca3af; font-size: 0.8em;">- {{ s.common_name }}</span>
+                            {{ s.name }}
                         </div>
                     </div>
                 </div>
@@ -146,31 +137,34 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
 
         <div class="framing-viewport" ref="viewportRef" @mousemove="onDrag" @mouseup="stopDrag" @mouseleave="stopDrag">
             <div class="image-wrapper" :style="{ width: wrapperSize + 'px', height: wrapperSize + 'px' }">
-                <div class="image-container" :style="imageStyle">
-                    <img v-if="customImageUrl || object.image_url" :src="customImageUrl || object.image_url"
-                        class="sky-image" />
+
+                <div class="image-container">
+                    <img v-if="object.image_url" :src="object.image_url" class="sky-image" />
                     <div v-else class="sky-image placeholder-text">
-                        <span v-if="object.status === 'downloading'">Downloading...</span>
-                        <span v-else>No Image</span>
+                        <span>No Image</span>
                     </div>
                 </div>
-                <div v-if="object && settings" :style="sensorStyle" @mousedown="startDrag">
+
+                <div v-if="isObjectDownloading" class="download-overlay">
+                    <div class="spinner"></div>
+                    <span>Downloading new view...</span>
+                </div>
+
+                <div v-if="object && settings && !isObjectDownloading" :style="sensorStyle" @mousedown="startDrag">
                     <div class="crosshair">+</div>
                 </div>
             </div>
 
-            <div
-                style="position: absolute; bottom: 0; left: 0; background: rgba(0,0,0,0.8); color: lime; font-size: 11px; padding: 4px; pointer-events: none; z-index: 100; text-align: left;">
+            <div class="osd-overlay">
                 <div>Object: {{ object.name }}</div>
-                <div>Sensor FOV: {{ sensorFov.w.toFixed(3) }}° x {{ sensorFov.h.toFixed(3) }}°</div>
-                <div>Settings FL: {{ settings?.telescope?.focal_length }}</div>
+                <div>Image FOV: {{ (object.image_fov || localFov).toFixed(1) }}°</div>
+                <div>Sensor: {{ systemSensorFov.w.toFixed(1) }}° x {{ systemSensorFov.h.toFixed(1) }}°</div>
             </div>
         </div>
     </article>
 </template>
 
 <style scoped>
-/* (Same styles as before) */
 .framing-panel {
     height: 100%;
     display: flex;
@@ -244,6 +238,21 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
     font-size: 0.9rem;
     height: 26px;
     line-height: 1;
+    border: 1px solid #4b5563;
+    background: transparent;
+    color: #fff;
+    cursor: pointer;
+}
+
+.mini:hover {
+    background: #374151;
+}
+
+.primary-action {
+    color: #10b981;
+    border-color: #10b981;
+    margin-left: 5px;
+    font-weight: bold;
 }
 
 .search-container {
@@ -315,6 +324,8 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
 }
 
 .image-container {
+    width: 100%;
+    height: 100%;
     display: flex;
     justify-content: center;
     align-items: center;
@@ -345,5 +356,53 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
     color: red;
     pointer-events: none;
     font-size: 20px;
+}
+
+.osd-overlay {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    background: rgba(0, 0, 0, 0.8);
+    color: lime;
+    font-size: 11px;
+    padding: 4px;
+    pointer-events: none;
+    z-index: 100;
+    text-align: left;
+}
+
+.download-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    color: #10b981;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+}
+
+.spinner {
+    border: 4px solid #374151;
+    border-top: 4px solid #10b981;
+    border-radius: 50%;
+    width: 30px;
+    height: 30px;
+    animation: spin 1s linear infinite;
+    margin-bottom: 10px;
+}
+
+@keyframes spin {
+    0% {
+        transform: rotate(0deg);
+    }
+
+    100% {
+        transform: rotate(360deg);
+    }
 }
 </style>
