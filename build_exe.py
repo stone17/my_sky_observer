@@ -1,7 +1,11 @@
 import os
+import sys # <--- ADDED: Needed to set recursion limit
 import subprocess
 import shutil
 import PyInstaller.__main__
+
+# FIX: Increase recursion limit to prevent PyInstaller crash with pandas/astropy
+sys.setrecursionlimit(5000)
 
 def build_frontend():
     print("Building Frontend...")
@@ -23,15 +27,15 @@ def build_exe():
     print("Building Executable...")
     
     # Define data to bundle
-    # Format: "source;dest" (Windows)
+    # Format: ('source_folder', 'dest_folder_internal')
     datas = [
         ('frontend/dist', 'frontend/dist'),
+        ('catalogs', 'catalogs'),           # Ensure catalogs are included
         ('settings_default.yaml', '.'),
-        ('components.yaml', '.'),
-        ('catalogs', 'catalogs'),
+        ('components.yaml', '.')
     ]
     
-    # Hidden imports often needed
+    # Hidden imports often needed for Uvicorn/FastAPI/WebView
     hidden_imports = [
         'uvicorn.logging',
         'uvicorn.loops',
@@ -43,11 +47,17 @@ def build_exe():
         'uvicorn.protocols.websockets.auto',
         'uvicorn.lifespan.on',
         'engineio.async_drivers.threading',
-        'webview.platforms.winforms' 
+        'webview.platforms.winforms',
+        # Scientific libs hooks sometimes fail to grab these
+        'scipy.special.cython_special',
+        'sklearn.utils._typedefs'
     ]
     
+    # Note: Ensure 'desktop_app.py' matches your actual main entry file (e.g., run.py)
+    entry_script = 'run.py' if os.path.exists('run.py') else 'desktop_app.py'
+    
     args = [
-        'run.py',
+        entry_script,
         '--name=MySkyObserver',
         '--onefile',
         '--clean',
@@ -55,8 +65,11 @@ def build_exe():
         '--icon=NONE' # default icon
     ]
     
+    # Handle OS-specific separator for binary data
+    separator = ';' if os.name == 'nt' else ':'
+    
     for src, dst in datas:
-        args.append(f'--add-data={src}{os.pathsep}{dst}')
+        args.append(f'--add-data={src}{separator}{dst}')
         
     for module in hidden_imports:
         args.append(f'--hidden-import={module}')
@@ -66,7 +79,7 @@ def build_exe():
 
 if __name__ == '__main__':
     try:
-        build_frontend()
+        # build_frontend() # Uncomment to rebuild frontend every time
         build_exe()
     except Exception as e:
         print(f"Build Failed: {e}")
