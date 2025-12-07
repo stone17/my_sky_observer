@@ -211,17 +211,16 @@ class StreamSession:
             yield f"event: twilight_info\ndata: {json.dumps(self.twilight)}\n\n"
             yield f"event: night_times\ndata: {json.dumps(self.twilight)}\n\n"
             
-            # Send ALL Metadata
             if await self.request.is_disconnected(): return
             yield self.get_initial_metadata_event()
             
-            # Details
+            # Details loop (NOW ASYNC)
             self.prioritize_top_objects()
-            for item in self.stream_details():
+            async for item in self.stream_details():
                 if await self.request.is_disconnected(): return
                 yield item
             
-            # Downloads
+            # Downloads loop (Async)
             async for item in self.stream_downloads():
                 if await self.request.is_disconnected(): return
                 yield item
@@ -264,52 +263,57 @@ class StreamSession:
         return f"event: catalog_metadata\ndata: {json.dumps(metadata)}\n\n"
 
     def prioritize_top_objects(self):
-        # Apply filters specifically for the download list selection
-        self.top_objects = self.all_objects[:50]
-        
         mode = self.settings.get('download_mode', 'selected')
+        min_alt = self.settings.get('min_altitude', 30)
+        min_hours = self.settings.get('min_hours', 0.0)
+        max_mag = self.settings.get('max_magnitude', 12.0)
+        min_size = self.settings.get('min_size', 0.0)
+        sel_types = self.settings.get('selected_types', [])
+        
+        # Normalize selected types for robust matching
+        raw_types = self.settings.get('selected_types', [])
+        sel_types = [t.strip().lower() for t in raw_types if t.strip()]
+        
+        def check_obj(o):
+            if o.get('max_altitude', 0) < min_alt: return False
+            if o.get('hours_visible', 0) < min_hours: return False
+            
+            mag = o.get('magnitude', 99)
+            if mag > max_mag: return False
+            
+            if o.get('size', 0) < min_size: return False
+            
+            if sel_types:
+                o_type = str(o.get('type', '')).strip().lower()
+                if o_type not in sel_types: return False
+            return True
+
+        filtered_candidates = [o for o in self.all_objects if check_obj(o)]
+        
+        self.top_objects = filtered_candidates[:50]
         
         if mode == 'all':
             self.download_list = self.all_objects
         elif mode == 'filtered':
-            min_alt = self.settings.get('min_altitude', 30)
-            min_hours = self.settings.get('min_hours', 0.0)
-            max_mag = self.settings.get('max_magnitude', 12.0)
-            min_size = self.settings.get('min_size', 0.0)
-            
-            # Normalize selected types
-            raw_types = self.settings.get('selected_types', [])
-            sel_types = [t.strip().lower() for t in raw_types if t.strip()]
-            
-            def check_obj(o):
-                if o.get('max_altitude', 0) < min_alt: return False
-                if o.get('hours_visible', 0) < min_hours: return False
-                
-                mag = o.get('magnitude', 99)
-                
-                # FIX: Strict check for magnitude
-                # If mag is 99 (unknown), it is technically > max_mag (12), so it should return False
-                # The previous logic "if mag < 99 and mag > max_mag" allowed 99 to pass.
-                if mag > max_mag: return False
-                
-                if o.get('size', 0) < min_size: return False
-                
-                if sel_types:
-                    o_type = str(o.get('type', '')).strip().lower()
-                    if o_type not in sel_types: return False
-                return True
-
-            self.download_list = [o for o in self.all_objects if check_obj(o)]
+            self.download_list = filtered_candidates
         else:
             self.download_list = []
-    def stream_details(self):
+
+    # FIX: Made this an async generator
+    async def stream_details(self):
         download_ids = set(o['id'] for o in self.download_list)
+        
         for obj in self.top_objects:
+            # Check disconnect per item
+            if await self.request.is_disconnected(): return
+
             obj_id = obj['id']
             url, filepath, _ = get_cache_info(obj_id, self.setup_hash)
             is_cached = os.path.exists(filepath)
             
-            alt_data = calculator.get_altitude_graph(
+            # FIX: Run heavy math in thread so we don't block the loop
+            alt_data = await asyncio.to_thread(
+                calculator.get_altitude_graph,
                 obj['ra'], obj['dec'], self.location, 60, self.session_start, self.session_end
             )
             hours = calculator.calculate_time_above_altitude(
@@ -369,9 +373,11 @@ class StreamSession:
                     await queue.put({"progress": True, "current": completed, "total": total})
 
         tasks = [asyncio.create_task(worker(o)) for o in to_download]
+        
         async def monitor():
             if tasks: await asyncio.gather(*tasks)
             await queue.put(None)
+        
         asyncio.create_task(monitor())
 
         while True:

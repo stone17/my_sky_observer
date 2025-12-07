@@ -7,7 +7,6 @@ const emit = defineEmits(['select', 'fetch-all', 'update-settings', 'update-clie
 const showInfoModal = ref(false);
 const infoObject = ref(null);
 
-// Local state for filters
 const localSettings = ref({});
 const localClientSettings = ref({});
 
@@ -18,7 +17,6 @@ const sortOptions = [
     { value: 'size', label: 'Size' }
 ];
 
-// Sync props
 watch(() => props.settings, (newVal) => {
     if (newVal && JSON.stringify(newVal) !== JSON.stringify(localSettings.value)) {
         localSettings.value = { ...newVal };
@@ -34,7 +32,6 @@ watch(() => props.clientSettings, (newVal) => {
 const updateSettings = () => emit('update-settings', localSettings.value);
 const updateClientSettings = () => emit('update-client-settings', localClientSettings.value);
 
-// Auto-scroll
 watch(() => props.selectedId, (newId) => {
     if (newId) {
         nextTick(() => {
@@ -49,7 +46,6 @@ const openInfo = (obj) => {
     showInfoModal.value = true;
 };
 
-// --- CORE FILTERING & SORTING LOGIC ---
 const filteredAndSortedObjects = computed(() => {
     const minAlt = props.settings?.min_altitude || 30;
     const minHrs = props.clientSettings?.min_hours || 0;
@@ -57,16 +53,12 @@ const filteredAndSortedObjects = computed(() => {
     const minSize = props.clientSettings?.min_size || 0;
     const sortKey = props.settings?.sort_key || 'time';
 
-    // Normalize Search Query (remove spaces)
     const q = (props.searchQuery || '').trim().toLowerCase();
     const normQ = q.replace(/\s+/g, '');
 
-    // 1. Map & Filter
     let result = [];
 
     for (const o of props.objects) {
-        // --- SEARCH OVERRIDE ---
-        // If searching, ignore standard filters and only check for text match
         if (normQ) {
             const normId = o.name.toLowerCase().replace(/\s+/g, '');
             const normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
@@ -79,7 +71,6 @@ const filteredAndSortedObjects = computed(() => {
             continue;
         }
 
-        // --- STANDARD FILTERS ---
         if (minHrs > 0 && (o.hours_visible || 0) < minHrs) continue;
         if (minAlt > 0 && (o.max_altitude || 0) < minAlt) continue;
         if (maxMag !== undefined && o.mag !== undefined && o.mag > maxMag) continue;
@@ -92,32 +83,24 @@ const filteredAndSortedObjects = computed(() => {
         result.push(o);
     }
 
-    // 2. Sort
     result.sort((a, b) => {
-        // --- SEARCH SORT (Relevance) ---
         if (normQ) {
             const normA = a.name.toLowerCase().replace(/\s+/g, '');
             const normB = b.name.toLowerCase().replace(/\s+/g, '');
 
-            // Exact match priority
             if (normA === normQ && normB !== normQ) return -1;
             if (normB === normQ && normA !== normQ) return 1;
 
-            // Starts with priority
             const aStarts = normA.startsWith(normQ);
             const bStarts = normB.startsWith(normQ);
             if (aStarts && !bStarts) return -1;
             if (bStarts && !aStarts) return 1;
 
-            // Shortest match priority
             if (normA.length !== normB.length) return normA.length - normB.length;
-
             return normA.localeCompare(normB);
         }
 
-        // --- STANDARD SORT ---
-        let valA, valB;
-        let dir = -1; // Default descending
+        let valA, valB, dir = -1;
 
         if (sortKey === 'time' || sortKey === 'altitude') {
             valA = a.max_altitude || 0;
@@ -128,7 +111,7 @@ const filteredAndSortedObjects = computed(() => {
         } else if (sortKey === 'brightness') {
             valA = a.mag || 99;
             valB = b.mag || 99;
-            dir = 1; // Ascending
+            dir = 1;
         } else if (sortKey === 'size') {
             valA = a.maj_ax || 0;
             valB = b.maj_ax || 0;
@@ -258,7 +241,6 @@ const getAltitudePath = (altitudeGraph) => {
 </template>
 
 <style scoped>
-/* (Styles remain unchanged) */
 .list-wrapper {
     display: flex;
     flex-direction: row;
@@ -360,8 +342,9 @@ const getAltitudePath = (altitudeGraph) => {
     height: 80px;
 }
 
+/* FIX: Info column flex 2, graph column flex 1 */
 .info-col {
-    flex: 1;
+    flex: 2;
     padding: 8px;
     display: flex;
     flex-direction: column;

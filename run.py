@@ -37,7 +37,7 @@ def main():
     # Wait for the server to be ready
     if not wait_for_server("http://127.0.0.1:8000"):
         print("Server failed to start. Exiting.")
-        return  # CHANGED: Use return instead of sys.exit(1)
+        return 
 
     # Create and start the pywebview window
     try:
@@ -46,14 +46,14 @@ def main():
             'http://127.0.0.1:8000',
             width=1400,
             height=900,
-            resizable=True
+            resizable=True,
+            background_color='#111827'  # FIX: Start window with dark background
         )
         # Blocks here until window is closed
         webview.start(debug=DEBUG)
     except Exception as e:
         print(f"Failed to create webview window: {e}")
     finally:
-        # CHANGED: Removed sys.exit()
         print("Application finished.")
 
 if __name__ == '__main__':

@@ -30,10 +30,7 @@ const fetchSettings = async () => {
         if (res.ok) {
             const data = await res.json();
             settings.value = data;
-
-            // Load client settings from backend if available
             if (data.client_settings) {
-                // Merge to preserve defaults/structure
                 Object.assign(clientSettings.value, data.client_settings);
             }
         }
@@ -42,15 +39,11 @@ const fetchSettings = async () => {
 
 let saveTimeout = null;
 const saveSettings = (newSettings) => {
-    // console.log("DEBUG: saveSettings called with:", newSettings);
-    // Ensure we send both main settings and client settings
     const payload = {
-        ...settings.value, // Current global settings
-        ...newSettings,    // Overwrites from TopBar if any
-        client_settings: clientSettings.value // Ensure client settings are included
+        ...settings.value,
+        ...newSettings,
+        client_settings: clientSettings.value
     };
-
-    // Optimistic Update
     settings.value = payload;
 
     if (saveTimeout) clearTimeout(saveTimeout);
@@ -91,27 +84,18 @@ const startStream = (mode = 'selected') => {
 
     params.append('sort_key', settings.value.sort_key || 'time');
     params.append('min_altitude', settings.value.min_altitude || 30.0);
-    // params.append('min_hours', settings.value.min_hours || 0.0); // REMOVED from root
     params.append('image_padding', settings.value.image_padding || 1.05);
 
-    // Image Server Params
     if (settings.value.image_server) {
         params.append('image_resolution', settings.value.image_server.resolution || 512);
         params.append('image_timeout', settings.value.image_server.timeout || 60);
         params.append('image_source', settings.value.image_server.source || 'dss2r');
     }
 
-    console.log("DEBUG: startStream params:", params.toString());
-
-    // Download Mode Logic
     params.append('download_mode', mode);
 
-
-
-    // Client-side filters (for backend filtering)
     if (clientSettings.value.max_magnitude !== undefined) params.append('max_magnitude', clientSettings.value.max_magnitude);
     if (clientSettings.value.min_size !== undefined) params.append('min_size', clientSettings.value.min_size);
-    // Added min_hours here
     if (clientSettings.value.min_hours !== undefined) params.append('min_hours', clientSettings.value.min_hours);
 
     if (clientSettings.value.selected_types && clientSettings.value.selected_types.length > 0) {
@@ -139,19 +123,12 @@ const startStream = (mode = 'selected') => {
         } catch (e) { console.error("Error parsing night times", e); }
     });
 
-    // 1. Metadata Event: Receive full list immediately
     eventSource.addEventListener('catalog_metadata', (e) => {
         try {
             const newObjects = JSON.parse(e.data);
-            console.log(`Received metadata for ${newObjects.length} objects`);
-
-            // Preserve selection
             const currentSelectedId = selectedObject.value?.name;
-
-            // Update list immediately
             objects.value = newObjects;
 
-            // Restore selection or Auto-select top item
             if (currentSelectedId) {
                 const found = objects.value.find(o => o.name === currentSelectedId);
                 if (found) selectedObject.value = found;
@@ -165,18 +142,12 @@ const startStream = (mode = 'selected') => {
         }
     });
 
-    // 2. Details Event: Update specific objects with graphs/images
     eventSource.addEventListener('object_details', (e) => {
         try {
             const detail = JSON.parse(e.data);
             const obj = objects.value.find(o => o.name === detail.name);
-            if (obj) {
-                // Merge details into existing object
-                Object.assign(obj, detail);
-            }
-        } catch (err) {
-            console.error("Error parsing details", err);
-        }
+            if (obj) Object.assign(obj, detail);
+        } catch (err) { console.error("Error parsing details", err); }
     });
 
     eventSource.addEventListener('image_status', (e) => {
@@ -213,24 +184,17 @@ const stopStream = () => {
     }
 };
 
-// Handle cache purge reload
 const handlePurge = () => {
     objects.value = [];
     selectedObject.value = null;
-    startStream('selected'); // Restart automatically
+    startStream('selected');
 };
 
-// Watch selection to persist and fetch image if needed
 watch(selectedObject, async (newVal) => {
     if (newVal) {
         localStorage.setItem('lastSelectedId', newVal.name);
-
-        // If in "selected" mode (or any mode really) and image is missing/pending, fetch it
         if (!newVal.image_url || newVal.status === 'pending') {
-            console.log(`Fetching image for ${newVal.name}...`);
-            // Optimistic update
             newVal.status = 'downloading';
-
             try {
                 const res = await fetch('/api/download-object', {
                     method: 'POST',
@@ -240,13 +204,11 @@ watch(selectedObject, async (newVal) => {
                         settings: settings.value
                     })
                 });
-
                 if (res.ok) {
                     const data = await res.json();
                     newVal.image_url = data.url;
                     newVal.status = data.status;
                 } else {
-                    console.error("Failed to fetch image");
                     newVal.status = 'error';
                 }
             } catch (e) {
@@ -257,101 +219,68 @@ watch(selectedObject, async (newVal) => {
     }
 });
 
-// Compute available types for filter
 const availableTypes = computed(() => {
     const types = new Set();
-    objects.value.forEach(o => {
-        if (o.type) types.add(o.type);
-    });
+    objects.value.forEach(o => { if (o.type) types.add(o.type); });
     return Array.from(types).sort();
 });
 
-// Auto-restart stream on settings change (Debounced)
-// Only watch parameters that require a backend reload
 const streamParams = computed(() => {
     return {
         loc: settings.value.location,
         tel: settings.value.telescope,
         cam: settings.value.camera,
         cats: settings.value.catalogs,
-        // mode: settings.value.download_mode, // Removed download_mode dependency
         min_alt: settings.value.min_altitude,
         min_hrs: clientSettings.value.min_hours,
-        // Added missing filters to trigger restart
         sort: settings.value.sort_key,
         max_mag: clientSettings.value.max_magnitude,
         min_sz: clientSettings.value.min_size,
         types: clientSettings.value.selected_types,
-
         pad: settings.value.image_padding,
-        img_srv: settings.value.image_server // Trigger restart on image settings change
+        img_srv: settings.value.image_server
     };
 });
 
 let restartTimer = null;
 watch(streamParams, (newVal, oldVal) => {
-    // Skip if initial load (empty oldVal)
     if (!oldVal) return;
-
-    // DEBUG: Identify what changed
+    // Check for real changes
     const changes = [];
     for (const key in newVal) {
-        if (JSON.stringify(newVal[key]) !== JSON.stringify(oldVal[key])) {
-            changes.push(key);
-        }
+        if (JSON.stringify(newVal[key]) !== JSON.stringify(oldVal[key])) changes.push(key);
     }
 
     if (changes.length > 0) {
-        console.log("DEBUG: Stream params changed:", changes);
-        console.log("Old:", oldVal);
-        console.log("New:", newVal);
-        console.log("DEBUG: Settings telescope:", settings.value.telescope);
-
         if (restartTimer) clearTimeout(restartTimer);
-
         restartTimer = setTimeout(() => {
-            console.log("Stream params changed, restarting stream...");
-            startStream('selected'); // Reset to selected mode on parameter change
+            startStream('selected');
         }, 1000);
-    } else {
-        // console.log("DEBUG: Stream params watcher fired but no changes detected.");
     }
 }, { deep: true });
 
 const handleKeydown = (e) => {
-    // Only handle if we have objects
     if (objects.value.length === 0) return;
-
     if (e.key === 'ArrowDown') {
         const idx = objects.value.findIndex(o => o.name === selectedObject.value?.name);
-        if (idx < objects.value.length - 1) {
-            selectedObject.value = objects.value[idx + 1];
-        } else if (idx === -1 && objects.value.length > 0) {
-            selectedObject.value = objects.value[0];
-        }
+        if (idx < objects.value.length - 1) selectedObject.value = objects.value[idx + 1];
+        else if (idx === -1) selectedObject.value = objects.value[0];
         e.preventDefault();
     } else if (e.key === 'ArrowUp') {
         const idx = objects.value.findIndex(o => o.name === selectedObject.value?.name);
-        if (idx > 0) {
-            selectedObject.value = objects.value[idx - 1];
-        }
+        if (idx > 0) selectedObject.value = objects.value[idx - 1];
         e.preventDefault();
     }
 };
 
 onMounted(async () => {
     window.addEventListener('keydown', handleKeydown);
-
-    // No longer loading from localStorage
-
     await fetchSettings();
-    startStream('selected'); // Auto-start
+    startStream('selected');
 });
 
-// Watch for changes to persist client settings
 watch(clientSettings, (newVal) => {
-    // Debounce or just save? Save is cheap enough for now.
-    saveSettings({}); // Pass empty object to trigger save with current state
+    saveSettings({});
 }, { deep: true });
 
 onUnmounted(() => {
@@ -367,7 +296,6 @@ onUnmounted(() => {
             @download-all="startStream('all')" @stop-download="stopStream" />
 
         <div class="main-layout">
-            <!-- Left: Main Framing -->
             <section class="framing-section">
                 <div v-if="selectedObject" class="fill-height">
                     <Framing :object="selectedObject" :objects="objects" :settings="settings"
@@ -382,13 +310,11 @@ onUnmounted(() => {
                 </div>
             </section>
 
-            <!-- Middle: Vertical Type Filter -->
             <section class="filter-section">
                 <TypeFilter :availableTypes="availableTypes" :clientSettings="clientSettings"
                     @update-client-settings="Object.assign(clientSettings, $event)" />
             </section>
 
-            <!-- Right: Graph + List -->
             <aside class="sidebar">
                 <div class="graph-panel">
                     <AltitudeGraph :object="selectedObject" :location="settings.location" :nightTimes="nightTimes" />
@@ -403,7 +329,6 @@ onUnmounted(() => {
             </aside>
         </div>
 
-        <!-- Bottom Bar (Footer) -->
         <footer class="bottom-bar">
             <div class="footer-content">
                 <span>My Sky Observer v1.0</span>
@@ -419,6 +344,11 @@ onUnmounted(() => {
     --bg-color: #111827;
     --text-color: #f3f4f6;
     --border-color: #374151;
+}
+
+/* FIX: Set HTML background to match app background to prevent white borders */
+html {
+    background-color: var(--bg-color);
 }
 
 body {
@@ -444,16 +374,13 @@ body {
 
 .framing-section {
     flex: 1;
-    /* Takes remaining space */
     border-right: 1px solid var(--border-color);
     position: relative;
     min-width: 0;
-    /* Allow shrinking */
 }
 
 .filter-section {
     width: auto;
-    /* Width determined by content (TypeFilter width) */
     border-right: 1px solid var(--border-color);
 }
 
@@ -471,8 +398,8 @@ body {
 }
 
 .sidebar {
-    width: 400px;
-    /* Fixed width for sidebar */
+    width: 450px;
+    /* FIX: Increased width for readability */
     display: flex;
     flex-direction: column;
     flex-shrink: 0;

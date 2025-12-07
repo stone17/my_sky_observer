@@ -5,3 +5,5 @@ frontend/node_modules/
 .pytest_cache/
 frontend/dist/
 settings_user.yaml
+dist/
+build/
