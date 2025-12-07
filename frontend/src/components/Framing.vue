@@ -18,13 +18,40 @@ const showSuggestions = ref(false);
 const suggestionList = computed(() => {
     const q = (props.searchQuery || '').trim();
     if (!q) return [];
-    const lowerQ = q.toLowerCase().replace(/\s+/g, '');
+
+    // Normalize: lowercase + remove spaces
+    const normQ = q.toLowerCase().replace(/\s+/g, '');
+
+    // 1. Filter matches (Space Agnostic)
     const matches = (props.objects || []).filter(o => {
-        const id = o.name.toLowerCase().replace(/\s+/g, '');
-        const common = (o.common_name || '').toLowerCase();
-        const other = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
-        return id.startsWith(lowerQ) || common.includes(q.toLowerCase()) || other.includes(lowerQ);
+        const normId = o.name.toLowerCase().replace(/\s+/g, '');
+        const normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
+        const normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
+
+        return normId.includes(normQ) || normCommon.includes(normQ) || normOther.includes(normQ);
     });
+
+    // 2. Sort by Relevance
+    matches.sort((a, b) => {
+        const normA = a.name.toLowerCase().replace(/\s+/g, '');
+        const normB = b.name.toLowerCase().replace(/\s+/g, '');
+
+        // Exact Match
+        if (normA === normQ && normB !== normQ) return -1;
+        if (normB === normQ && normA !== normQ) return 1;
+
+        // Starts With
+        const aStarts = normA.startsWith(normQ);
+        const bStarts = normB.startsWith(normQ);
+        if (aStarts && !bStarts) return -1;
+        if (bStarts && !aStarts) return 1;
+
+        // Shortest Match (M1 < M10)
+        if (normA.length !== normB.length) return normA.length - normB.length;
+
+        return normA.localeCompare(normB);
+    });
+
     return matches.slice(0, 10);
 });
 
@@ -37,7 +64,10 @@ const selectSuggestion = (obj) => {
     emit('update-search', obj.name);
     emit('select-object', obj);
     showSuggestions.value = false;
-    e.preventDefault();
+};
+
+const onSearchBlur = () => {
+    setTimeout(() => { showSuggestions.value = false; }, 200);
 };
 
 // ResizeObserver State
@@ -46,19 +76,19 @@ const wrapperSize = ref(0);
 let resizeObserver = null;
 
 // FOV State
-const currentFov = ref(0.1); // Viewport FOV in degrees (zoom level)
-const imageFov = ref(0.1);   // FOV of the currently loaded image (dimensions)
-const sensorFov = ref({ w: 0, h: 0 }); // Authoritative from backend
+const currentFov = ref(0.1);
+const imageFov = ref(0.1);
+const sensorFov = ref({ w: 0, h: 0 });
 
-// Initialize FOV from object (Single Source of Truth)
 const initFov = () => {
-    // 1. Authoritative Backend Data
     if (props.object) {
         if (props.object.image_fov) {
             const iFov = props.object.image_fov;
             imageFov.value = iFov;
-            // Default Zoom to Image FOV
-            currentFov.value = parseFloat(iFov.toFixed(1));
+            // Only reset zoom if it looks uninitialized or significantly different
+            if (currentFov.value <= 0.1 || Math.abs(currentFov.value - iFov) > 5.0) {
+                currentFov.value = parseFloat(iFov.toFixed(1));
+            }
         }
         if (props.object.sensor_fov) {
             sensorFov.value = props.object.sensor_fov;
@@ -66,17 +96,12 @@ const initFov = () => {
     }
 };
 
-// Watch for object updates (which include the new data fields)
 watch(() => props.object, () => {
     initFov();
 }, { deep: true, immediate: true });
 
-// Computed Styles - STRICT scaling based on currentFov (Viewport)
 const imageStyle = computed(() => {
     if (currentFov.value <= 0.001 || imageFov.value <= 0.001) return { display: 'none' };
-
-    // Scale image relative to viewport
-    // If Viewport (current) == Image (image), scale is 1 (100%)
     const scale = imageFov.value / currentFov.value;
     return {
         width: `${scale * 100}%`,
@@ -90,8 +115,6 @@ const imageStyle = computed(() => {
 
 const sensorStyle = computed(() => {
     if (currentFov.value <= 0.001 || sensorFov.value.w <= 0) return { display: 'none' };
-
-    // Scale sensor relative to viewport
     const wPct = (sensorFov.value.w / currentFov.value) * 100;
     const hPct = (sensorFov.value.h / currentFov.value) * 100;
     return {
@@ -140,6 +163,12 @@ const onDrag = (e) => {
     if (!isDragging.value) return;
     offsetX.value = e.clientX - dragStart.value.x;
     offsetY.value = e.clientY - dragStart.value.y;
+};
+
+const startDrag = (e) => {
+    isDragging.value = true;
+    dragStart.value = { x: e.clientX - offsetX.value, y: e.clientY - offsetY.value };
+    e.preventDefault();
 };
 
 const stopDrag = () => {
@@ -212,7 +241,6 @@ onUnmounted(() => {
             </div>
 
             <div class="header-right">
-                <!-- Search -->
                 <div class="search-container relative">
                     <input type="text" :value="searchQuery" @input="onSearchInput" placeholder="Search..."
                         @focus="showSuggestions = true" @blur="onSearchBlur" class="header-search" />
@@ -228,7 +256,6 @@ onUnmounted(() => {
         </header>
 
         <div class="framing-viewport" ref="viewportRef" @mousemove="onDrag" @mouseup="stopDrag" @mouseleave="stopDrag">
-            <!-- Image Layer -->
             <div class="image-wrapper" :style="{ width: wrapperSize + 'px', height: wrapperSize + 'px' }">
                 <div class="image-container" :style="imageStyle">
                     <img v-if="customImageUrl || object.image_url" :src="customImageUrl || object.image_url"
@@ -238,17 +265,14 @@ onUnmounted(() => {
                         <span v-else>No Image</span>
                     </div>
                 </div>
-
-                <!-- Sensor Layer -->
                 <div v-if="object && settings" :style="sensorStyle" @mousedown="startDrag">
                     <div class="crosshair">+</div>
                 </div>
             </div>
-            <!-- Debug Info -->
             <div
                 style="position: absolute; bottom: 0; left: 0; background: rgba(0,0,0,0.7); color: lime; font-size: 10px; padding: 2px; pointer-events: none;">
                 cFov: {{ currentFov }} | iFov: {{ imageFov }} | sFov: {{ sensorFov.w.toFixed(2) }}x{{
-                    sensorFov.h.toFixed(2) }} | Rect: {{ object?.fov_rectangle?.width_percent?.toFixed(1) }}%
+                    sensorFov.h.toFixed(2) }}
             </div>
         </div>
     </article>
@@ -275,6 +299,7 @@ onUnmounted(() => {
     display: flex;
     align-items: baseline;
     gap: 10px;
+    min-width: 200px;
 }
 
 .header-left h2 {
@@ -288,7 +313,6 @@ onUnmounted(() => {
     font-size: 0.9rem;
 }
 
-/* New Header Styles */
 .header-right {
     display: flex;
     justify-content: flex-end;
@@ -301,19 +325,6 @@ onUnmounted(() => {
     align-items: center;
     justify-content: center;
     flex: 1;
-    /* Takes up remaining space to center itself relative to container if left/right are balanced, or roughly center */
-}
-
-/* Ensure Name doesn't shrink */
-.header-left {
-    min-width: 200px;
-    /* Balance with Right to help centering */
-}
-
-.divider {
-    width: 1px;
-    height: 20px;
-    background: #374151;
 }
 
 .lbl {
@@ -323,7 +334,6 @@ onUnmounted(() => {
     text-transform: uppercase;
 }
 
-/* Compact Inputs */
 .input-mini {
     background: #000;
     color: white;
@@ -334,7 +344,6 @@ onUnmounted(() => {
     text-align: center;
     border-radius: 2px;
     height: 26px;
-    line-height: 24px;
     box-sizing: border-box;
 }
 
@@ -345,7 +354,6 @@ onUnmounted(() => {
     line-height: 1;
 }
 
-/* Search Box */
 .search-container {
     position: relative;
     width: 200px;
@@ -390,7 +398,6 @@ onUnmounted(() => {
     background: #374151;
 }
 
-/* Obsolete but kept for safety or reused */
 .group {
     display: flex;
     gap: 2px;
@@ -402,7 +409,6 @@ onUnmounted(() => {
     background: #000;
     position: relative;
     overflow: hidden;
-    /* Center coordinate system */
     display: flex;
     justify-content: center;
     align-items: center;
@@ -410,17 +416,13 @@ onUnmounted(() => {
 
 .image-wrapper {
     position: relative;
-    /* Size set by JS */
-    /* Ensure it doesn't overflow */
     display: flex;
     justify-content: center;
     align-items: center;
     background: #000;
-    /* Optional: ensures black bars are black */
 }
 
 .image-container {
-    /* Centering handled by absolute positioning in computed style */
     display: flex;
     justify-content: center;
     align-items: center;

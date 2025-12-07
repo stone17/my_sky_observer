@@ -206,24 +206,22 @@ class StreamSession:
 
             if await self.request.is_disconnected(): return
 
-            # Initial Metadata (yields basic info + full list)
+            # Initial Metadata
             yield f"event: total\ndata: {len(self.all_objects)}\n\n"
             yield f"event: twilight_info\ndata: {json.dumps(self.twilight)}\n\n"
             yield f"event: night_times\ndata: {json.dumps(self.twilight)}\n\n"
             
-            # Use the helper to generate the huge JSON payload, then yield it
-            # This avoids the "return with value in generator" syntax error entirely
-            metadata_event = self.get_initial_metadata_event()
+            # Send ALL Metadata
             if await self.request.is_disconnected(): return
-            yield metadata_event
+            yield self.get_initial_metadata_event()
             
-            # Details loop
+            # Details
             self.prioritize_top_objects()
             for item in self.stream_details():
                 if await self.request.is_disconnected(): return
                 yield item
             
-            # Downloads loop
+            # Downloads
             async for item in self.stream_downloads():
                 if await self.request.is_disconnected(): return
                 yield item
@@ -232,7 +230,6 @@ class StreamSession:
                 yield "event: close\ndata: Stream complete\n\n"
 
         except Exception as e:
-            # Swallow connection errors to prevent log noise
             if "Disconnect" not in str(e):
                 traceback.print_exc()
                 try: 
@@ -241,7 +238,6 @@ class StreamSession:
                 except: pass
 
     def get_initial_metadata_event(self):
-        # Renamed from stream_initial_metadata to clarify it returns a string, not a generator
         metadata = []
         for obj in self.all_objects:
             size_str = f"{obj.get('maj_ax', 0)}'"
@@ -265,46 +261,47 @@ class StreamSession:
                 "sensor_fov": self.sensor_fov_data,
                 "image_fov": self.download_fov,
             })
-        
         return f"event: catalog_metadata\ndata: {json.dumps(metadata)}\n\n"
 
     def prioritize_top_objects(self):
-        # Filter Logic to ensure graphs are generated for what the user is actually looking at
+        # Apply filters specifically for the download list selection
+        self.top_objects = self.all_objects[:50]
+        
         mode = self.settings.get('download_mode', 'selected')
         
-        # We always filter for the top_objects (graphs) to match the view
-        min_alt = self.settings.get('min_altitude', 30)
-        min_hours = self.settings.get('min_hours', 0.0)
-        max_mag = self.settings.get('max_magnitude', 12.0)
-        min_size = self.settings.get('min_size', 0.0)
-        sel_types = self.settings.get('selected_types', [])
-        
-        def check_obj(o):
-            if o.get('max_altitude', 0) < min_alt: return False
-            if o.get('hours_visible', 0) < min_hours: return False
-            
-            mag = o.get('magnitude', 99)
-            if mag < 99 and mag > max_mag: return False
-            
-            if o.get('size', 0) < min_size: return False
-            
-            if sel_types and o.get('type') not in sel_types: return False
-            return True
-
-        # Apply filter to find relevant objects
-        filtered_candidates = [o for o in self.all_objects if check_obj(o)]
-        
-        # Take Top 50 of the FILTERED list
-        self.top_objects = filtered_candidates[:50]
-        
-        # Set download list
         if mode == 'all':
             self.download_list = self.all_objects
         elif mode == 'filtered':
-            self.download_list = filtered_candidates
+            min_alt = self.settings.get('min_altitude', 30)
+            min_hours = self.settings.get('min_hours', 0.0)
+            max_mag = self.settings.get('max_magnitude', 12.0)
+            min_size = self.settings.get('min_size', 0.0)
+            
+            # Normalize selected types
+            raw_types = self.settings.get('selected_types', [])
+            sel_types = [t.strip().lower() for t in raw_types if t.strip()]
+            
+            def check_obj(o):
+                if o.get('max_altitude', 0) < min_alt: return False
+                if o.get('hours_visible', 0) < min_hours: return False
+                
+                mag = o.get('magnitude', 99)
+                
+                # FIX: Strict check for magnitude
+                # If mag is 99 (unknown), it is technically > max_mag (12), so it should return False
+                # The previous logic "if mag < 99 and mag > max_mag" allowed 99 to pass.
+                if mag > max_mag: return False
+                
+                if o.get('size', 0) < min_size: return False
+                
+                if sel_types:
+                    o_type = str(o.get('type', '')).strip().lower()
+                    if o_type not in sel_types: return False
+                return True
+
+            self.download_list = [o for o in self.all_objects if check_obj(o)]
         else:
             self.download_list = []
-
     def stream_details(self):
         download_ids = set(o['id'] for o in self.download_list)
         for obj in self.top_objects:
@@ -372,11 +369,9 @@ class StreamSession:
                     await queue.put({"progress": True, "current": completed, "total": total})
 
         tasks = [asyncio.create_task(worker(o)) for o in to_download]
-        
         async def monitor():
             if tasks: await asyncio.gather(*tasks)
             await queue.put(None)
-        
         asyncio.create_task(monitor())
 
         while True:
@@ -423,7 +418,6 @@ async def stream_objects_endpoint(request: Request, focal_length: float, sensor_
         "sort_key": sort_key
     })
     
-    # Parse query parameters for filters
     qp = request.query_params
     if 'min_altitude' in qp: settings['min_altitude'] = float(qp['min_altitude'])
     if 'min_hours' in qp: settings['min_hours'] = float(qp['min_hours'])
