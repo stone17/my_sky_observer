@@ -1,63 +1,116 @@
 # My Sky Observer
 
-A web-based astronomy target framing and planning tool.
+**My Sky Observer** is a comprehensive, web-based tool designed for astrophotographers and visual observers. It simplifies the process of selecting targets, framing them with your specific equipment, and integrating with your capture software.
 
-## Features
-- **Target Planning**: Filter and sort targets based on altitude, visibility, and type.
-- **Framing**: Visualize your telescope and camera's field of view on deep sky survey images.
-- **N.I.N.A Integration**: Send target coordinates and rotation directly to N.I.N.A.
-- **Offline Caching**: Caches images for offline use.
+![My Sky Observer Screenshot](docs/screenshot.png)
 
-## Installation & Setup
+## ✨ Key Features
+
+*   **Advanced Target Planning**:
+    *   Filter objects by **Altitude**, **Visibility Duration** (during astronomical night), and **Object Type** (Galaxies, Nebulae, Clusters, etc.).
+    *   Sort targets to find the best objects for your specific night and location.
+    *   **Lazy-loaded** object list with altitude graphs and thumbnails.
+
+*   **Interactive Framing**:
+    *   Visualize your camera and telescope's **Field of View (FOV)** projected onto Deep Sky Survey (DSS) images.
+    *   Adjust rotation and centering to perfect your composition.
+    *   **Cache Busting**: Ensures you always see the latest image updates.
+
+*   **Seamless Integration**:
+    *   **N.I.N.A. Support**: Send target coordinates and rotation directly to N.I.N.A. via its local API for automated slewing and centering.
+
+*   **Offline Capability**:
+    *   Automatically caches downloaded survey images for offline use in the field.
+    *   Persistent settings for location and equipment.
+
+*   **User-Friendly Interface**:
+    *   Clean, responsive UI built with **Vue 3** and **PicoCSS**.
+    *   **Dark Mode** optimized for preserving night vision.
+    *   Keyboard navigation support for object lists.
+
+## 🚀 Getting Started
 
 ### Prerequisites
-- Python 3.10+
-- Node.js & npm (for building the frontend)
 
-### Backend Setup
-1.  Create a virtual environment (optional but recommended):
+*   **Python 3.10+**
+*   **Node.js & npm** (for building the frontend)
+
+### Quick Install
+
+**Linux / macOS:**
+```bash
+# Installs dependencies and builds the frontend
+./install.sh
+
+# Run the application
+uvicorn backend.main:app --reload
+```
+
+**Windows:**
+```bat
+REM Installs dependencies, builds frontend, and starts the app
+install.bat
+```
+
+### Manual Installation
+
+If you prefer to install step-by-step:
+
+1.  **Backend Setup**:
     ```bash
+    # Create and activate a virtual environment (recommended)
     python -m venv venv
-    source venv/bin/activate  # Linux/Mac
-    venv\Scripts\activate     # Windows
-    ```
-2.  Install dependencies:
-    ```bash
+    source venv/bin/activate  # or venv\Scripts\activate on Windows
+
+    # Install Python dependencies
     pip install -r requirements.txt
     ```
-    *Note: If you want to run tests, ensure `pytest` and `pytest-asyncio` are installed.*
 
-### Frontend Setup
-The frontend is built using Vue 3 and Vite.
-
-1.  Navigate to the frontend directory:
+2.  **Frontend Setup**:
     ```bash
     cd frontend
-    ```
-2.  Install dependencies:
-    ```bash
     npm install
-    ```
-3.  Build the frontend:
-    ```bash
     npm run build
+    cd ..
     ```
-    This generates the production files in `frontend/dist`.
 
-### Running the Application
-To start the application (backend + frontend):
+## 🖥️ Running the Application
 
-```bash
-python run.py
-```
-This will start the server and attempt to open a window (using `pywebview`) or you can access it in your browser at `http://127.0.0.1:8000`.
+You have two options for running the application:
 
-## Development
-- **Frontend Dev Server**: Run `npm run dev` in the `frontend` folder for hot-reloading during UI development.
-- **Backend Dev**: Run `uvicorn backend.main:app --reload` to auto-restart on code changes.
+1.  **Browser / Server Mode (Recommended for most users):**
+    ```bash
+    uvicorn backend.main:app --reload
+    ```
+    Access the interface at `http://127.0.0.1:8000`.
 
-## Testing
-Run the backend tests:
-```bash
-pytest
-```
+2.  **Desktop App Mode:**
+    ```bash
+    python run.py
+    ```
+    This launches the application in a standalone window using `pywebview`.
+
+## 🛠️ Configuration
+
+Settings are stored in `settings.json` (created after first run or based on defaults). You can configure:
+*   **Location**: Latitude, Longitude, Elevation (or search by City).
+*   **Equipment**: Focal length, Camera sensor size.
+*   **N.I.N.A.**: Host and Port for integration.
+
+*Note: Most settings can be adjusted directly within the application's UI.*
+
+## 🤝 Contributing
+
+We welcome contributions!
+
+1.  **Development Mode**:
+    *   Run the backend: `uvicorn backend.main:app --reload`
+    *   Run the frontend (hot-reload): `cd frontend && npm run dev`
+
+2.  **Testing**:
+    *   Backend tests are located in `test/`. Run them using `pytest`.
+    *   Ensure all tests pass before submitting a pull request.
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
