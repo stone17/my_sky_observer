@@ -4,6 +4,7 @@ import traceback
 import os
 import sys
 import shutil
+import yaml
 import numpy as np
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -89,7 +90,6 @@ async def download_image(ra: float, dec: float, fov: float, object_id: str, setu
 
 # --- Settings ---
 def load_settings() -> dict:
-    import yaml
     settings = {}
     default_path = get_resource_path(SETTINGS_DEFAULT_FILE)
     if os.path.exists(default_path):
@@ -112,7 +112,6 @@ def load_settings() -> dict:
     return settings
 
 def save_settings(settings: dict):
-    import yaml
     with open(SETTINGS_USER_FILE, 'w') as f:
         yaml.dump(settings, f, default_flow_style=False)
 
@@ -466,7 +465,6 @@ def delete_profile(name: str):
 
 @app.get("/api/presets")
 def get_presets():
-    import yaml
     comp_path = get_resource_path(COMPONENTS_FILE)
     if os.path.exists(comp_path):
         try:

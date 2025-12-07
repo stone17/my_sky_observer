@@ -1,41 +1,77 @@
 import os
-import sys # <--- ADDED: Needed to set recursion limit
+import sys
 import subprocess
 import shutil
 import PyInstaller.__main__
 
-# FIX: Increase recursion limit to prevent PyInstaller crash with pandas/astropy
+# FIX: Increase recursion limit for pandas/astropy
 sys.setrecursionlimit(5000)
+
+def patch_frontend_dist():
+    """
+    Applies the Dark Mode / Background fix to the fresh build
+    BEFORE PyInstaller bundles it.
+    """
+    print("Patching frontend/dist/index.html for Dark Mode...")
+    dist_index = os.path.join("frontend", "dist", "index.html")
+    
+    if not os.path.exists(dist_index):
+        print(f"WARNING: {dist_index} not found. Skipping patch.")
+        return
+
+    try:
+        with open(dist_index, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        modified = False
+        style_tag = "<style>html, body { background-color: #111827; margin: 0; padding: 0; height: 100%; overflow: hidden; }</style>"
+
+        if "background-color: #111827" not in content:
+            content = content.replace("</head>", f"{style_tag}</head>")
+            modified = True
+
+        if "data-theme=\"dark\"" not in content:
+            if "<html" in content and "data-theme" not in content:
+                content = content.replace("<html", '<html data-theme="dark"')
+                modified = True
+
+        if modified:
+            with open(dist_index, "w", encoding="utf-8") as f:
+                f.write(content)
+            print("Patch successful.")
+        else:
+            print("File already patched.")
+            
+    except Exception as e:
+        print(f"Patch failed: {e}")
 
 def build_frontend():
     print("Building Frontend...")
     frontend_dir = os.path.join(os.getcwd(), 'frontend')
-    # Install dependencies if node_modules missing
+    
     if not os.path.exists(os.path.join(frontend_dir, 'node_modules')):
         subprocess.check_call(['npm', 'install'], cwd=frontend_dir, shell=True)
     
-    # Build
     subprocess.check_call(['npm', 'run', 'build'], cwd=frontend_dir, shell=True)
     
-    # Verify dist
     dist_dir = os.path.join(frontend_dir, 'dist')
     if not os.path.exists(dist_dir):
         raise Exception("Frontend build failed: dist directory not found")
+        
+    # FIX: Apply the patch immediately after build
+    patch_frontend_dist()
     print("Frontend build complete.")
 
 def build_exe():
     print("Building Executable...")
     
-    # Define data to bundle
-    # Format: ('source_folder', 'dest_folder_internal')
     datas = [
         ('frontend/dist', 'frontend/dist'),
-        ('catalogs', 'catalogs'),           # Ensure catalogs are included
+        ('catalogs', 'catalogs'),
         ('settings_default.yaml', '.'),
         ('components.yaml', '.')
     ]
     
-    # Hidden imports often needed for Uvicorn/FastAPI/WebView
     hidden_imports = [
         'uvicorn.logging',
         'uvicorn.loops',
@@ -48,12 +84,11 @@ def build_exe():
         'uvicorn.lifespan.on',
         'engineio.async_drivers.threading',
         'webview.platforms.winforms',
-        # Scientific libs hooks sometimes fail to grab these
         'scipy.special.cython_special',
         'sklearn.utils._typedefs'
     ]
     
-    # Note: Ensure 'desktop_app.py' matches your actual main entry file (e.g., run.py)
+    # Check for correct entry script
     entry_script = 'run.py' if os.path.exists('run.py') else 'desktop_app.py'
     
     args = [
@@ -61,11 +96,10 @@ def build_exe():
         '--name=MySkyObserver',
         '--onefile',
         '--clean',
-        '--windowed', # No console window
-        '--icon=NONE' # default icon
+        '--windowed',
+        '--icon=NONE'
     ]
     
-    # Handle OS-specific separator for binary data
     separator = ';' if os.name == 'nt' else ':'
     
     for src, dst in datas:
@@ -79,7 +113,7 @@ def build_exe():
 
 if __name__ == '__main__':
     try:
-        # build_frontend() # Uncomment to rebuild frontend every time
+        build_frontend()
         build_exe()
     except Exception as e:
         print(f"Build Failed: {e}")
