@@ -299,7 +299,7 @@ const locationDisplay = computed(() => {
                     </div>
                 </div>
                 <div v-if="selectedProfileName" style="margin-top: 10px; display: flex; gap: 5px; flex-direction: column;">
-                    <button class="full-width primary small" @click="selectedProfileName">Update Current Profile</button>
+                    <button class="full-width primary small" @click="updateCurrentProfile">Update Current Profile</button>
                     <button class="full-width danger small" @click="deleteProfile">Delete Current Profile</button>
                 </div>
 
