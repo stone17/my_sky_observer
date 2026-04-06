@@ -6,7 +6,7 @@ const props = defineProps({
     streamStatus: String,
     isDownloading: Boolean,
     downloadProgress: String,
-    activeFov: Number // Received from App.vue
+    systemFov: Number // Received from App.vue
 });
 
 const emit = defineEmits(['update-settings', 'start-stream', 'stop-stream', 'purge-cache', 'download-filtered', 'download-all', 'stop-download']);
@@ -239,7 +239,7 @@ const selectCity = (city) => {
 
 const fovDisplay = computed(() => {
     // Just display what App.vue passed down
-    if (props.activeFov) return `${props.activeFov.toFixed(2)}°`;
+    if (props.systemFov) return `${props.systemFov.toFixed(2)}°`;
     return "-";
 });
 
@@ -422,6 +422,8 @@ const locationDisplay = computed(() => {
 
 <style scoped>
 .top-bar {
+    position: relative;
+    z-index: 1000;
     display: flex;
     align-items: center;
     background: #1f2937;

@@ -9,6 +9,7 @@ const infoObject = ref(null);
 
 const localSettings = ref({});
 const localClientSettings = ref({});
+const renderedLimit = ref(50);
 
 const sortOptions = [
     { value: 'time', label: 'Altitude' },
@@ -47,11 +48,11 @@ const openInfo = (obj) => {
 };
 
 const filteredAndSortedObjects = computed(() => {
-    const minAlt = props.settings?.min_altitude || 30;
-    const minHrs = props.clientSettings?.min_hours || 0;
-    const maxMag = props.clientSettings?.max_magnitude ?? 12;
-    const minSize = props.clientSettings?.min_size || 0;
-    const sortKey = props.settings?.sort_key || 'time';
+    const minAlt = localSettings.value.min_altitude || 30;
+    const minHrs = localClientSettings.value.min_hours || 0;
+    const maxMag = localClientSettings.value.max_magnitude ?? 12;
+    const minSize = localClientSettings.value.min_size || 0;
+    const sortKey = localSettings.value.sort_key || 'time';
 
     const q = (props.searchQuery || '').trim().toLowerCase();
     const normQ = q.replace(/\s+/g, '');
@@ -59,12 +60,14 @@ const filteredAndSortedObjects = computed(() => {
     let result = [];
 
     for (const o of props.objects) {
-        if (normQ) {
-            const normId = o.name.toLowerCase().replace(/\s+/g, '');
-            const normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
-            const normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
+        if (o._normId === undefined) {
+            o._normId = (o.name || '').toLowerCase().replace(/\s+/g, '');
+            o._normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
+            o._normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
+        }
 
-            if (normId.includes(normQ) || normCommon.includes(normQ) || normOther.includes(normQ)) {
+        if (normQ) {
+            if (o._normId.includes(normQ) || o._normCommon.includes(normQ) || o._normOther.includes(normQ)) {
                 o._dynamicHours = o.hours_visible || 0;
                 result.push(o);
             }
@@ -76,7 +79,7 @@ const filteredAndSortedObjects = computed(() => {
         if (maxMag !== undefined && o.mag !== undefined && o.mag > maxMag) continue;
         if (minSize > 0 && (o.maj_ax || 0) < minSize) continue;
 
-        const selectedTypes = props.clientSettings?.selected_types || [];
+        const selectedTypes = localClientSettings.value.selected_types || [];
         if (selectedTypes.length > 0 && !selectedTypes.includes(o.type)) continue;
 
         o._dynamicHours = o.hours_visible || 0;
@@ -85,8 +88,8 @@ const filteredAndSortedObjects = computed(() => {
 
     result.sort((a, b) => {
         if (normQ) {
-            const normA = a.name.toLowerCase().replace(/\s+/g, '');
-            const normB = b.name.toLowerCase().replace(/\s+/g, '');
+            const normA = a._normId;
+            const normB = b._normId;
 
             if (normA === normQ && normB !== normQ) return -1;
             if (normB === normQ && normA !== normQ) return 1;
@@ -123,6 +126,23 @@ const filteredAndSortedObjects = computed(() => {
 
     return result;
 });
+
+const displayedObjects = computed(() => {
+    return filteredAndSortedObjects.value.slice(0, renderedLimit.value);
+});
+
+watch(filteredAndSortedObjects, () => {
+    renderedLimit.value = 50;
+});
+
+const onScroll = (e) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.target;
+    if (scrollTop + clientHeight >= scrollHeight - 300) {
+        if (renderedLimit.value < filteredAndSortedObjects.value.length) {
+            renderedLimit.value += 50;
+        }
+    }
+};
 
 const getAltitudePath = (altitudeGraph) => {
     if (!altitudeGraph || altitudeGraph.length < 2) return "";
@@ -181,8 +201,8 @@ const getAltitudePath = (altitudeGraph) => {
                 </div>
             </div>
 
-            <div class="scrollable-list">
-                <div v-for="item in filteredAndSortedObjects" :key="item.name" :id="`obj-card-${item.name}`"
+            <div class="scrollable-list" @scroll="onScroll">
+                <div v-for="item in displayedObjects" :key="item.name" :id="`obj-card-${item.name}`"
                     class="object-card" :class="{ active: selectedId === item.name }" @click="$emit('select', item)">
                     <div class="card-content">
                         <div class="info-col">

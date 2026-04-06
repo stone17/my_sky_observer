@@ -71,9 +71,12 @@ const suggestionList = computed(() => {
     if (!q) return [];
     const normQ = q.toLowerCase().replace(/\s+/g, '');
     const matches = (props.objects || []).filter(o => {
-        const normId = o.name.toLowerCase().replace(/\s+/g, '');
-        const normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
-        return normId.includes(normQ) || normCommon.includes(normQ);
+        if (o._normId === undefined) {
+            o._normId = (o.name || '').toLowerCase().replace(/\s+/g, '');
+            o._normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
+            o._normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
+        }
+        return o._normId.includes(normQ) || o._normCommon.includes(normQ);
     });
     return matches.slice(0, 10);
 });
@@ -81,6 +84,13 @@ const suggestionList = computed(() => {
 const onSearchInput = (e) => { emit('update-search', e.target.value); showSuggestions.value = true; };
 const selectSuggestion = (obj) => { emit('update-search', obj.name); emit('select-object', obj); showSuggestions.value = false; };
 const onSearchBlur = () => { setTimeout(() => { showSuggestions.value = false; }, 200); };
+
+const resetFov = () => {
+    if (systemSensorFov.value.w > 0) {
+        localFov.value = parseFloat(systemSensorFov.value.w.toFixed(2));
+        emit('update-fov', localFov.value);
+    }
+};
 
 const viewportRef = ref(null);
 const wrapperSize = ref(0);
@@ -111,9 +121,11 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
             <div class="header-center">
                 <div class="group">
                     <strong class="lbl">FOV</strong>
-                    <button class="outline mini" @click="localFov = parseFloat((localFov * 1.1).toFixed(1))">+</button>
-                    <input type="number" v-model.number="localFov" step="0.1" class="input-mini" />
-                    <button class="outline mini" @click="localFov = parseFloat((localFov * 0.9).toFixed(1))">-</button>
+                    <button class="outline mini" @click="localFov = parseFloat((localFov * 1.1).toFixed(2))">+</button>
+                    <input type="number" v-model.number="localFov" step="0.01" class="input-mini" />
+                    <button class="outline mini" @click="localFov = parseFloat((localFov * 0.9).toFixed(2))">-</button>
+                    
+                    <button class="outline mini primary-action" @click="resetFov" title="Reset to setup FOV">↺</button>
 
                     <button class="outline mini primary-action" @click="$emit('update-fov', localFov)"
                         :disabled="isObjectDownloading" title="Download image with this FOV">
@@ -226,7 +238,7 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
     border: 1px solid #4b5563;
     padding: 0 4px;
     font-size: 0.9rem;
-    width: 48px;
+    width: 60px;
     text-align: center;
     border-radius: 2px;
     height: 26px;
@@ -361,14 +373,14 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
 .osd-overlay {
     position: absolute;
     bottom: 0;
-    left: 0;
+    right: 0;
     background: rgba(0, 0, 0, 0.8);
     color: lime;
     font-size: 11px;
     padding: 4px;
     pointer-events: none;
     z-index: 100;
-    text-align: left;
+    text-align: right;
 }
 
 .download-overlay {

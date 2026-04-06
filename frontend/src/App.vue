@@ -68,7 +68,8 @@ const downloadImage = async (obj) => {
 
             // CRITICAL FIX: Ensure image_fov matches what we just downloaded.
             // If API returns it, good. If not, use the requestedFov we used to generate it.
-            obj.image_fov = data.image_fov || requestedFov;
+            const padding = settings.value.image_padding || 1.05;
+            obj.image_fov = data.image_fov || (requestedFov * padding);
 
         } else {
             obj.status = 'error';
@@ -299,7 +300,7 @@ onUnmounted(() => { window.removeEventListener('keydown', handleKeydown); });
 <template>
     <div class="app-container">
         <TopBar :settings="settings" :streamStatus="streamStatus" :isDownloading="isDownloading"
-            :downloadProgress="downloadProgress" :activeFov="activeFov" @update-settings="saveSettings"
+            :downloadProgress="downloadProgress" :systemFov="systemFov" @update-settings="saveSettings"
             @start-stream="startStream" @stop-stream="stopStream" @purge-cache="handlePurge"
             @download-filtered="startStream('filtered')" @download-all="startStream('all')"
             @stop-download="stopStream" />

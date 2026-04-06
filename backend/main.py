@@ -364,7 +364,7 @@ class StreamSession:
                         obj['ra'], obj['dec'], self.download_fov, obj_id, self.setup_hash, 
                         self.img_res, self.img_source, self.img_timeout
                     )
-                    await queue.put({"name": obj_id, "status": "cached", "url": url})
+                    await queue.put({"name": obj_id, "status": "cached", "url": url, "image_fov": self.download_fov})
                 except Exception:
                     await queue.put({"name": obj_id, "status": "error"})
                 finally:
@@ -520,7 +520,7 @@ async def download_object_endpoint(request: Request):
         
         obj = data['object']
         url = await download_image(obj['ra'], obj['dec'], download_fov, obj['name'], setup_hash, resolution=img_srv.get('resolution', 512), source=img_srv.get('source', 'dss2r'), timeout=img_srv.get('timeout', 60))
-        return {"url": url, "status": "cached"}
+        return {"url": url, "status": "cached", "image_fov": download_fov}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
