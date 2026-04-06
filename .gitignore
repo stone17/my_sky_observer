@@ -7,3 +7,4 @@ frontend/dist/
 settings_user.yaml
 dist/
 build/
+*.spec
