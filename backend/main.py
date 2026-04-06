@@ -557,8 +557,14 @@ async def fetch_custom_image(req: FetchImageRequest):
             req.ra = coords.ra.deg; req.dec = coords.dec.deg
         except Exception: pass
     
-    setup_hash = f"custom_fov_{req.fov:.4f}_res{req.resolution}_{req.source}"
-    name = f"RADEC_{req.ra}_{req.dec}"
+    # Include coordinates directly in the setup hash to force a fresh download
+    # if the coordinates change even slightly, preventing cache collision.
+    coord_hash_str = f"custom_ra{req.ra:.4f}_dec{req.dec:.4f}_fov_{req.fov:.4f}_res{req.resolution}_{req.source}"
+    # use hashlib to make a short safe hash
+    import hashlib
+    setup_hash = "custom_" + hashlib.md5(coord_hash_str.encode()).hexdigest()[:12]
+    
+    name = f"RADEC_{req.ra:.3f}_{req.dec:.3f}"
     try:
         url = await download_image(req.ra, req.dec, req.fov, name, setup_hash, resolution=req.resolution, source=req.source, timeout=req.timeout)
         return {"url": url}

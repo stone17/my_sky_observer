@@ -96,9 +96,124 @@ const viewportRef = ref(null);
 const wrapperSize = ref(0);
 let resizeObserver = null;
 
-const onDrag = (e) => { if (isDragging.value) { offsetX.value = e.clientX - dragStart.value.x; offsetY.value = e.clientY - dragStart.value.y; } };
-const startDrag = (e) => { isDragging.value = true; dragStart.value = { x: e.clientX - offsetX.value, y: e.clientY - offsetY.value }; e.preventDefault(); };
+const zoomLevel = ref(1.0);
+
+const onWheel = (e) => {
+    if (e.deltaY < 0) {
+        zoomLevel.value = Math.min(zoomLevel.value * 1.1, 10.0);
+    } else if (e.deltaY > 0) {
+        zoomLevel.value = Math.max(zoomLevel.value / 1.1, 0.5);
+    }
+};
+
+const resetZoom = () => {
+    zoomLevel.value = 1.0;
+};
+
+const onDrag = (e) => { 
+    if (isDragging.value) { 
+        offsetX.value = (e.clientX - dragStart.value.x) / zoomLevel.value; 
+        offsetY.value = (e.clientY - dragStart.value.y) / zoomLevel.value; 
+    } 
+};
+const startDrag = (e) => { 
+    isDragging.value = true; 
+    dragStart.value = { 
+        x: e.clientX - (offsetX.value * zoomLevel.value), 
+        y: e.clientY - (offsetY.value * zoomLevel.value) 
+    }; 
+    e.preventDefault(); 
+};
 const stopDrag = () => { isDragging.value = false; };
+
+const getCurrentCenterCoordinates = () => {
+    const baseFov = props.object?.image_fov || localFov.value;
+    const pxToDeg = baseFov / wrapperSize.value;
+    
+    const decOffset = - (offsetY.value * pxToDeg);
+    const centerRa = props.object?.center_ra !== undefined ? props.object.center_ra : props.object.ra;
+    const centerDec = props.object?.center_dec !== undefined ? props.object.center_dec : props.object.dec;
+    
+    // Protect against division by zero at poles
+    const cosDec = Math.max(Math.cos(centerDec * Math.PI / 180), 0.01);
+    const raOffset = - (offsetX.value * pxToDeg) / cosDec;
+    
+    return {
+        ra: centerRa + raOffset,
+        dec: centerDec + decOffset
+    };
+};
+
+const updateImage = async () => {
+    if (!props.object) return;
+    const coords = getCurrentCenterCoordinates();
+    
+    props.object.status = 'downloading';
+    
+    const padding = props.settings?.image_padding || 1.05;
+    const targetFov = localFov.value * padding;
+    
+    try {
+        const res = await fetch('/api/fetch-custom-image', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                ra: coords.ra,
+                dec: coords.dec,
+                fov: targetFov,
+                resolution: props.settings.image_server?.resolution || 512,
+                source: props.settings.image_server?.source || "dss2r",
+                timeout: props.settings.image_server?.timeout || 60
+            })
+        });
+        
+        if (res.ok) {
+            const data = await res.json();
+            props.object.image_url = data.url;
+            props.object.center_ra = coords.ra;
+            props.object.center_dec = coords.dec;
+            props.object.image_fov = targetFov;
+            props.object.status = 'cached';
+            
+            // Reset offsets since the image is now centered here
+            offsetX.value = 0;
+            offsetY.value = 0;
+            zoomLevel.value = 1.0;
+            // Also notify parent to sync local fov setting
+            emit('update-fov', localFov.value);
+        } else {
+            props.object.status = 'error';
+        }
+    } catch (e) {
+        console.error(e);
+        props.object.status = 'error';
+    }
+};
+
+const ninaStatus = ref("");
+const sendToNina = async () => {
+    const coords = getCurrentCenterCoordinates();
+    ninaStatus.value = "Sending...";
+    try {
+        const res = await fetch('/api/nina/framing', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                ra: coords.ra,
+                dec: coords.dec,
+                rotation: rotation.value || 0.0
+            })
+        });
+        if (res.ok) {
+            ninaStatus.value = "Sent!";
+        } else {
+            ninaStatus.value = "Failed!";
+        }
+    } catch (e) {
+        ninaStatus.value = "Error!";
+    }
+    setTimeout(() => { ninaStatus.value = ""; }, 3000);
+};
 
 onMounted(() => {
     if (viewportRef.value) {
@@ -121,16 +236,29 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
             <div class="header-center">
                 <div class="group">
                     <strong class="lbl">FOV</strong>
-                    <button class="outline mini" @click="localFov = parseFloat((localFov * 1.1).toFixed(2))">+</button>
+                    <div class="stepper-col">
+                        <button class="stepper-btn" @click="localFov = parseFloat((localFov * 1.1).toFixed(2))">▲</button>
+                        <button class="stepper-btn" @click="localFov = parseFloat((localFov * 0.9).toFixed(2))">▼</button>
+                    </div>
                     <input type="number" v-model.number="localFov" step="0.01" class="input-mini" />
-                    <button class="outline mini" @click="localFov = parseFloat((localFov * 0.9).toFixed(2))">-</button>
-                    
-                    <button class="outline mini primary-action" @click="resetFov" title="Reset to setup FOV">↺</button>
+                </div>
+                
+                <div class="group" style="margin-left: 10px; padding-left: 10px; border-left: 1px solid #4b5563;">
+                    <div class="action-col">
+                        <button class="outline mini primary-action full-w" @click="resetFov" title="Reset to setup FOV">Reset FOV</button>
+                        <button class="outline mini primary-action full-w" @click="resetZoom" title="Reset image zoom">Reset Zoom</button>
+                    </div>
+                </div>
 
-                    <button class="outline mini primary-action" @click="$emit('update-fov', localFov)"
-                        :disabled="isObjectDownloading" title="Download image with this FOV">
-                        {{ isObjectDownloading ? '...' : '⟳' }}
-                    </button>
+                <div class="group" style="margin-left: 10px; padding-left: 10px; border-left: 1px solid #4b5563;">
+                    <div class="action-col">
+                        <button class="outline mini primary-action full-w" @click="updateImage" :disabled="isObjectDownloading" title="Download new image with current center and FOV">
+                            {{ isObjectDownloading ? '...' : 'Update/Center Image' }}
+                        </button>
+                        <button class="outline mini primary-action full-w" @click="sendToNina" title="Send framing to N.I.N.A">
+                            {{ ninaStatus || 'Send to NINA' }}
+                        </button>
+                    </div>
                 </div>
             </div>
             <div class="header-right">
@@ -147,8 +275,8 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
             </div>
         </header>
 
-        <div class="framing-viewport" ref="viewportRef" @mousemove="onDrag" @mouseup="stopDrag" @mouseleave="stopDrag">
-            <div class="image-wrapper" :style="{ width: wrapperSize + 'px', height: wrapperSize + 'px' }">
+        <div class="framing-viewport" ref="viewportRef" @mousemove="onDrag" @mouseup="stopDrag" @mouseleave="stopDrag" @wheel.prevent="onWheel">
+            <div class="image-wrapper" :style="{ width: wrapperSize + 'px', height: wrapperSize + 'px', transform: `scale(${zoomLevel})` }">
 
                 <div class="image-container">
                     <img v-if="object.image_url" :src="object.image_url" class="sky-image" />
@@ -238,17 +366,54 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
     border: 1px solid #4b5563;
     padding: 0 4px;
     font-size: 0.9rem;
-    width: 60px;
+    width: 65px;
     text-align: center;
     border-radius: 2px;
-    height: 26px;
+    height: 36px;
     box-sizing: border-box;
+}
+
+.stepper-col {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-right: 4px;
+}
+
+.stepper-btn {
+    background: #1f2937;
+    color: #9ca3af;
+    border: 1px solid #4b5563;
+    border-radius: 2px;
+    height: 17px;
+    width: 20px;
+    font-size: 0.6rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+}
+
+.stepper-btn:hover {
+    background: #374151;
+    color: white;
+}
+
+.action-col {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.full-w {
+    width: 100%;
 }
 
 .mini {
     padding: 2px 8px;
-    font-size: 0.9rem;
-    height: 26px;
+    font-size: 0.8rem;
+    height: 22px;
     line-height: 1;
     border: 1px solid #4b5563;
     background: transparent;
