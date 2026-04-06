@@ -28,6 +28,7 @@ RUN grep -v pywebview requirements.txt > req_docker.txt && \
 COPY backend/ backend/
 COPY catalogs/ catalogs/
 COPY settings_default.yaml .
+COPY components.yaml .
 
 # Create symlink for settings to a persistable data volume
 RUN mkdir -p /app/data && \
