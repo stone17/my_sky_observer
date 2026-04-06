@@ -8,10 +8,7 @@ import TypeFilter from './components/TypeFilter.vue';
 
 const settings = ref({});
 const clientSettings = ref({
-    max_magnitude: 12.0,
-    min_size: 0.0,
-    min_hours: 0.0,
-    selected_types: []
+    max_magnitude: 12.0, min_size: 0.0, min_hours: 0.0, selected_types: []
 });
 const objects = ref([]);
 const selectedObject = ref(null);
@@ -21,7 +18,101 @@ const isDownloading = ref(false);
 const downloadProgress = ref("");
 const searchQuery = ref("");
 
-// Stream handling
+// --- FOV STATE ---
+const activeFov = ref(1.0);
+const isManualFov = ref(false);
+
+const systemFov = computed(() => {
+    if (!settings.value.telescope || !settings.value.camera) return 1.0;
+    const fl = settings.value.telescope.focal_length;
+    const sw = settings.value.camera.sensor_width;
+    if (!fl || !sw) return 1.0;
+    return parseFloat(((sw / fl) * 57.2958).toFixed(2));
+});
+
+const getDownloadFocalLength = () => {
+    // Calculate Virtual FL if Manual Mode is active
+    if (isManualFov.value && activeFov.value > 0 && settings.value.camera?.sensor_width) {
+        return (settings.value.camera.sensor_width / activeFov.value) * 57.2958;
+    }
+    return settings.value.telescope?.focal_length;
+};
+
+// --- CORE DOWNLOAD LOGIC ---
+const downloadImage = async (obj) => {
+    if (!obj) return;
+
+    obj.status = 'downloading'; // Immediate UI update
+
+    try {
+        const dlFocalLength = getDownloadFocalLength();
+        // Capture the requested FOV to enforce it later if needed
+        const requestedFov = isManualFov.value ? activeFov.value : systemFov.value;
+
+        const res = await fetch('/api/download-object', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                object: obj,
+                settings: {
+                    ...settings.value,
+                    telescope: { ...settings.value.telescope, focal_length: dlFocalLength }
+                }
+            })
+        });
+
+        if (res.ok) {
+            const data = await res.json();
+            obj.image_url = data.url;
+            obj.status = data.status;
+
+            // CRITICAL FIX: Ensure image_fov matches what we just downloaded.
+            // If API returns it, good. If not, use the requestedFov we used to generate it.
+            const padding = settings.value.image_padding || 1.05;
+            obj.image_fov = data.image_fov || (requestedFov * padding);
+
+        } else {
+            obj.status = 'error';
+        }
+    } catch (e) {
+        console.error(e);
+        obj.status = 'error';
+    }
+};
+
+// Watcher 1: Profile Changes
+watch(() => settings.value, (newVal, oldVal) => {
+    const newFl = newVal?.telescope?.focal_length;
+    const oldFl = oldVal?.telescope?.focal_length;
+    const newSw = newVal?.camera?.sensor_width;
+    const oldSw = oldVal?.camera?.sensor_width;
+    if (newFl !== oldFl || newSw !== oldSw) {
+        isManualFov.value = false;
+        activeFov.value = systemFov.value;
+    }
+}, { deep: true });
+
+// Watcher 2: Object Selection
+watch(selectedObject, (newVal, oldVal) => {
+    if (newVal?.name !== oldVal?.name) {
+        isManualFov.value = false;
+        activeFov.value = systemFov.value;
+        if (newVal && (!newVal.image_url || newVal.status === 'pending')) {
+            downloadImage(newVal);
+        }
+    }
+});
+
+// Watcher 3: Manual FOV Update
+const handleFovUpdate = (newFov) => {
+    isManualFov.value = true;
+    activeFov.value = newFov;
+    if (selectedObject.value) {
+        downloadImage(selectedObject.value);
+    }
+};
+
+// --- STREAMING LOGIC ---
 let eventSource = null;
 
 const fetchSettings = async () => {
@@ -30,22 +121,15 @@ const fetchSettings = async () => {
         if (res.ok) {
             const data = await res.json();
             settings.value = data;
-            if (data.client_settings) {
-                Object.assign(clientSettings.value, data.client_settings);
-            }
+            if (data.client_settings) Object.assign(clientSettings.value, data.client_settings);
         }
     } catch (e) { console.error(e); }
 };
 
 let saveTimeout = null;
 const saveSettings = (newSettings) => {
-    const payload = {
-        ...settings.value,
-        ...newSettings,
-        client_settings: clientSettings.value
-    };
+    const payload = { ...settings.value, ...newSettings, client_settings: clientSettings.value };
     settings.value = payload;
-
     if (saveTimeout) clearTimeout(saveTimeout);
     saveTimeout = setTimeout(async () => {
         try {
@@ -60,7 +144,6 @@ const saveSettings = (newSettings) => {
 
 const startStream = (mode = 'selected') => {
     if (eventSource) eventSource.close();
-
     streamStatus.value = 'Connecting...';
     if (mode === 'filtered' || mode === 'all') {
         isDownloading.value = true;
@@ -81,7 +164,6 @@ const startStream = (mode = 'selected') => {
         params.append('longitude', settings.value.location.longitude);
     }
     if (settings.value.catalogs) params.append('catalogs', settings.value.catalogs.join(','));
-
     params.append('sort_key', settings.value.sort_key || 'time');
     params.append('min_altitude', settings.value.min_altitude || 30.0);
     params.append('image_padding', settings.value.image_padding || 1.05);
@@ -93,131 +175,69 @@ const startStream = (mode = 'selected') => {
     }
 
     params.append('download_mode', mode);
-
     if (clientSettings.value.max_magnitude !== undefined) params.append('max_magnitude', clientSettings.value.max_magnitude);
     if (clientSettings.value.min_size !== undefined) params.append('min_size', clientSettings.value.min_size);
     if (clientSettings.value.min_hours !== undefined) params.append('min_hours', clientSettings.value.min_hours);
-
-    if (clientSettings.value.selected_types && clientSettings.value.selected_types.length > 0) {
-        params.append('selected_types', clientSettings.value.selected_types.join(','));
-    }
+    if (clientSettings.value.selected_types?.length > 0) params.append('selected_types', clientSettings.value.selected_types.join(','));
 
     eventSource = new EventSource(`/api/stream-objects?${params.toString()}`);
 
-    eventSource.addEventListener('total', (e) => {
-        streamStatus.value = `Found ${e.data} objects.`;
-    });
-
+    eventSource.addEventListener('total', (e) => { streamStatus.value = `Found ${e.data} objects.`; });
     eventSource.addEventListener('download_progress', (e) => {
         try {
-            const progress = JSON.parse(e.data);
-            if (progress.current !== undefined && progress.total !== undefined) {
-                downloadProgress.value = `Downloading ${progress.current} of ${progress.total} images`;
-            }
-        } catch (err) { console.error("Error parsing progress", err); }
+            const p = JSON.parse(e.data);
+            if (p.current !== undefined) downloadProgress.value = `Downloading ${p.current} of ${p.total}`;
+        } catch (err) { }
     });
-
-    eventSource.addEventListener('night_times', (e) => {
-        try {
-            nightTimes.value = JSON.parse(e.data);
-        } catch (e) { console.error("Error parsing night times", e); }
-    });
+    eventSource.addEventListener('night_times', (e) => { try { nightTimes.value = JSON.parse(e.data); } catch (e) { } });
 
     eventSource.addEventListener('catalog_metadata', (e) => {
         try {
             const newObjects = JSON.parse(e.data);
-            const currentSelectedId = selectedObject.value?.name;
+            const currentId = selectedObject.value?.name;
             objects.value = newObjects;
-
-            if (currentSelectedId) {
-                const found = objects.value.find(o => o.name === currentSelectedId);
+            if (currentId) {
+                const found = objects.value.find(o => o.name === currentId);
                 if (found) selectedObject.value = found;
-            } else if (objects.value.length > 0) {
+            } else if (objects.value.length > 0 && !selectedObject.value) {
                 selectedObject.value = objects.value[0];
             }
-
-            streamStatus.value = `Loaded ${newObjects.length} objects. Fetching details...`;
-        } catch (err) {
-            console.error("Error parsing metadata", err);
-        }
+            streamStatus.value = `Loaded ${newObjects.length} objects.`;
+        } catch (err) { }
     });
 
     eventSource.addEventListener('object_details', (e) => {
         try {
-            const detail = JSON.parse(e.data);
-            const obj = objects.value.find(o => o.name === detail.name);
-            if (obj) Object.assign(obj, detail);
-        } catch (err) { console.error("Error parsing details", err); }
+            const d = JSON.parse(e.data);
+            const o = objects.value.find(o => o.name === d.name);
+            if (o) Object.assign(o, d);
+        } catch (err) { }
     });
 
     eventSource.addEventListener('image_status', (e) => {
-        const statusData = JSON.parse(e.data);
-        const obj = objects.value.find(o => o.name === statusData.name);
-        if (obj) {
-            obj.status = statusData.status;
-            if (statusData.url) obj.image_url = statusData.url;
-            if (statusData.image_fov) obj.image_fov = statusData.image_fov;
+        const s = JSON.parse(e.data);
+        const o = objects.value.find(o => o.name === s.name);
+        if (o) {
+            const isSelected = selectedObject.value && selectedObject.value.name === o.name;
+            if (isSelected && isManualFov.value) {
+                o.status = s.status; // Don't overwrite URL if manual
+            } else {
+                o.status = s.status;
+                if (s.url) o.image_url = s.url;
+                if (s.image_fov) o.image_fov = s.image_fov;
+            }
         }
     });
 
-    eventSource.addEventListener('close', (e) => {
-        streamStatus.value = 'Stream Complete';
-        isDownloading.value = false;
-        eventSource.close();
-        eventSource = null;
-    });
-
-    eventSource.addEventListener('error', (e) => {
-        streamStatus.value = 'Error/Disconnected';
-        isDownloading.value = false;
-        if (eventSource) eventSource.close();
-        eventSource = null;
-    });
+    eventSource.addEventListener('close', () => { streamStatus.value = 'Stream Complete'; isDownloading.value = false; eventSource.close(); });
+    eventSource.addEventListener('error', () => { streamStatus.value = 'Error/Disconnected'; isDownloading.value = false; eventSource?.close(); });
 };
 
 const stopStream = () => {
-    if (eventSource) {
-        eventSource.close();
-        eventSource = null;
-        streamStatus.value = 'Stopped';
-        isDownloading.value = false;
-    }
+    if (eventSource) { eventSource.close(); eventSource = null; streamStatus.value = 'Stopped'; isDownloading.value = false; }
 };
 
-const handlePurge = () => {
-    objects.value = [];
-    selectedObject.value = null;
-    startStream('selected');
-};
-
-watch(selectedObject, async (newVal) => {
-    if (newVal) {
-        localStorage.setItem('lastSelectedId', newVal.name);
-        if (!newVal.image_url || newVal.status === 'pending') {
-            newVal.status = 'downloading';
-            try {
-                const res = await fetch('/api/download-object', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        object: newVal,
-                        settings: settings.value
-                    })
-                });
-                if (res.ok) {
-                    const data = await res.json();
-                    newVal.image_url = data.url;
-                    newVal.status = data.status;
-                } else {
-                    newVal.status = 'error';
-                }
-            } catch (e) {
-                console.error(e);
-                newVal.status = 'error';
-            }
-        }
-    }
-});
+const handlePurge = () => { objects.value = []; selectedObject.value = null; startStream('selected'); };
 
 const availableTypes = computed(() => {
     const types = new Set();
@@ -225,83 +245,57 @@ const availableTypes = computed(() => {
     return Array.from(types).sort();
 });
 
-const streamParams = computed(() => {
-    return {
-        loc: settings.value.location,
-        tel: settings.value.telescope,
-        cam: settings.value.camera,
-        cats: settings.value.catalogs,
-        min_alt: settings.value.min_altitude,
-        min_hrs: clientSettings.value.min_hours,
-        sort: settings.value.sort_key,
-        max_mag: clientSettings.value.max_magnitude,
-        min_sz: clientSettings.value.min_size,
-        types: clientSettings.value.selected_types,
-        pad: settings.value.image_padding,
-        img_srv: settings.value.image_server
-    };
-});
+const streamParams = computed(() => ({
+    loc: settings.value.location,
+    tel: settings.value.telescope,
+    cam: settings.value.camera,
+    cats: settings.value.catalogs,
+    min_alt: settings.value.min_altitude,
+    min_hrs: clientSettings.value.min_hours,
+    sort: settings.value.sort_key,
+    max_mag: clientSettings.value.max_magnitude,
+    min_sz: clientSettings.value.min_size,
+    types: clientSettings.value.selected_types,
+    pad: settings.value.image_padding,
+    img_srv: settings.value.image_server,
+}));
 
 let restartTimer = null;
 watch(streamParams, (newVal, oldVal) => {
     if (!oldVal) return;
-    // Check for real changes
     const changes = [];
     for (const key in newVal) {
         if (JSON.stringify(newVal[key]) !== JSON.stringify(oldVal[key])) changes.push(key);
     }
-
     if (changes.length > 0) {
         if (restartTimer) clearTimeout(restartTimer);
-        restartTimer = setTimeout(() => {
-            startStream('selected');
-        }, 1000);
+        restartTimer = setTimeout(() => { startStream('selected'); }, 1000);
     }
 }, { deep: true });
 
-const handleKeydown = (e) => {
-    if (objects.value.length === 0) return;
-    if (e.key === 'ArrowDown') {
-        const idx = objects.value.findIndex(o => o.name === selectedObject.value?.name);
-        if (idx < objects.value.length - 1) selectedObject.value = objects.value[idx + 1];
-        else if (idx === -1) selectedObject.value = objects.value[0];
-        e.preventDefault();
-    } else if (e.key === 'ArrowUp') {
-        const idx = objects.value.findIndex(o => o.name === selectedObject.value?.name);
-        if (idx > 0) selectedObject.value = objects.value[idx - 1];
-        e.preventDefault();
-    }
-};
-
 onMounted(async () => {
-    window.addEventListener('keydown', handleKeydown);
     await fetchSettings();
     startStream('selected');
 });
 
-watch(clientSettings, (newVal) => {
-    saveSettings({});
-}, { deep: true });
-
-onUnmounted(() => {
-    window.removeEventListener('keydown', handleKeydown);
-});
+watch(clientSettings, () => { saveSettings({}); }, { deep: true });
 </script>
 
 <template>
     <div class="app-container">
         <TopBar :settings="settings" :streamStatus="streamStatus" :isDownloading="isDownloading"
-            :downloadProgress="downloadProgress" @update-settings="saveSettings" @start-stream="startStream"
-            @stop-stream="stopStream" @purge-cache="handlePurge" @download-filtered="startStream('filtered')"
-            @download-all="startStream('all')" @stop-download="stopStream" />
+            :downloadProgress="downloadProgress" :systemFov="systemFov" @update-settings="saveSettings"
+            @start-stream="startStream" @stop-stream="stopStream" @purge-cache="handlePurge"
+            @download-filtered="startStream('filtered')" @download-all="startStream('all')"
+            @stop-download="stopStream" />
 
         <div class="main-layout">
             <section class="framing-section">
                 <div v-if="selectedObject" class="fill-height">
                     <Framing :object="selectedObject" :objects="objects" :settings="settings"
-                        :clientSettings="clientSettings" :searchQuery="searchQuery"
-                        @update-search="searchQuery = $event" @select-object="selectedObject = $event"
-                        @update-settings="saveSettings"
+                        :clientSettings="clientSettings" :searchQuery="searchQuery" :activeFov="activeFov"
+                        @update-fov="handleFovUpdate" @update-search="searchQuery = $event"
+                        @select-object="selectedObject = $event" @update-settings="saveSettings"
                         @update-client-settings="Object.assign(clientSettings, $event)" />
                 </div>
                 <div v-else class="empty-state">
@@ -346,7 +340,6 @@ onUnmounted(() => {
     --border-color: #374151;
 }
 
-/* FIX: Set HTML background to match app background to prevent white borders */
 html {
     background-color: var(--bg-color);
 }
@@ -399,7 +392,6 @@ body {
 
 .sidebar {
     width: 450px;
-    /* FIX: Increased width for readability */
     display: flex;
     flex-direction: column;
     flex-shrink: 0;

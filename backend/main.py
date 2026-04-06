@@ -238,9 +238,17 @@ class StreamSession:
     def get_initial_metadata_event(self):
         metadata = []
         for obj in self.all_objects:
-            size_str = f"{obj.get('maj_ax', 0)}'"
+            maj = obj.get('maj_ax', 0)
+            if isinstance(maj, (int, float)): maj = round(maj, 2)
+            
+            size_str = f"{maj}'"
             if obj.get('min_ax', 0) > 0:
-                size_str += f" x {obj['min_ax']}'"
+                min_ax = obj['min_ax']
+                if isinstance(min_ax, (int, float)): min_ax = round(min_ax, 2)
+                size_str += f" x {min_ax}'"
+                
+            mag = obj.get('magnitude', 99)
+            if isinstance(mag, (int, float)): mag = round(mag, 2)
                 
             metadata.append({
                 "name": obj['id'],
@@ -250,9 +258,9 @@ class StreamSession:
                 "other_id": obj.get('other_id', ''),
                 "ra": obj['ra'],
                 "dec": obj['dec'],
-                "mag": obj.get('magnitude', 99),
+                "mag": mag,
                 "size": size_str,
-                "maj_ax": obj.get('maj_ax', 0),
+                "maj_ax": maj,
                 "max_altitude": obj.get('max_altitude', 0),
                 "hours_visible": obj.get('hours_visible', 0),
                 "status": "pending",
@@ -262,23 +270,20 @@ class StreamSession:
         return f"event: catalog_metadata\ndata: {json.dumps(metadata)}\n\n"
 
     def prioritize_top_objects(self):
-        mode = self.settings.get('download_mode', 'selected')
-        min_alt = self.settings.get('min_altitude', 30)
-        min_hours = self.settings.get('min_hours', 0.0)
-        max_mag = self.settings.get('max_magnitude', 12.0)
-        min_size = self.settings.get('min_size', 0.0)
-        sel_types = self.settings.get('selected_types', [])
+        # We need to process settings here because we don't have them in generate_stream directly 
+        # (they are passed to DataManager)
         
-        # Normalize selected types for robust matching
-        raw_types = self.settings.get('selected_types', [])
-        sel_types = [t.strip().lower() for t in raw_types if t.strip()]
+        mode = self.settings.get('download_mode', 'selected')
+        max_mag = self.settings.get('client_settings', {}).get('max_magnitude', 12)
+        min_size = self.settings.get('client_settings', {}).get('min_size', 0)
+        sel_types = self.settings.get('client_settings', {}).get('selected_types', [])
+        min_hrs = self.settings.get('client_settings', {}).get('min_hours', 0)
+        
+        sel_types = [t.lower().strip() for t in sel_types]
         
         def check_obj(o):
-            if o.get('max_altitude', 0) < min_alt: return False
-            if o.get('hours_visible', 0) < min_hours: return False
-            
-            mag = o.get('magnitude', 99)
-            if mag > max_mag: return False
+            if o.get('magnitude', 99) > max_mag: return False
+            if o.get('hours_visible', 0) < min_hrs: return False
             
             if o.get('size', 0) < min_size: return False
             
@@ -289,7 +294,8 @@ class StreamSession:
 
         filtered_candidates = [o for o in self.all_objects if check_obj(o)]
         
-        self.top_objects = filtered_candidates[:50]
+        # Increase limit from 50 to 500 to allow smooth scrolling through the top matches
+        self.top_objects = filtered_candidates[:500]
         
         if mode == 'all':
             self.download_list = self.all_objects
@@ -364,7 +370,7 @@ class StreamSession:
                         obj['ra'], obj['dec'], self.download_fov, obj_id, self.setup_hash, 
                         self.img_res, self.img_source, self.img_timeout
                     )
-                    await queue.put({"name": obj_id, "status": "cached", "url": url})
+                    await queue.put({"name": obj_id, "status": "cached", "url": url, "image_fov": self.download_fov})
                 except Exception:
                     await queue.put({"name": obj_id, "status": "error"})
                 finally:
@@ -440,6 +446,61 @@ async def stream_objects_endpoint(request: Request, focal_length: float, sensor_
     session = StreamSession(request, settings)
     return StreamingResponse(session.generate_stream(), media_type="text/event-stream")
 
+@app.get("/api/object-details/{obj_id}")
+async def get_object_details(obj_id: str):
+    settings = load_settings()
+    location = Location(**settings.get('location', {'latitude': 0, 'longitude': 0}))
+    telescope = Telescope(**settings.get('telescope', {'focal_length': 400}))
+    camera = Camera(**settings.get('camera', {'sensor_width': 23.5, 'sensor_height': 15.6}))
+    
+    # 1. Fetch Object Base Data
+    all_objects = get_sorted_objects(settings, location, telescope, camera)
+    obj = next((o for o in all_objects if o['id'] == obj_id), None)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found")
+
+    # 2. Setup hash for images
+    padding = settings.get('image_padding', 1.05)
+    img_srv = settings.get('image_server', {})
+    fov_w_min, fov_h_min = calculator.calculate_fov(telescope, camera)
+    fov_w, fov_h = fov_w_min/60.0, fov_h_min/60.0
+    setup_hash = get_setup_hash(fov_w, fov_h, padding, img_srv.get('resolution', 512), img_srv.get('source', 'dss2r'))
+    
+    url, filepath, _ = get_cache_info(obj_id, setup_hash)
+    is_cached = os.path.exists(filepath)
+    
+    # 3. Calculate Altitude Graph (Slow)
+    observer = Observer(location=EarthLocation(lat=location.latitude*u.deg, lon=location.longitude*u.deg))
+    session_start, session_end = calculator.get_observing_session(observer, Time.now())
+    twilight = calculator.get_twilight_times(observer, session_start)
+    
+    alt_data = await asyncio.to_thread(
+        calculator.get_altitude_graph,
+        obj['ra'], obj['dec'], location, 60, session_start, session_end
+    )
+    hours = calculator.calculate_time_above_altitude(
+        alt_data['target'], settings.get('min_altitude', 30), twilight
+    )
+
+    # 4. Sensor FOV rectangle
+    sensor_fov_data = {"width": fov_w, "height": fov_h}
+    fov_rect = calculator.get_fov_rectangle(obj['ra'], obj['dec'], fov_w, fov_h)
+    
+    detail = {
+        "name": obj_id,
+        "image_url": url if is_cached else "",
+        "altitude_graph": [p.model_dump() for p in alt_data['target']],
+        "moon_graph": [p.model_dump() for p in alt_data['moon']],
+        "fov_rectangle": fov_rect.model_dump(),
+        "sensor_fov": sensor_fov_data,
+        "image_fov": max(max(fov_w, fov_h) * padding, 0.25),
+        "hours_above_min": hours,
+        "setup_hash": setup_hash,
+        "status": "cached" if is_cached else "pending"
+    }
+    
+    return detail
+
 @app.get("/api/catalogs")
 def get_catalogs(): return CatalogManager.get_available_catalogs()
 
@@ -496,8 +557,14 @@ async def fetch_custom_image(req: FetchImageRequest):
             req.ra = coords.ra.deg; req.dec = coords.dec.deg
         except Exception: pass
     
-    setup_hash = f"custom_fov_{req.fov:.4f}_res{req.resolution}_{req.source}"
-    name = f"RADEC_{req.ra}_{req.dec}"
+    # Include coordinates directly in the setup hash to force a fresh download
+    # if the coordinates change even slightly, preventing cache collision.
+    coord_hash_str = f"custom_ra{req.ra:.4f}_dec{req.dec:.4f}_fov_{req.fov:.4f}_res{req.resolution}_{req.source}"
+    # use hashlib to make a short safe hash
+    import hashlib
+    setup_hash = "custom_" + hashlib.md5(coord_hash_str.encode()).hexdigest()[:12]
+    
+    name = f"RADEC_{req.ra:.3f}_{req.dec:.3f}"
     try:
         url = await download_image(req.ra, req.dec, req.fov, name, setup_hash, resolution=req.resolution, source=req.source, timeout=req.timeout)
         return {"url": url}
@@ -520,7 +587,7 @@ async def download_object_endpoint(request: Request):
         
         obj = data['object']
         url = await download_image(obj['ra'], obj['dec'], download_fov, obj['name'], setup_hash, resolution=img_srv.get('resolution', 512), source=img_srv.get('source', 'dss2r'), timeout=img_srv.get('timeout', 60))
-        return {"url": url, "status": "cached"}
+        return {"url": url, "status": "cached", "image_fov": download_fov}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -529,7 +596,9 @@ class NinaFramingRequest(BaseModel):
 
 @app.post("/api/nina/framing")
 async def send_to_nina(request: NinaFramingRequest):
-    nina_url = "http://localhost:1888/api/v1/framing/manualtarget"
+    # If running in Docker on Windows, use host.docker.internal to reach the host machine running N.I.N.A.
+    nina_host = os.environ.get("NINA_HOST", "localhost")
+    nina_url = f"http://{nina_host}:1888/api/v1/framing/manualtarget"
     try:
         if isinstance(request.ra, (float, int)) and isinstance(request.dec, (float, int)):
              coords = SkyCoord(request.ra, request.dec, unit=(u.deg, u.deg))

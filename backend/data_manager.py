@@ -117,7 +117,17 @@ class CatalogManager:
 
         print(f"-> Preparing to concatenate {len(all_dfs)} dataframes.")
         final_df = pd.concat(all_dfs, ignore_index=True)
-        print(f"-> Concatenation complete. Total objects: {len(final_df)}")
+        
+        # 1. Intra-catalog deduplication (e.g. M 51 is listed twice in messier.csv)
+        final_df = final_df.drop_duplicates(subset=['id'], keep='first')
+        
+        # 2. Cross-catalog deduplication based on coordinates (rounded to 3 decimal places ~ 3.6 arcsec)
+        final_df['ra_round'] = final_df['ra'].round(3)
+        final_df['dec_round'] = final_df['dec'].round(3)
+        final_df = final_df.drop_duplicates(subset=['ra_round', 'dec_round'], keep='first')
+        final_df = final_df.drop(columns=['ra_round', 'dec_round'])
+
+        print(f"-> Concatenation & Deduplication complete. Total unique objects: {len(final_df)}")
         print("--- Finished merging catalogs ---\n")
             
         return final_df
