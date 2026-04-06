@@ -169,7 +169,12 @@ const updateImage = async () => {
         
         if (res.ok) {
             const data = await res.json();
-            props.object.image_url = data.url;
+            
+            // Add a timestamp cache-buster to force the browser to reload the image
+            // Even though the URL changed, sometimes Vue caches the src attribute if the overall object structure didn't completely trigger a deep reactive update.
+            const uniqueUrl = `${data.url}?t=${new Date().getTime()}`;
+            
+            props.object.image_url = uniqueUrl;
             props.object.center_ra = coords.ra;
             props.object.center_dec = coords.dec;
             props.object.image_fov = targetFov;
