@@ -130,9 +130,10 @@ const getCurrentCenterCoordinates = () => {
     const baseFov = props.object?.image_fov || localFov.value;
     const pxToDeg = baseFov / wrapperSize.value;
     
+    const centerRa = parseFloat(props.object?.center_ra !== undefined ? props.object.center_ra : props.object.ra);
+    const centerDec = parseFloat(props.object?.center_dec !== undefined ? props.object.center_dec : props.object.dec);
+    
     const decOffset = - (offsetY.value * pxToDeg);
-    const centerRa = props.object?.center_ra !== undefined ? props.object.center_ra : props.object.ra;
-    const centerDec = props.object?.center_dec !== undefined ? props.object.center_dec : props.object.dec;
     
     // Protect against division by zero at poles
     const cosDec = Math.max(Math.cos(centerDec * Math.PI / 180), 0.01);
