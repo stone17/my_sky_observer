@@ -273,28 +273,12 @@ watch(streamParams, (newVal, oldVal) => {
     }
 }, { deep: true });
 
-const handleKeydown = (e) => {
-    if (objects.value.length === 0) return;
-    if (e.key === 'ArrowDown') {
-        const idx = objects.value.findIndex(o => o.name === selectedObject.value?.name);
-        if (idx < objects.value.length - 1) selectedObject.value = objects.value[idx + 1];
-        else if (idx === -1) selectedObject.value = objects.value[0];
-        e.preventDefault();
-    } else if (e.key === 'ArrowUp') {
-        const idx = objects.value.findIndex(o => o.name === selectedObject.value?.name);
-        if (idx > 0) selectedObject.value = objects.value[idx - 1];
-        e.preventDefault();
-    }
-};
-
 onMounted(async () => {
-    window.addEventListener('keydown', handleKeydown);
     await fetchSettings();
     startStream('selected');
 });
 
 watch(clientSettings, () => { saveSettings({}); }, { deep: true });
-onUnmounted(() => { window.removeEventListener('keydown', handleKeydown); });
 </script>
 
 <template>

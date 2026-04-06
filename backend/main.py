@@ -238,9 +238,17 @@ class StreamSession:
     def get_initial_metadata_event(self):
         metadata = []
         for obj in self.all_objects:
-            size_str = f"{obj.get('maj_ax', 0)}'"
+            maj = obj.get('maj_ax', 0)
+            if isinstance(maj, (int, float)): maj = round(maj, 2)
+            
+            size_str = f"{maj}'"
             if obj.get('min_ax', 0) > 0:
-                size_str += f" x {obj['min_ax']}'"
+                min_ax = obj['min_ax']
+                if isinstance(min_ax, (int, float)): min_ax = round(min_ax, 2)
+                size_str += f" x {min_ax}'"
+                
+            mag = obj.get('magnitude', 99)
+            if isinstance(mag, (int, float)): mag = round(mag, 2)
                 
             metadata.append({
                 "name": obj['id'],
@@ -250,9 +258,9 @@ class StreamSession:
                 "other_id": obj.get('other_id', ''),
                 "ra": obj['ra'],
                 "dec": obj['dec'],
-                "mag": obj.get('magnitude', 99),
+                "mag": mag,
                 "size": size_str,
-                "maj_ax": obj.get('maj_ax', 0),
+                "maj_ax": maj,
                 "max_altitude": obj.get('max_altitude', 0),
                 "hours_visible": obj.get('hours_visible', 0),
                 "status": "pending",
@@ -262,23 +270,20 @@ class StreamSession:
         return f"event: catalog_metadata\ndata: {json.dumps(metadata)}\n\n"
 
     def prioritize_top_objects(self):
-        mode = self.settings.get('download_mode', 'selected')
-        min_alt = self.settings.get('min_altitude', 30)
-        min_hours = self.settings.get('min_hours', 0.0)
-        max_mag = self.settings.get('max_magnitude', 12.0)
-        min_size = self.settings.get('min_size', 0.0)
-        sel_types = self.settings.get('selected_types', [])
+        # We need to process settings here because we don't have them in generate_stream directly 
+        # (they are passed to DataManager)
         
-        # Normalize selected types for robust matching
-        raw_types = self.settings.get('selected_types', [])
-        sel_types = [t.strip().lower() for t in raw_types if t.strip()]
+        mode = self.settings.get('download_mode', 'selected')
+        max_mag = self.settings.get('client_settings', {}).get('max_magnitude', 12)
+        min_size = self.settings.get('client_settings', {}).get('min_size', 0)
+        sel_types = self.settings.get('client_settings', {}).get('selected_types', [])
+        min_hrs = self.settings.get('client_settings', {}).get('min_hours', 0)
+        
+        sel_types = [t.lower().strip() for t in sel_types]
         
         def check_obj(o):
-            if o.get('max_altitude', 0) < min_alt: return False
-            if o.get('hours_visible', 0) < min_hours: return False
-            
-            mag = o.get('magnitude', 99)
-            if mag > max_mag: return False
+            if o.get('magnitude', 99) > max_mag: return False
+            if o.get('hours_visible', 0) < min_hrs: return False
             
             if o.get('size', 0) < min_size: return False
             
@@ -289,7 +294,8 @@ class StreamSession:
 
         filtered_candidates = [o for o in self.all_objects if check_obj(o)]
         
-        self.top_objects = filtered_candidates[:50]
+        # Increase limit from 50 to 500 to allow smooth scrolling through the top matches
+        self.top_objects = filtered_candidates[:500]
         
         if mode == 'all':
             self.download_list = self.all_objects
@@ -439,6 +445,61 @@ async def stream_objects_endpoint(request: Request, focal_length: float, sensor_
     
     session = StreamSession(request, settings)
     return StreamingResponse(session.generate_stream(), media_type="text/event-stream")
+
+@app.get("/api/object-details/{obj_id}")
+async def get_object_details(obj_id: str):
+    settings = load_settings()
+    location = Location(**settings.get('location', {'latitude': 0, 'longitude': 0}))
+    telescope = Telescope(**settings.get('telescope', {'focal_length': 400}))
+    camera = Camera(**settings.get('camera', {'sensor_width': 23.5, 'sensor_height': 15.6}))
+    
+    # 1. Fetch Object Base Data
+    all_objects = get_sorted_objects(settings, location, telescope, camera)
+    obj = next((o for o in all_objects if o['id'] == obj_id), None)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Object not found")
+
+    # 2. Setup hash for images
+    padding = settings.get('image_padding', 1.05)
+    img_srv = settings.get('image_server', {})
+    fov_w_min, fov_h_min = calculator.calculate_fov(telescope, camera)
+    fov_w, fov_h = fov_w_min/60.0, fov_h_min/60.0
+    setup_hash = get_setup_hash(fov_w, fov_h, padding, img_srv.get('resolution', 512), img_srv.get('source', 'dss2r'))
+    
+    url, filepath, _ = get_cache_info(obj_id, setup_hash)
+    is_cached = os.path.exists(filepath)
+    
+    # 3. Calculate Altitude Graph (Slow)
+    observer = Observer(location=EarthLocation(lat=location.latitude*u.deg, lon=location.longitude*u.deg))
+    session_start, session_end = calculator.get_observing_session(observer, Time.now())
+    twilight = calculator.get_twilight_times(observer, session_start)
+    
+    alt_data = await asyncio.to_thread(
+        calculator.get_altitude_graph,
+        obj['ra'], obj['dec'], location, 60, session_start, session_end
+    )
+    hours = calculator.calculate_time_above_altitude(
+        alt_data['target'], settings.get('min_altitude', 30), twilight
+    )
+
+    # 4. Sensor FOV rectangle
+    sensor_fov_data = {"width": fov_w, "height": fov_h}
+    fov_rect = calculator.get_fov_rectangle(obj['ra'], obj['dec'], fov_w, fov_h)
+    
+    detail = {
+        "name": obj_id,
+        "image_url": url if is_cached else "",
+        "altitude_graph": [p.model_dump() for p in alt_data['target']],
+        "moon_graph": [p.model_dump() for p in alt_data['moon']],
+        "fov_rectangle": fov_rect.model_dump(),
+        "sensor_fov": sensor_fov_data,
+        "image_fov": max(max(fov_w, fov_h) * padding, 0.25),
+        "hours_above_min": hours,
+        "setup_hash": setup_hash,
+        "status": "cached" if is_cached else "pending"
+    }
+    
+    return detail
 
 @app.get("/api/catalogs")
 def get_catalogs(): return CatalogManager.get_available_catalogs()

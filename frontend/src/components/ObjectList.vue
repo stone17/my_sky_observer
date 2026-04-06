@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch, nextTick } from 'vue';
+import { computed, ref, watch, nextTick, onMounted, onUnmounted } from 'vue';
 
 const props = defineProps(['objects', 'selectedId', 'settings', 'clientSettings', 'nightTimes', 'searchQuery']);
 const emit = defineEmits(['select', 'fetch-all', 'update-settings', 'update-client-settings']);
@@ -144,6 +144,23 @@ const onScroll = (e) => {
     }
 };
 
+const handleObjectClick = async (item) => {
+    emit('select', item);
+
+    // If the object doesn't have its heavy details loaded yet (e.g. scrolled past top 500)
+    if (!item.altitude_graph) {
+        try {
+            const res = await fetch(`/api/object-details/${encodeURIComponent(item.name)}`);
+            if (res.ok) {
+                const details = await res.json();
+                Object.assign(item, details);
+            }
+        } catch (e) {
+            console.error("Failed to fetch object details on demand:", e);
+        }
+    }
+};
+
 const getAltitudePath = (altitudeGraph) => {
     if (!altitudeGraph || altitudeGraph.length < 2) return "";
     const width = 100;
@@ -159,6 +176,33 @@ const getAltitudePath = (altitudeGraph) => {
     d += ` L ${width} ${height} Z`;
     return d;
 };
+
+const handleKeydown = (e) => {
+    const list = filteredAndSortedObjects.value;
+    if (list.length === 0) return;
+    
+    // Only handle up/down if not typing in an input
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+
+    if (e.key === 'ArrowDown') {
+        const idx = list.findIndex(o => o.name === props.selectedId);
+        if (idx < list.length - 1) handleObjectClick(list[idx + 1]);
+        else if (idx === -1) handleObjectClick(list[0]);
+        e.preventDefault();
+    } else if (e.key === 'ArrowUp') {
+        const idx = list.findIndex(o => o.name === props.selectedId);
+        if (idx > 0) handleObjectClick(list[idx - 1]);
+        e.preventDefault();
+    }
+};
+
+onMounted(() => {
+    window.addEventListener('keydown', handleKeydown);
+});
+
+onUnmounted(() => {
+    window.removeEventListener('keydown', handleKeydown);
+});
 </script>
 
 <template>
@@ -203,7 +247,7 @@ const getAltitudePath = (altitudeGraph) => {
 
             <div class="scrollable-list" @scroll="onScroll">
                 <div v-for="item in displayedObjects" :key="item.name" :id="`obj-card-${item.name}`"
-                    class="object-card" :class="{ active: selectedId === item.name }" @click="$emit('select', item)">
+                    class="object-card" :class="{ active: selectedId === item.name }" @click="handleObjectClick(item)">
                     <div class="card-content">
                         <div class="info-col">
                             <div style="display: flex; align-items: center; gap: 5px; width: 100%;">
@@ -215,7 +259,7 @@ const getAltitudePath = (altitudeGraph) => {
                                 {{ item.common_name }}
                             </div>
                             <small>
-                                Mag: {{ item.mag }}<br />
+                                Mag: {{ typeof item.mag === 'number' ? item.mag.toFixed(2) : item.mag }}<br />
                                 Size: {{ item.size }}<br />
                                 <span class="vis-time">Vis: {{ item._dynamicHours || 0 }}h</span>
                             </small>
