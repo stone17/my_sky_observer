@@ -596,7 +596,9 @@ class NinaFramingRequest(BaseModel):
 
 @app.post("/api/nina/framing")
 async def send_to_nina(request: NinaFramingRequest):
-    nina_url = "http://localhost:1888/api/v1/framing/manualtarget"
+    # If running in Docker on Windows, use host.docker.internal to reach the host machine running N.I.N.A.
+    nina_host = os.environ.get("NINA_HOST", "localhost")
+    nina_url = f"http://{nina_host}:1888/api/v1/framing/manualtarget"
     try:
         if isinstance(request.ra, (float, int)) and isinstance(request.dec, (float, int)):
              coords = SkyCoord(request.ra, request.dec, unit=(u.deg, u.deg))
