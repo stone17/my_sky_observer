@@ -131,6 +131,29 @@ const updateImageSettings = () => {
     emit('update-settings', localSettings.value);
 };
 
+const updateCurrentProfile = async () => {
+    if (!selectedProfileName.value) return;
+    const name = selectedProfileName.value;
+
+    const profileData = JSON.parse(JSON.stringify(localSettings.value));
+    delete profileData.location;
+    delete profileData.active_profile;
+    delete profileData.profiles;
+
+    try {
+        await fetch(`/api/profiles/${name}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(profileData)
+        });
+        await fetchProfiles();
+
+        localSettings.value.profiles = JSON.parse(JSON.stringify(profiles.value));
+        emit('update-settings', localSettings.value);
+        closeDropdown();
+    } catch (e) { console.error(e); }
+};
+
 const createProfile = async () => {
     if (!newProfileName.value) return;
     const name = newProfileName.value;
@@ -275,7 +298,8 @@ const locationDisplay = computed(() => {
                         <button class="small primary" @click="createProfile">Save</button>
                     </div>
                 </div>
-                <div v-if="selectedProfileName" style="margin-top: 10px;">
+                <div v-if="selectedProfileName" style="margin-top: 10px; display: flex; gap: 5px; flex-direction: column;">
+                    <button class="full-width primary small" @click="selectedProfileName">Update Current Profile</button>
                     <button class="full-width danger small" @click="deleteProfile">Delete Current Profile</button>
                 </div>
 
