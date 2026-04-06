@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  myskyobserver:
+    build: .
+    container_name: myskyobserver
+    ports:
+      - "8000:8000"
+    volumes:
+      # Named volumes to persist your downloaded images and custom settings
+      - mysky_cache:/app/image_cache
+      - mysky_data:/app/data
+    restart: unless-stopped
+    environment:
+      - TZ=UTC # Adjust to your local timezone if needed, e.g., America/New_York
+      - NINA_HOST=host.docker.internal # Ensures the container can talk to N.I.N.A on your host Windows machine
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  mysky_cache:
+  mysky_data:
