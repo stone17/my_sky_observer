@@ -185,8 +185,6 @@ const updateImage = async () => {
             offsetX.value = 0;
             offsetY.value = 0;
             zoomLevel.value = 1.0;
-            // Also notify parent to sync local fov setting
-            emit('update-fov', localFov.value);
         } else {
             props.object.status = 'error';
         }
