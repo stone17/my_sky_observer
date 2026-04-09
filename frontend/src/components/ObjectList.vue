@@ -262,9 +262,12 @@ onUnmounted(() => {
                                 </div>
                             </div>
 
-                            <div v-if="item.common_name && item.common_name !== 'N/A'" class="common-name"
-                                :title="item.common_name" style="font-weight: normal; color: #9ca3af; font-size: 0.75rem; margin-top: -2px; margin-bottom: 2px;">
-                                {{ item.common_name }}
+                            <div class="common-name"
+                                :title="item.common_name && item.common_name !== 'N/A' ? item.common_name + ' • ' + item.constellation : item.constellation">
+                                <template v-if="item.common_name && item.common_name !== 'N/A'">
+                                    {{ item.common_name }} &bull; 
+                                </template>
+                                {{ item.constellation }}
                             </div>
 
                             <small>
@@ -414,7 +417,7 @@ onUnmounted(() => {
 
 .card-content {
     display: flex;
-    height: 80px;
+    height: 95px;
 }
 
 .info-col {
@@ -427,7 +430,7 @@ onUnmounted(() => {
 }
 
 .img-col {
-    width: 80px;
+    width: 95px;
     background: #000;
     display: flex;
     align-items: center;
@@ -519,11 +522,13 @@ onUnmounted(() => {
 }
 
 .common-name {
-    font-size: 0.8rem;
-    color: #10b981;
+    font-size: 0.75rem;
+    font-weight: normal;
+    color: #9ca3af;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    margin-top: -2px;
     margin-bottom: 2px;
 }
 
