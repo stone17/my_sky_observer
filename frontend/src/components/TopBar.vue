@@ -6,7 +6,8 @@ const props = defineProps({
     streamStatus: String,
     isDownloading: Boolean,
     downloadProgress: String,
-    systemFov: Number // Received from App.vue
+    systemFov: Number,
+    selectedObject: Object,
 });
 
 const emit = defineEmits(['update-settings', 'start-stream', 'stop-stream', 'purge-cache', 'download-filtered', 'download-all', 'stop-download']);

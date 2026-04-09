@@ -253,17 +253,25 @@ onUnmounted(() => {
                             <div style="display: flex; align-items: center; gap: 5px; width: 100%;">
                                 <h4 :title="item.name">{{ item.name }}</h4>
                                 <div class="info-icon" @click.stop="openInfo(item)">ⓘ</div>
+                                
+                                <div style="margin-left: auto; font-size: 0.9rem; font-weight: bold;" :class="`status-${item.status}`" :title="item.status">
+                                    <span v-if="item.status === 'cached'">✓</span>
+                                    <span v-else-if="item.status === 'downloading'">⟳</span>
+                                    <span v-else-if="item.status === 'error'">✗</span>
+                                    <span v-else>⋯</span>
+                                </div>
                             </div>
+
                             <div v-if="item.common_name && item.common_name !== 'N/A'" class="common-name"
-                                :title="item.common_name">
+                                :title="item.common_name" style="font-weight: normal; color: #9ca3af; font-size: 0.75rem; margin-top: -2px; margin-bottom: 2px;">
                                 {{ item.common_name }}
                             </div>
+
                             <small>
                                 Mag: {{ typeof item.mag === 'number' ? item.mag.toFixed(2) : item.mag }}<br />
                                 Size: {{ item.size }}<br />
                                 <span class="vis-time">Vis: {{ item._dynamicHours || 0 }}h</span>
                             </small>
-                            <span :class="['status-badge', `status-${item.status}`]">{{ item.status }}</span>
                         </div>
                         <div class="img-col">
                             <img v-if="item.image_url" :src="item.image_url" class="list-thumb" loading="lazy" />
@@ -278,6 +286,9 @@ onUnmounted(() => {
                                         stroke="#0f0" stroke-width="1" />
                                 </svg>
                             </div>
+                            <div class="coord-label">
+                                {{ typeof item.ra === 'number' ? item.ra.toFixed(2) : item.ra }} / {{ typeof item.dec === 'number' ? item.dec.toFixed(2) : item.dec }}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -290,9 +301,9 @@ onUnmounted(() => {
 
         <div v-if="showInfoModal" class="modal-overlay" @click="showInfoModal = false">
             <div class="modal-content" @click.stop>
-                <h3>{{ infoObject?.name }}</h3>
-                <p v-if="infoObject?.common_name && infoObject?.common_name !== 'N/A'"><strong>Name:</strong> {{
-                    infoObject.common_name }}</p>
+                <h3>{{ infoObject?.common_name && infoObject?.common_name !== 'N/A' ? infoObject.common_name : infoObject?.name }}</h3>
+                <p v-if="infoObject?.common_name && infoObject?.common_name !== 'N/A'"><strong>Catalog Name:</strong> {{ infoObject.name }}</p>
+                <p><strong>RA/DEC:</strong> {{ typeof infoObject?.ra === 'number' ? infoObject.ra.toFixed(3) : infoObject?.ra }} / {{ typeof infoObject?.dec === 'number' ? infoObject.dec.toFixed(3) : infoObject?.dec }}</p>
                 <p><strong>Type:</strong> {{ infoObject?.type }}</p>
                 <p><strong>Constellation:</strong> {{ infoObject?.constellation }}</p>
                 <p><strong>Magnitude:</strong> {{ infoObject?.mag }}</p>
@@ -406,7 +417,6 @@ onUnmounted(() => {
     height: 80px;
 }
 
-/* FIX: Info column flex 2, graph column flex 1 */
 .info-col {
     flex: 2;
     padding: 8px;
@@ -428,9 +438,19 @@ onUnmounted(() => {
 .graph-col {
     flex: 1;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    padding: 5px;
+    justify-content: center;
+    padding: 4px;
     background: #000;
+}
+
+.coord-label {
+    font-size: 0.65rem;
+    color: #9ca3af;
+    text-align: center;
+    margin-top: 4px;
+    white-space: nowrap;
 }
 
 .list-thumb {
@@ -489,7 +509,7 @@ onUnmounted(() => {
 
 .altitude-chart {
     width: 100%;
-    height: 100%;
+    height: 45px;
 }
 
 .info-icon {

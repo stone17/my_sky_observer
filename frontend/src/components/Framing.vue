@@ -233,9 +233,14 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
 <template>
     <article class="framing-panel">
         <header class="framing-header">
-            <div class="header-left">
+            <div class="header-left" style="flex-direction: column; align-items: flex-start; gap: 0;">
                 <h2>{{ object.name }}</h2>
-                <span class="subtitle">{{ object.constellation }}</span>
+                <span class="subtitle">
+                    <template v-if="object.common_name && object.common_name !== 'N/A'">
+                        {{ object.common_name }} &bull; 
+                    </template>
+                    {{ object.constellation }}
+                </span>
             </div>
             <div class="header-center">
                 <div class="group">

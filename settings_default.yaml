@@ -41,7 +41,7 @@ image_server:
   source: "dss2r"
 
 client_settings:
-  max_magnitude: 12.0
+  max_magnitude: 99.0
   min_size: 10.0
   min_hours: 2.0
   selected_types: []

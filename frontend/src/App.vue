@@ -283,11 +283,20 @@ watch(clientSettings, () => { saveSettings({}); }, { deep: true });
 
 <template>
     <div class="app-container">
-        <TopBar :settings="settings" :streamStatus="streamStatus" :isDownloading="isDownloading"
-            :downloadProgress="downloadProgress" :systemFov="systemFov" @update-settings="saveSettings"
-            @start-stream="startStream" @stop-stream="stopStream" @purge-cache="handlePurge"
-            @download-filtered="startStream('filtered')" @download-all="startStream('all')"
-            @stop-download="stopStream" />
+        <TopBar 
+            :settings="settings"
+            :stream-status="streamStatus"
+            :is-downloading="isDownloading"
+            :download-progress="downloadProgress"
+            :system-fov="systemFov"
+            :selected-object="selectedObject"  @update-settings="updateSettings"
+            @start-stream="startStream"
+            @stop-stream="stopStream"
+            @purge-cache="purgeCache"
+            @download-filtered="downloadFiltered"
+            @download-all="downloadAll"
+            @stop-download="stopDownload"
+        />
 
         <div class="main-layout">
             <section class="framing-section">
