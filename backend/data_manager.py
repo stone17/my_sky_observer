@@ -124,8 +124,13 @@ class CatalogManager:
         # 2. Cross-catalog deduplication based on coordinates (rounded to 3 decimal places ~ 3.6 arcsec)
         final_df['ra_round'] = final_df['ra'].round(3)
         final_df['dec_round'] = final_df['dec'].round(3)
+        
+        # Sort so that entries with a valid common name appear first
+        final_df['has_name'] = final_df['name'] != 'N/A'
+        final_df = final_df.sort_values(by='has_name', ascending=False)
+        
         final_df = final_df.drop_duplicates(subset=['ra_round', 'dec_round'], keep='first')
-        final_df = final_df.drop(columns=['ra_round', 'dec_round'])
+        final_df = final_df.drop(columns=['ra_round', 'dec_round', 'has_name'])
 
         print(f"-> Concatenation & Deduplication complete. Total unique objects: {len(final_df)}")
         print("--- Finished merging catalogs ---\n")
