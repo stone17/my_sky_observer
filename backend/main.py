@@ -596,15 +596,11 @@ class NinaFramingRequest(BaseModel):
 
 @app.post("/api/nina/framing")
 async def send_to_nina(request: NinaFramingRequest):
-    # Load settings to check for a custom NINA host
     settings = load_settings()
-    nina_host = settings.get("nina_host", "")
-    
-    # Fallbacks: if empty, try environment variable, then localhost
-    if not nina_host:
-        nina_host = os.environ.get("NINA_HOST", "localhost")
+    nina_host = settings.get("nina_host", os.environ.get("NINA_HOST", "localhost"))
 
-    nina_url = f"http://{nina_host}:1888/api/v1/framing/manualtarget"
+    coord_url = f"http://{nina_host}:1888/v2/api/framing/set-coordinates"
+    rot_url = f"http://{nina_host}:1888/v2/api/framing/set-rotation"
     
     try:
         if isinstance(request.ra, (float, int)) and isinstance(request.dec, (float, int)):
@@ -613,10 +609,17 @@ async def send_to_nina(request: NinaFramingRequest):
              coords = SkyCoord(request.ra, request.dec, unit=(u.hourangle, u.deg))
         
         async with httpx.AsyncClient() as client:
-             resp = await client.post(nina_url, json={"RightAscension": coords.ra.deg, "Declination": coords.dec.deg, "Rotation": request.rotation}, timeout=2.0)
-             if resp.status_code >= 400: raise HTTPException(status_code=502, detail=f"N.I.N.A error: {resp.status_code}")
+             # 1. Send Coordinates
+             resp_coord = await client.get(coord_url, params={"RAangle": coords.ra.deg, "DecAngle": coords.dec.deg}, timeout=2.0)
+             if resp_coord.status_code >= 400: raise HTTPException(status_code=502, detail=f"Coordinate error: {resp_coord.status_code}")
+             
+             # 2. Send Rotation
+             resp_rot = await client.get(rot_url, params={"rotation": request.rotation}, timeout=2.0)
+             if resp_rot.status_code >= 400: raise HTTPException(status_code=502, detail=f"Rotation error: {resp_rot.status_code}")
+             
         return {"status": "success", "message": "Sent to N.I.N.A"}
     except Exception as e:
+        print(f"NINA Connection Error: {e}")
         raise HTTPException(status_code=502, detail="Could not connect to N.I.N.A.")
 
 @app.get("/cache/{setup_hash}/{image_filename}")

@@ -39,6 +39,27 @@ const fetchProfiles = async () => {
             // Sync selected name with settings
             if (localSettings.value.active_profile) {
                 selectedProfileName.value = localSettings.value.active_profile;
+                
+                // CRITICAL FIX: Auto-apply the active profile's settings on load
+                // to ensure missing fields (like padding) don't fall back to defaults.
+                if (profiles.value[selectedProfileName.value]) {
+                    const profileData = JSON.parse(JSON.stringify(profiles.value[selectedProfileName.value]));
+                    const savedLocation = localSettings.value.location;
+
+                    localSettings.value = {
+                        ...localSettings.value,
+                        ...profileData,
+                        active_profile: selectedProfileName.value
+                    };
+
+                    // Restore the current location to avoid overwriting it
+                    if (savedLocation) {
+                        localSettings.value.location = savedLocation;
+                    }
+
+                    // Sync the corrected settings back to the main App
+                    emit('update-settings', localSettings.value);
+                }
             }
         }
     } catch (e) { console.error(e); }
@@ -77,6 +98,7 @@ watch(() => props.settings, (newVal) => {
         localSettings.value = JSON.parse(JSON.stringify(newVal));
         // Ensure defaults
         if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
+        if (localSettings.value.nina_host === undefined) localSettings.value.nina_host = "";
         if (!localSettings.value.catalogs) localSettings.value.catalogs = ['messier'];
         if (localSettings.value.image_padding === undefined) localSettings.value.image_padding = 1.05;
         if (!localSettings.value.image_server) {
@@ -120,6 +142,10 @@ const loadProfile = (name) => {
             localSettings.value.location = savedLocation;
         }
 
+        if (savedNina) {
+            localSettings.value.nina_host = savedNina; // Add this line
+        }
+
         selectedProfileName.value = name;
         emit('update-settings', localSettings.value);
         closeDropdown();
@@ -138,6 +164,7 @@ const updateCurrentProfile = async () => {
 
     const profileData = JSON.parse(JSON.stringify(localSettings.value));
     delete profileData.location;
+    delete profileData.nina_host;
     delete profileData.active_profile;
     delete profileData.profiles;
 
