@@ -163,6 +163,20 @@ const getCurrentCenterCoordinates = () => {
     };
 };
 
+const isModified = computed(() => {
+    if (!props.object) return false;
+    
+    // Check if offsets have changed
+    if (Math.abs(offsetX.value) > 0.01 || Math.abs(offsetY.value) > 0.01) return true;
+    
+    // Check if FOV has changed compared to the downloaded image
+    const padding = props.settings?.image_padding || 1.05;
+    const currentTargetFov = localFov.value * padding;
+    if (props.object.image_fov && Math.abs(currentTargetFov - props.object.image_fov) > 0.01) return true;
+    
+    return false;
+});
+
 const updateImage = async () => {
     if (!props.object) return;
     const coords = getCurrentCenterCoordinates();
@@ -288,7 +302,11 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
 
                 <div class="group" style="margin-left: 10px; padding-left: 10px; border-left: 1px solid #4b5563;">
                     <div class="action-col">
-                        <button class="outline mini primary-action full-w" @click="updateImage" :disabled="isObjectDownloading" title="Download new image with current center and FOV">
+                        <button class="outline mini primary-action full-w" 
+                            @click="updateImage" 
+                            :disabled="isObjectDownloading" 
+                            :class="{ 'modified-warning': isModified }"
+                            title="Download new image with current center and FOV">
                             {{ isObjectDownloading ? '...' : 'Update/Center Image' }}
                         </button>
                         <button class="outline mini primary-action full-w" @click="sendToNina" title="Send framing to N.I.N.A (Requires Advanced API plugin installed in N.I.N.A)">
@@ -466,6 +484,17 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
     border-color: #10b981;
     margin-left: 5px;
     font-weight: bold;
+    transition: all 0.2s;
+}
+
+.modified-warning {
+    color: #ef4444 !important;
+    border-color: #ef4444 !important;
+    background-color: rgba(239, 68, 68, 0.1) !important;
+}
+
+.modified-warning:hover {
+    background-color: rgba(239, 68, 68, 0.2) !important;
 }
 
 .search-container {
