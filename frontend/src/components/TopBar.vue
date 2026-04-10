@@ -419,6 +419,22 @@ const locationDisplay = computed(() => {
             </div>
         </div>
 
+        <div class="tb-item relative">
+            <button class="tb-btn" @click="toggleDropdown('nina')">
+                N.I.N.A ▼
+            </button>
+            <div class="dropdown-menu" v-if="activeDropdown === 'nina'">
+                <div class="field-group">
+                    <label><strong>Host / IP Address</strong></label>
+                    <input type="text" v-model="localSettings.nina_host" placeholder="localhost or IP"
+                        @change="$emit('update-settings', localSettings)" />
+                </div>
+                <div style="font-size: 0.75rem; color: #9ca3af; margin-top: 5px;">
+                    Use <em>host.docker.internal</em> if running in Docker, or the IP address of your remote N.I.N.A machine.
+                </div>
+            </div>
+        </div>
+
         <div class="tb-item" v-if="!isDownloading">
             <button class="tb-btn" @click="$emit('download-filtered')">Download Filtered</button>
             <button class="tb-btn" @click="$emit('download-all')">Download All</button>
