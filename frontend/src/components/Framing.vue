@@ -264,7 +264,7 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
                         <button class="outline mini primary-action full-w" @click="updateImage" :disabled="isObjectDownloading" title="Download new image with current center and FOV">
                             {{ isObjectDownloading ? '...' : 'Update/Center Image' }}
                         </button>
-                        <button class="outline mini primary-action full-w" @click="sendToNina" title="Send framing to N.I.N.A">
+                        <button class="outline mini primary-action full-w" @click="sendToNina" title="Send framing to N.I.N.A (Requires Advanced API plugin installed in N.I.N.A)">
                             {{ ninaStatus || 'Send to NINA' }}
                         </button>
                     </div>

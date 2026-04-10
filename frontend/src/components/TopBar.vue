@@ -45,6 +45,7 @@ const fetchProfiles = async () => {
                 if (profiles.value[selectedProfileName.value]) {
                     const profileData = JSON.parse(JSON.stringify(profiles.value[selectedProfileName.value]));
                     const savedLocation = localSettings.value.location;
+                    const savedNina = localSettings.value.nina_host;
 
                     localSettings.value = {
                         ...localSettings.value,
@@ -52,9 +53,12 @@ const fetchProfiles = async () => {
                         active_profile: selectedProfileName.value
                     };
 
-                    // Restore the current location to avoid overwriting it
+                    // Restore the current location and nina_host to avoid overwriting it
                     if (savedLocation) {
                         localSettings.value.location = savedLocation;
+                    }
+                    if (savedNina !== undefined) {
+                        localSettings.value.nina_host = savedNina;
                     }
 
                     // Sync the corrected settings back to the main App
@@ -127,8 +131,9 @@ const loadProfile = (name) => {
     if (profiles.value[name]) {
         const profileData = JSON.parse(JSON.stringify(profiles.value[name]));
 
-        // Preserve current location if it exists
+        // Preserve current location and nina_host
         const savedLocation = localSettings.value.location;
+        const savedNina = localSettings.value.nina_host;
 
         // Merge into localSettings
         localSettings.value = {
@@ -137,13 +142,13 @@ const loadProfile = (name) => {
             active_profile: name // Persist active profile name
         };
 
-        // Restore location
+        // Restore location and nina_host
         if (savedLocation) {
             localSettings.value.location = savedLocation;
         }
 
-        if (savedNina) {
-            localSettings.value.nina_host = savedNina; // Add this line
+        if (savedNina !== undefined) {
+            localSettings.value.nina_host = savedNina;
         }
 
         selectedProfileName.value = name;
@@ -186,9 +191,10 @@ const createProfile = async () => {
     if (!newProfileName.value) return;
     const name = newProfileName.value;
 
-    // Create profile data excluding location
+    // Create profile data excluding location and nina_host
     const profileData = JSON.parse(JSON.stringify(localSettings.value));
     delete profileData.location;
+    delete profileData.nina_host;
     delete profileData.active_profile;
     delete profileData.profiles;
 
@@ -457,7 +463,8 @@ const locationDisplay = computed(() => {
                         @change="$emit('update-settings', localSettings)" />
                 </div>
                 <div style="font-size: 0.75rem; color: #9ca3af; margin-top: 5px;">
-                    Use <em>host.docker.internal</em> if running in Docker, or the IP address of your remote N.I.N.A machine.
+                    Use <em>host.docker.internal</em> if running in Docker, or the IP address of your remote N.I.N.A machine.<br/>
+                    <strong>Requires the Advanced API plugin to be installed in N.I.N.A.</strong>
                 </div>
             </div>
         </div>

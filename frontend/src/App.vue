@@ -289,7 +289,7 @@ watch(clientSettings, () => { saveSettings({}); }, { deep: true });
             :is-downloading="isDownloading"
             :download-progress="downloadProgress"
             :system-fov="systemFov"
-            :selected-object="selectedObject"  @update-settings="updateSettings"
+            :selected-object="selectedObject"  @update-settings="saveSettings"
             @start-stream="startStream"
             @stop-stream="stopStream"
             @purge-cache="purgeCache"
