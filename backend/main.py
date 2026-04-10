@@ -274,10 +274,13 @@ class StreamSession:
         # (they are passed to DataManager)
         
         mode = self.settings.get('download_mode', 'selected')
-        max_mag = self.settings.get('client_settings', {}).get('max_magnitude', 12)
-        min_size = self.settings.get('client_settings', {}).get('min_size', 0)
-        sel_types = self.settings.get('client_settings', {}).get('selected_types', [])
-        min_hrs = self.settings.get('client_settings', {}).get('min_hours', 0)
+        
+        # Look directly in settings first (passed from query params), then fallback to saved client_settings
+        client_settings = self.settings.get('client_settings', {})
+        max_mag = self.settings.get('max_magnitude', client_settings.get('max_magnitude', 12))
+        min_size = self.settings.get('min_size', client_settings.get('min_size', 0))
+        sel_types = self.settings.get('selected_types', client_settings.get('selected_types', []))
+        min_hrs = self.settings.get('min_hours', client_settings.get('min_hours', 0))
         
         sel_types = [t.lower().strip() for t in sel_types]
         
