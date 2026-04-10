@@ -60,6 +60,24 @@ const sensorStyle = computed(() => {
 
 // --- STANDARD LOGIC ---
 const rotation = ref(0);
+let rotInterval = null;
+let rotTimeout = null;
+
+const startRotate = (dir) => {
+    const update = () => {
+        rotation.value = (rotation.value + dir + 360) % 360;
+    };
+    update();
+    rotTimeout = setTimeout(() => {
+        rotInterval = setInterval(update, 30);
+    }, 300);
+};
+
+const stopRotate = () => {
+    if (rotTimeout) clearTimeout(rotTimeout);
+    if (rotInterval) clearInterval(rotInterval);
+};
+
 const offsetX = ref(0);
 const offsetY = ref(0);
 const isDragging = ref(false);
@@ -250,6 +268,15 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
                         <button class="stepper-btn" @click="localFov = parseFloat((localFov * 0.9).toFixed(2))">▼</button>
                     </div>
                     <input type="number" v-model.number="localFov" step="0.01" class="input-mini" />
+                </div>
+                
+                <div class="group" style="margin-left: 10px; padding-left: 10px; border-left: 1px solid #4b5563;">
+                    <strong class="lbl">ROT</strong>
+                    <div class="stepper-col">
+                        <button class="stepper-btn" @mousedown="startRotate(1)" @mouseup="stopRotate" @mouseleave="stopRotate">▲</button>
+                        <button class="stepper-btn" @mousedown="startRotate(-1)" @mouseup="stopRotate" @mouseleave="stopRotate">▼</button>
+                    </div>
+                    <input type="number" v-model.number="rotation" step="1" class="input-mini" />
                 </div>
                 
                 <div class="group" style="margin-left: 10px; padding-left: 10px; border-left: 1px solid #4b5563;">

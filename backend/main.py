@@ -614,7 +614,7 @@ async def send_to_nina(request: NinaFramingRequest):
              if resp_coord.status_code >= 400: raise HTTPException(status_code=502, detail=f"Coordinate error: {resp_coord.status_code}")
              
              # 2. Send Rotation
-             resp_rot = await client.get(rot_url, params={"rotation": request.rotation}, timeout=2.0)
+             resp_rot = await client.get(rot_url, params={"rotation": -request.rotation}, timeout=2.0)
              if resp_rot.status_code >= 400: raise HTTPException(status_code=502, detail=f"Rotation error: {resp_rot.status_code}")
              
         return {"status": "success", "message": "Sent to N.I.N.A"}
