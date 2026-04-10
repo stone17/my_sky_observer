@@ -292,10 +292,10 @@ watch(clientSettings, () => { saveSettings({}); }, { deep: true });
             :selected-object="selectedObject"  @update-settings="saveSettings"
             @start-stream="startStream"
             @stop-stream="stopStream"
-            @purge-cache="purgeCache"
-            @download-filtered="downloadFiltered"
-            @download-all="downloadAll"
-            @stop-download="stopDownload"
+            @purge-cache="handlePurge"
+            @download-filtered="startStream('filtered')"
+            @download-all="startStream('all')"
+            @stop-download="stopStream"
         />
 
         <div class="main-layout">
