@@ -163,6 +163,16 @@ const getCurrentCenterCoordinates = () => {
     };
 };
 
+const isZoomModified = computed(() => zoomLevel.value !== 1.0);
+
+const isFovModified = computed(() => {
+    if (!props.object) return false;
+    const padding = props.settings?.image_padding || 1.05;
+    const currentTargetFov = localFov.value * padding;
+    if (props.object.image_fov && Math.abs(currentTargetFov - props.object.image_fov) > 0.01) return true;
+    return false;
+});
+
 const isModified = computed(() => {
     if (!props.object) return false;
     
@@ -295,8 +305,14 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
                 
                 <div class="group" style="margin-left: 10px; padding-left: 10px; border-left: 1px solid #4b5563;">
                     <div class="action-col">
-                        <button class="outline mini primary-action full-w" @click="resetFov" title="Reset to setup FOV">Reset FOV</button>
-                        <button class="outline mini primary-action full-w" @click="resetZoom" title="Reset image zoom">Reset Zoom</button>
+                        <button class="outline mini primary-action full-w" 
+                            @click="resetFov" 
+                            :class="{ 'modified-warning': isFovModified }"
+                            title="Reset to setup FOV">Reset FOV</button>
+                        <button class="outline mini primary-action full-w" 
+                            @click="resetZoom" 
+                            :class="{ 'modified-warning': isZoomModified }"
+                            title="Reset image zoom">Reset Zoom</button>
                     </div>
                 </div>
 
