@@ -178,6 +178,16 @@ const startStream = (mode = 'selected') => {
     if (clientSettings.value.max_magnitude !== undefined) params.append('max_magnitude', clientSettings.value.max_magnitude);
     if (clientSettings.value.min_size !== undefined) params.append('min_size', clientSettings.value.min_size);
     if (clientSettings.value.min_hours !== undefined) params.append('min_hours', clientSettings.value.min_hours);
+    
+    if (settings.value.filter_active_alt !== undefined) params.append('filter_active_alt', settings.value.filter_active_alt);
+    if (settings.value.filter_na_alt !== undefined) params.append('filter_na_alt', settings.value.filter_na_alt);
+    if (clientSettings.value.filter_active_hours !== undefined) params.append('filter_active_hours', clientSettings.value.filter_active_hours);
+    if (clientSettings.value.filter_na_hours !== undefined) params.append('filter_na_hours', clientSettings.value.filter_na_hours);
+    if (clientSettings.value.filter_active_mag !== undefined) params.append('filter_active_mag', clientSettings.value.filter_active_mag);
+    if (clientSettings.value.filter_na_mag !== undefined) params.append('filter_na_mag', clientSettings.value.filter_na_mag);
+    if (clientSettings.value.filter_active_size !== undefined) params.append('filter_active_size', clientSettings.value.filter_active_size);
+    if (clientSettings.value.filter_na_size !== undefined) params.append('filter_na_size', clientSettings.value.filter_na_size);
+
     if (clientSettings.value.selected_types?.length > 0) params.append('selected_types', clientSettings.value.selected_types.join(','));
 
     eventSource = new EventSource(`/api/stream-objects?${params.toString()}`);
@@ -255,6 +265,14 @@ const streamParams = computed(() => ({
     sort: settings.value.sort_key,
     max_mag: clientSettings.value.max_magnitude,
     min_sz: clientSettings.value.min_size,
+    fa_alt: settings.value.filter_active_alt,
+    fn_alt: settings.value.filter_na_alt,
+    fa_hrs: clientSettings.value.filter_active_hours,
+    fn_hrs: clientSettings.value.filter_na_hours,
+    fa_mag: clientSettings.value.filter_active_mag,
+    fn_mag: clientSettings.value.filter_na_mag,
+    fa_sz: clientSettings.value.filter_active_size,
+    fn_sz: clientSettings.value.filter_na_size,
     types: clientSettings.value.selected_types,
     pad: settings.value.image_padding,
     img_srv: settings.value.image_server,

@@ -22,12 +22,22 @@ watch(() => props.settings, (newVal) => {
     if (newVal && JSON.stringify(newVal) !== JSON.stringify(localSettings.value)) {
         localSettings.value = { ...newVal };
         if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
+        if (localSettings.value.filter_active_alt === undefined) localSettings.value.filter_active_alt = true;
+        if (localSettings.value.filter_na_alt === undefined) localSettings.value.filter_na_alt = true;
         if (!localSettings.value.sort_key) localSettings.value.sort_key = 'time';
     }
 }, { immediate: true, deep: true });
 
 watch(() => props.clientSettings, (newVal) => {
-    if (newVal) localClientSettings.value = { ...newVal };
+    if (newVal) {
+        localClientSettings.value = { ...newVal };
+        if (localClientSettings.value.filter_active_hours === undefined) localClientSettings.value.filter_active_hours = true;
+        if (localClientSettings.value.filter_na_hours === undefined) localClientSettings.value.filter_na_hours = true;
+        if (localClientSettings.value.filter_active_mag === undefined) localClientSettings.value.filter_active_mag = true;
+        if (localClientSettings.value.filter_na_mag === undefined) localClientSettings.value.filter_na_mag = true;
+        if (localClientSettings.value.filter_active_size === undefined) localClientSettings.value.filter_active_size = true;
+        if (localClientSettings.value.filter_na_size === undefined) localClientSettings.value.filter_na_size = true;
+    }
 }, { immediate: true, deep: true });
 
 const updateSettings = () => emit('update-settings', localSettings.value);
@@ -49,9 +59,21 @@ const openInfo = (obj) => {
 
 const filteredAndSortedObjects = computed(() => {
     const minAlt = localSettings.value.min_altitude || 30;
+    const activeAlt = localSettings.value.filter_active_alt !== false;
+    const naAlt = localSettings.value.filter_na_alt !== false;
+
     const minHrs = localClientSettings.value.min_hours || 0;
+    const activeHrs = localClientSettings.value.filter_active_hours !== false;
+    const naHrs = localClientSettings.value.filter_na_hours !== false;
+
     const maxMag = localClientSettings.value.max_magnitude ?? 12;
+    const activeMag = localClientSettings.value.filter_active_mag !== false;
+    const naMag = localClientSettings.value.filter_na_mag !== false;
+
     const minSize = localClientSettings.value.min_size || 0;
+    const activeSize = localClientSettings.value.filter_active_size !== false;
+    const naSize = localClientSettings.value.filter_na_size !== false;
+
     const sortKey = localSettings.value.sort_key || 'time';
 
     const q = (props.searchQuery || '').trim().toLowerCase();
@@ -74,10 +96,41 @@ const filteredAndSortedObjects = computed(() => {
             continue;
         }
 
-        if (minHrs > 0 && (o.hours_visible || 0) < minHrs) continue;
-        if (minAlt > 0 && (o.max_altitude || 0) < minAlt) continue;
-        if (maxMag !== undefined && o.mag !== undefined && o.mag > maxMag) continue;
-        if (minSize > 0 && (o.maj_ax || 0) < minSize) continue;
+        if (activeHrs) {
+            const isNaHrs = o.hours_visible === undefined || o.hours_visible === null;
+            if (isNaHrs) {
+                if (!naHrs) continue;
+            } else {
+                if (minHrs > 0 && o.hours_visible < minHrs) continue;
+            }
+        }
+
+        if (activeAlt) {
+            const isNaAlt = o.max_altitude === undefined || o.max_altitude === null;
+            if (isNaAlt) {
+                if (!naAlt) continue;
+            } else {
+                if (minAlt > 0 && o.max_altitude < minAlt) continue;
+            }
+        }
+
+        if (activeMag) {
+            const isNaMag = o.mag === undefined || o.mag === null || o.mag >= 99;
+            if (isNaMag) {
+                if (!naMag) continue;
+            } else {
+                if (maxMag !== undefined && o.mag > maxMag) continue;
+            }
+        }
+
+        if (activeSize) {
+            const isNaSize = o.maj_ax === undefined || o.maj_ax === null || o.maj_ax === 0;
+            if (isNaSize) {
+                if (!naSize) continue;
+            } else {
+                if (minSize > 0 && o.maj_ax < minSize) continue;
+            }
+        }
 
         const selectedTypes = localClientSettings.value.selected_types || [];
         if (selectedTypes.length > 0 && !selectedTypes.includes(o.type)) continue;
@@ -209,24 +262,44 @@ onUnmounted(() => {
     <div class="list-wrapper">
         <div class="filter-sidebar">
             <div class="filter-group">
-                <label>Alt></label>
-                <input type="number" v-model.number="localSettings.min_altitude" @input="updateSettings"
-                    class="input-sm" />
+                <div class="filter-header">
+                    <label>Alt></label>
+                    <div class="toggles">
+                        <input type="checkbox" v-model="localSettings.filter_active_alt" @change="updateSettings" title="Enable filter" class="cb-onoff" />
+                        <input type="checkbox" v-model="localSettings.filter_na_alt" @change="updateSettings" title="Include N/A" class="cb-na" />
+                    </div>
+                </div>
+                <input type="number" v-model.number="localSettings.min_altitude" :disabled="!localSettings.filter_active_alt" @input="updateSettings" class="input-sm" />
             </div>
             <div class="filter-group">
-                <label>Hrs&gt;</label>
-                <input type="number" step="0.5" v-model.number="localClientSettings.min_hours"
-                    @change="updateClientSettings" class="input-sm" />
+                <div class="filter-header">
+                    <label>Hrs&gt;</label>
+                    <div class="toggles">
+                        <input type="checkbox" v-model="localClientSettings.filter_active_hours" @change="updateClientSettings" title="Enable filter" class="cb-onoff" />
+                        <input type="checkbox" v-model="localClientSettings.filter_na_hours" @change="updateClientSettings" title="Include N/A" class="cb-na" />
+                    </div>
+                </div>
+                <input type="number" step="0.5" v-model.number="localClientSettings.min_hours" :disabled="!localClientSettings.filter_active_hours" @change="updateClientSettings" class="input-sm" />
             </div>
             <div class="filter-group">
-                <label>Mag&lt;</label>
-                <input type="number" step="0.5" v-model.number="localClientSettings.max_magnitude"
-                    @change="updateClientSettings" class="input-sm" />
+                <div class="filter-header">
+                    <label>Mag&lt;</label>
+                    <div class="toggles">
+                        <input type="checkbox" v-model="localClientSettings.filter_active_mag" @change="updateClientSettings" title="Enable filter" class="cb-onoff" />
+                        <input type="checkbox" v-model="localClientSettings.filter_na_mag" @change="updateClientSettings" title="Include N/A" class="cb-na" />
+                    </div>
+                </div>
+                <input type="number" step="0.5" v-model.number="localClientSettings.max_magnitude" :disabled="!localClientSettings.filter_active_mag" @change="updateClientSettings" class="input-sm" />
             </div>
             <div class="filter-group">
-                <label>Size></label>
-                <input type="number" step="1" v-model.number="localClientSettings.min_size"
-                    @change="updateClientSettings" class="input-sm" />
+                <div class="filter-header">
+                    <label>Size></label>
+                    <div class="toggles">
+                        <input type="checkbox" v-model="localClientSettings.filter_active_size" @change="updateClientSettings" title="Enable filter" class="cb-onoff" />
+                        <input type="checkbox" v-model="localClientSettings.filter_na_size" @change="updateClientSettings" title="Include N/A" class="cb-na" />
+                    </div>
+                </div>
+                <input type="number" step="1" v-model.number="localClientSettings.min_size" :disabled="!localClientSettings.filter_active_size" @change="updateClientSettings" class="input-sm" />
             </div>
             <div class="filter-group">
                 <label>Sort</label>
@@ -371,6 +444,45 @@ onUnmounted(() => {
     color: #9ca3af;
     text-align: center;
     margin-bottom: 2px;
+}
+
+.filter-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+    margin-bottom: 2px;
+}
+
+.filter-header label {
+    margin-bottom: 0;
+    text-align: left;
+}
+
+.toggles {
+    display: flex;
+    gap: 4px;
+}
+
+.cb-onoff {
+    accent-color: #10b981;
+    width: 12px;
+    height: 12px;
+    margin: 0;
+    cursor: pointer;
+}
+
+.cb-na {
+    accent-color: #f59e0b;
+    width: 12px;
+    height: 12px;
+    margin: 0;
+    cursor: pointer;
+}
+
+.input-sm:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 .input-sm {
