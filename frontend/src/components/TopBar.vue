@@ -502,18 +502,12 @@ const locationDisplay = computed(() => {
     display: flex;
     align-items: center;
     background: #1f2937;
-    padding: 0 1rem;
-    height: 50px;
+    padding: 0.5rem 1rem;
+    min-height: 50px;
     border-bottom: 1px solid #374151;
     font-size: 0.9rem;
     gap: 1rem;
-    overflow-x: auto;
-    white-space: nowrap;
-    scrollbar-width: none; /* Firefox */
-}
-
-.top-bar::-webkit-scrollbar {
-    display: none; /* Chrome/Safari */
+    flex-wrap: wrap;
 }
 
 .tb-item {

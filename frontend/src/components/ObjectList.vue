@@ -184,8 +184,14 @@ const displayedObjects = computed(() => {
     return filteredAndSortedObjects.value.slice(0, renderedLimit.value);
 });
 
-watch(filteredAndSortedObjects, () => {
+watch(filteredAndSortedObjects, (newList) => {
     renderedLimit.value = 50;
+    if (newList.length > 0) {
+        const currentStillExists = newList.find(o => o.name === props.selectedId);
+        if (!currentStillExists) {
+            handleObjectClick(newList[0]);
+        }
+    }
 });
 
 const onScroll = (e) => {
