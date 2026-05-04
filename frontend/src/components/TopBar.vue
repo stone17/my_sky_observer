@@ -313,11 +313,18 @@ const locationDisplay = computed(() => {
 
 <template>
     <div class="top-bar">
+        <div class="mobile-backdrop" v-if="activeDropdown" @click="closeDropdown"></div>
+
         <div class="tb-item relative">
-            <button class="tb-btn" @click="toggleDropdown('profile')">
-                Profile: {{ selectedProfileName || 'Custom' }} ▼
+            <button class="tb-btn" @click="toggleDropdown('profile')" title="Profile">
+                <span class="mobile-icon">👤</span>
+                <span class="desktop-text">Profile: {{ selectedProfileName || 'Custom' }} ▼</span>
             </button>
             <div class="dropdown-menu" v-if="activeDropdown === 'profile'">
+                <div class="mobile-menu-header">
+                    <h3>Profile Settings</h3>
+                    <button class="close-btn" @click="closeDropdown">✕</button>
+                </div>
                 <label><strong>Load Profile</strong></label>
                 <ul class="link-list">
                     <li v-for="(p, name) in profiles" :key="name" @click="loadProfile(name)">
@@ -367,10 +374,15 @@ const locationDisplay = computed(() => {
         </div>
 
         <div class="tb-item relative">
-            <button class="tb-btn" @click="toggleDropdown('location')">
-                {{ locationDisplay }} ▼
+            <button class="tb-btn" @click="toggleDropdown('location')" title="Location">
+                <span class="mobile-icon">📍</span>
+                <span class="desktop-text">{{ locationDisplay }} ▼</span>
             </button>
             <div class="dropdown-menu" v-if="activeDropdown === 'location'">
+                <div class="mobile-menu-header">
+                    <h3>Location</h3>
+                    <button class="close-btn" @click="closeDropdown">✕</button>
+                </div>
                 <div class="field-group" v-if="localSettings.location">
                     <label>Latitude</label>
                     <input type="number" step="0.0001" v-model.number="localSettings.location.latitude"
@@ -396,15 +408,20 @@ const locationDisplay = computed(() => {
             </div>
         </div>
 
-        <div class="tb-item">
+        <div class="tb-item desktop-text">
             <span class="status-text" style="color: #e5e7eb; margin:0;">FOV: {{ fovDisplay }}</span>
         </div>
 
         <div class="tb-item relative">
-            <button class="tb-btn" @click="toggleDropdown('catalogs')">
-                Catalogs ▼
+            <button class="tb-btn" @click="toggleDropdown('catalogs')" title="Catalogs">
+                <span class="mobile-icon">📚</span>
+                <span class="desktop-text">Catalogs ▼</span>
             </button>
             <div class="dropdown-menu" v-if="activeDropdown === 'catalogs'">
+                <div class="mobile-menu-header">
+                    <h3>Catalogs</h3>
+                    <button class="close-btn" @click="closeDropdown">✕</button>
+                </div>
                 <label><strong>Active Catalogs</strong></label>
                 <div style="margin-bottom: 5px;">
                     <button class="small outline" @click="selectAllCatalogs">Select All</button>
@@ -420,10 +437,15 @@ const locationDisplay = computed(() => {
         </div>
 
         <div class="tb-item relative">
-            <button class="tb-btn" @click="toggleDropdown('image_server')">
-                Image Server ▼
+            <button class="tb-btn" @click="toggleDropdown('image_server')" title="Image Server">
+                <span class="mobile-icon">🖼️</span>
+                <span class="desktop-text">Image Server ▼</span>
             </button>
             <div class="dropdown-menu" v-if="activeDropdown === 'image_server'">
+                <div class="mobile-menu-header">
+                    <h3>Image Server</h3>
+                    <button class="close-btn" @click="closeDropdown">✕</button>
+                </div>
                 <div class="field-group" v-if="localSettings.image_server">
                     <label><strong>Resolution</strong></label>
                     <select v-model.number="localSettings.image_server.resolution" @change="updateImageSettings"
@@ -453,10 +475,15 @@ const locationDisplay = computed(() => {
         </div>
 
         <div class="tb-item relative">
-            <button class="tb-btn" @click="toggleDropdown('nina')">
-                N.I.N.A ▼
+            <button class="tb-btn" @click="toggleDropdown('nina')" title="N.I.N.A">
+                <span class="mobile-icon">🔭</span>
+                <span class="desktop-text">N.I.N.A ▼</span>
             </button>
             <div class="dropdown-menu" v-if="activeDropdown === 'nina'">
+                <div class="mobile-menu-header">
+                    <h3>N.I.N.A Connection</h3>
+                    <button class="close-btn" @click="closeDropdown">✕</button>
+                </div>
                 <div class="field-group">
                     <label><strong>Host / IP Address</strong></label>
                     <input type="text" v-model="localSettings.nina_host" placeholder="localhost or IP"
@@ -470,26 +497,38 @@ const locationDisplay = computed(() => {
         </div>
 
         <div class="tb-item" v-if="!isDownloading">
-            <button class="tb-btn" @click="$emit('download-filtered')">Download Filtered</button>
-            <button class="tb-btn" @click="$emit('download-all')">Download All</button>
+            <button class="tb-btn" @click="$emit('download-filtered')" title="Download Filtered">
+                <span class="mobile-icon">⬇️</span>
+                <span class="desktop-text">Download Filtered</span>
+            </button>
+            <button class="tb-btn desktop-text" @click="$emit('download-all')">Download All</button>
         </div>
         <div class="tb-item" v-else>
-            <button class="tb-btn danger" @click="$emit('stop-download')">Stop Downloading</button>
-            <span class="status-text" style="margin-left: 10px;">{{ downloadProgress }}</span>
+            <button class="tb-btn danger" @click="$emit('stop-download')" title="Stop Downloading">
+                <span class="mobile-icon">🛑</span>
+                <span class="desktop-text">Stop Downloading</span>
+            </button>
+            <span class="status-text desktop-text" style="margin-left: 10px;">{{ downloadProgress }}</span>
         </div>
 
         <div class="tb-item relative push-right">
-            <button class="tb-btn" @click="toggleDropdown('cache')">
-                Cache: {{ cacheStatus.size_mb }} MB ▼
+            <button class="tb-btn" @click="toggleDropdown('cache')" title="Cache">
+                <span class="mobile-icon">💾</span>
+                <span class="desktop-text">Cache: {{ cacheStatus.size_mb }} MB ▼</span>
             </button>
             <div class="dropdown-menu right-aligned" v-if="activeDropdown === 'cache'">
+                <div class="mobile-menu-header">
+                    <h3>Cache Management</h3>
+                    <button class="close-btn" @click="closeDropdown">✕</button>
+                </div>
                 <div class="info-row">Images: {{ cacheStatus.count }}</div>
+                <div class="info-row">Size: {{ cacheStatus.size_mb }} MB</div>
                 <hr />
                 <button class="full-width danger" @click="purgeCache">Purge Cache</button>
             </div>
         </div>
 
-        <div class="tb-item">
+        <div class="tb-item desktop-text">
             <span class="status-text">{{ streamStatus }}</span>
         </div>
     </div>
@@ -522,11 +561,27 @@ const locationDisplay = computed(() => {
     cursor: pointer;
     padding: 5px 10px;
     font-size: inherit;
+    display: flex;
+    align-items: center;
+    gap: 5px;
 }
 
 .tb-btn:hover {
     background: rgba(255, 255, 255, 0.1);
     border-radius: 4px;
+}
+
+.mobile-icon {
+    display: none;
+    font-size: 1.2rem;
+}
+
+.mobile-menu-header {
+    display: none;
+}
+
+.mobile-backdrop {
+    display: none;
 }
 
 .push-right {
@@ -548,7 +603,7 @@ const locationDisplay = computed(() => {
     min-width: 220px;
     border-radius: 0 0 4px 4px;
     box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
-    white-space: normal; /* Reset for dropdown content */
+    white-space: normal;
 }
 
 .dropdown-menu.right-aligned {
@@ -667,5 +722,81 @@ const locationDisplay = computed(() => {
     gap: 8px;
     cursor: pointer;
     color: #e5e7eb;
+}
+
+/* Mobile Responsive Styles */
+@media (max-width: 768px) {
+    .top-bar {
+        justify-content: space-between;
+        padding: 0.5rem;
+        gap: 0.5rem;
+    }
+
+    .desktop-text {
+        display: none !important;
+    }
+
+    .mobile-icon {
+        display: inline-block;
+    }
+
+    .tb-btn {
+        padding: 8px;
+    }
+
+    .mobile-backdrop {
+        display: block;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.6);
+        z-index: 1050;
+    }
+
+    .dropdown-menu {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 90%;
+        max-width: 400px;
+        max-height: 80vh;
+        overflow-y: auto;
+        z-index: 1100;
+        border-radius: 8px;
+        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+        padding: 15px;
+    }
+
+    .dropdown-menu.right-aligned {
+        left: 50%;
+        right: auto;
+    }
+
+    .mobile-menu-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 15px;
+        border-bottom: 1px solid #374151;
+        padding-bottom: 10px;
+    }
+
+    .mobile-menu-header h3 {
+        margin: 0;
+        font-size: 1.1rem;
+        color: #f3f4f6;
+    }
+
+    .close-btn {
+        background: transparent;
+        border: none;
+        color: #9ca3af;
+        font-size: 1.2rem;
+        cursor: pointer;
+        padding: 0 5px;
+    }
 }
 </style>
