@@ -695,4 +695,20 @@ onUnmounted(() => {
 .close-btn:hover {
     background: #4b5563;
 }
+
+/* Responsive adjustments for mobile */
+@media (max-width: 768px) {
+    .card-content {
+        height: auto;
+        flex-wrap: wrap;
+    }
+    .img-col {
+        width: 80px;
+        height: 80px;
+    }
+    .graph-col {
+        width: 100%;
+        flex: none;
+    }
+}
 </style>

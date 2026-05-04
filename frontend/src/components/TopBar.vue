@@ -507,6 +507,13 @@ const locationDisplay = computed(() => {
     border-bottom: 1px solid #374151;
     font-size: 0.9rem;
     gap: 1rem;
+    overflow-x: auto;
+    white-space: nowrap;
+    scrollbar-width: none; /* Firefox */
+}
+
+.top-bar::-webkit-scrollbar {
+    display: none; /* Chrome/Safari */
 }
 
 .tb-item {
@@ -547,6 +554,7 @@ const locationDisplay = computed(() => {
     min-width: 220px;
     border-radius: 0 0 4px 4px;
     box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    white-space: normal; /* Reset for dropdown content */
 }
 
 .dropdown-menu.right-aligned {

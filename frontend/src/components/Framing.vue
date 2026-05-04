@@ -663,4 +663,23 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
         transform: rotate(360deg);
     }
 }
+
+/* Responsive adjustments for mobile */
+@media (max-width: 768px) {
+    .framing-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+    }
+    .header-center {
+        flex-wrap: wrap;
+        justify-content: flex-start;
+    }
+    .header-right {
+        width: 100%;
+    }
+    .search-container {
+        width: 100%;
+    }
+}
 </style>

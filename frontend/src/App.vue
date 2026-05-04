@@ -415,6 +415,8 @@ body {
     justify-content: center;
     height: 100%;
     color: #6b7280;
+    text-align: center;
+    padding: 20px;
 }
 
 .sidebar {
@@ -453,5 +455,37 @@ body {
 
 .separator {
     color: #4b5563;
+}
+
+/* Responsive adjustments for mobile */
+@media (max-width: 768px) {
+    body {
+        overflow-y: auto;
+        height: auto;
+    }
+    .app-container {
+        height: auto;
+        min-height: 100vh;
+    }
+    .main-layout {
+        flex-direction: column;
+        overflow: visible;
+    }
+    .framing-section {
+        min-height: 50vh;
+        border-right: none;
+        border-bottom: 1px solid var(--border-color);
+    }
+    .filter-section {
+        border-right: none;
+        border-bottom: 1px solid var(--border-color);
+    }
+    .sidebar {
+        width: 100%;
+        height: auto;
+    }
+    .list-panel {
+        min-height: 50vh;
+    }
 }
 </style>
