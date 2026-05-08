@@ -285,50 +285,45 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
                 </span>
             </div>
             <div class="header-center">
-                <div class="group">
-                    <strong class="lbl">FOV</strong>
-                    <div class="stepper-col">
-                        <button class="stepper-btn" @click="localFov = parseFloat((localFov * 1.1).toFixed(2))">▲</button>
-                        <button class="stepper-btn" @click="localFov = parseFloat((localFov * 0.9).toFixed(2))">▼</button>
+                <div class="controls-col">
+                    <div class="group">
+                        <strong class="lbl">FOV</strong>
+                        <div class="stepper-col">
+                            <button class="stepper-btn" @click="localFov = parseFloat((localFov * 1.1).toFixed(2))">▲</button>
+                            <button class="stepper-btn" @click="localFov = parseFloat((localFov * 0.9).toFixed(2))">▼</button>
+                        </div>
+                        <input type="number" v-model.number="localFov" step="0.01" class="input-mini" />
                     </div>
-                    <input type="number" v-model.number="localFov" step="0.01" class="input-mini" />
+                    
+                    <div class="group">
+                        <strong class="lbl">ROT</strong>
+                        <div class="stepper-col">
+                            <button class="stepper-btn" @mousedown="startRotate(1)" @mouseup="stopRotate" @mouseleave="stopRotate">▲</button>
+                            <button class="stepper-btn" @mousedown="startRotate(-1)" @mouseup="stopRotate" @mouseleave="stopRotate">▼</button>
+                        </div>
+                        <input type="number" v-model.number="rotation" step="1" class="input-mini" />
+                    </div>
                 </div>
                 
-                <div class="group" style="margin-left: 10px; padding-left: 10px; border-left: 1px solid #4b5563;">
-                    <strong class="lbl">ROT</strong>
-                    <div class="stepper-col">
-                        <button class="stepper-btn" @mousedown="startRotate(1)" @mouseup="stopRotate" @mouseleave="stopRotate">▲</button>
-                        <button class="stepper-btn" @mousedown="startRotate(-1)" @mouseup="stopRotate" @mouseleave="stopRotate">▼</button>
-                    </div>
-                    <input type="number" v-model.number="rotation" step="1" class="input-mini" />
-                </div>
-                
-                <div class="group" style="margin-left: 10px; padding-left: 10px; border-left: 1px solid #4b5563;">
-                    <div class="action-col">
-                        <button class="outline mini primary-action full-w" 
-                            @click="resetFov" 
-                            :class="{ 'modified-warning': isFovModified }"
-                            title="Reset to setup FOV">Reset FOV</button>
-                        <button class="outline mini primary-action full-w" 
-                            @click="resetZoom" 
-                            :class="{ 'modified-warning': isZoomModified }"
-                            title="Reset image zoom">Reset Zoom</button>
-                    </div>
-                </div>
-
-                <div class="group" style="margin-left: 10px; padding-left: 10px; border-left: 1px solid #4b5563;">
-                    <div class="action-col">
-                        <button class="outline mini primary-action full-w" 
-                            @click="updateImage" 
-                            :disabled="isObjectDownloading" 
-                            :class="{ 'modified-warning': isModified }"
-                            title="Download new image with current center and FOV">
-                            {{ isObjectDownloading ? '...' : 'Update/Center Image' }}
-                        </button>
-                        <button class="outline mini primary-action full-w" @click="sendToNina" title="Send framing to N.I.N.A (Requires Advanced API plugin installed in N.I.N.A)">
-                            {{ ninaStatus || 'Send to NINA' }}
-                        </button>
-                    </div>
+                <div class="buttons-grid">
+                    <button class="outline mini primary-action full-w" 
+                        @click="resetFov" 
+                        :class="{ 'modified-warning': isFovModified }"
+                        title="Reset to setup FOV">Reset FOV</button>
+                    <button class="outline mini primary-action full-w" 
+                        @click="updateImage" 
+                        :disabled="isObjectDownloading" 
+                        :class="{ 'modified-warning': isModified }"
+                        title="Download new image with current center and FOV">
+                        {{ isObjectDownloading ? '...' : 'Update/Center Image' }}
+                    </button>
+                    <button class="outline mini primary-action full-w" 
+                        @click="resetZoom" 
+                        :class="{ 'modified-warning': isZoomModified }"
+                        title="Reset image zoom">Reset Zoom</button>
+                    <button class="outline mini primary-action full-w" @click="sendToNina" title="Send framing to N.I.N.A (Requires Advanced API plugin installed in N.I.N.A)">
+                        {{ ninaStatus || 'Send to NINA' }}
+                    </button>
                 </div>
             </div>
             <div class="header-right">
@@ -423,11 +418,29 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
     flex: 1;
 }
 
+.controls-col {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: flex-start;
+}
+
+.buttons-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-left: 15px;
+    padding-left: 15px;
+    border-left: 1px solid #4b5563;
+}
+
 .lbl {
     color: #9ca3af;
     font-size: 0.75rem;
     margin-right: 2px;
     text-transform: uppercase;
+    width: 28px;
+    display: inline-block;
 }
 
 .input-mini {
@@ -470,12 +483,6 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
     color: white;
 }
 
-.action-col {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-}
-
 .full-w {
     width: 100%;
 }
@@ -483,7 +490,7 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
 .mini {
     padding: 2px 8px;
     font-size: 0.8rem;
-    height: 22px;
+    height: 26px;
     line-height: 1;
     border: 1px solid #4b5563;
     background: transparent;
@@ -498,7 +505,6 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
 .primary-action {
     color: #10b981;
     border-color: #10b981;
-    margin-left: 5px;
     font-weight: bold;
     transition: all 0.2s;
 }
