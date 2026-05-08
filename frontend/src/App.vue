@@ -18,6 +18,10 @@ const isDownloading = ref(false);
 const downloadProgress = ref("");
 const searchQuery = ref("");
 
+// Mobile UI State
+const showMobileList = ref(false);
+const showMobileFilters = ref(false);
+
 // --- FOV STATE ---
 const activeFov = ref(1.0);
 const isManualFov = ref(false);
@@ -99,6 +103,10 @@ watch(selectedObject, (newVal, oldVal) => {
         activeFov.value = systemFov.value;
         if (newVal && (!newVal.image_url || newVal.status === 'pending')) {
             downloadImage(newVal);
+        }
+        // Auto-hide list on mobile when an object is selected
+        if (window.innerWidth <= 768) {
+            showMobileList.value = false;
         }
     }
 });
@@ -316,6 +324,16 @@ watch(clientSettings, () => { saveSettings({}); }, { deep: true });
             @stop-download="stopStream"
         />
 
+        <!-- Mobile Floating Action Buttons -->
+        <div class="mobile-fabs">
+            <button class="fab" @click="showMobileFilters = !showMobileFilters" title="Toggle Filters">
+                🏷️
+            </button>
+            <button class="fab" @click="showMobileList = !showMobileList" title="Toggle Target List">
+                📋
+            </button>
+        </div>
+
         <div class="main-layout">
             <section class="framing-section">
                 <div v-if="selectedObject" class="fill-height">
@@ -331,12 +349,12 @@ watch(clientSettings, () => { saveSettings({}); }, { deep: true });
                 </div>
             </section>
 
-            <section class="filter-section">
+            <section class="filter-section" :class="{ 'mobile-visible': showMobileFilters }">
                 <TypeFilter :availableTypes="availableTypes" :clientSettings="clientSettings"
                     @update-client-settings="Object.assign(clientSettings, $event)" />
             </section>
 
-            <aside class="sidebar">
+            <aside class="sidebar" :class="{ 'mobile-visible': showMobileList }">
                 <div class="graph-panel">
                     <AltitudeGraph :object="selectedObject" :location="settings.location" :nightTimes="nightTimes" />
                 </div>
@@ -390,6 +408,7 @@ body {
     display: flex;
     flex: 1;
     overflow: hidden;
+    position: relative;
 }
 
 .framing-section {
@@ -402,6 +421,8 @@ body {
 .filter-section {
     width: auto;
     border-right: 1px solid var(--border-color);
+    background: var(--bg-color);
+    z-index: 10;
 }
 
 .fill-height {
@@ -424,6 +445,8 @@ body {
     display: flex;
     flex-direction: column;
     flex-shrink: 0;
+    background: var(--bg-color);
+    z-index: 10;
 }
 
 .graph-panel {
@@ -446,6 +469,7 @@ body {
     padding: 0 10px;
     font-size: 0.8rem;
     color: #9ca3af;
+    z-index: 2000;
 }
 
 .footer-content {
@@ -457,35 +481,83 @@ body {
     color: #4b5563;
 }
 
+.mobile-fabs {
+    display: none;
+}
+
 /* Responsive adjustments for mobile */
 @media (max-width: 768px) {
     body {
-        overflow-y: auto;
-        height: auto;
+        overflow: hidden;
     }
-    .app-container {
-        height: auto;
-        min-height: 100vh;
-    }
-    .main-layout {
+    
+    .mobile-fabs {
+        display: flex;
+        position: fixed;
+        bottom: 40px;
+        right: 10px;
         flex-direction: column;
-        overflow: visible;
+        gap: 10px;
+        z-index: 3000;
     }
+
+    .fab {
+        width: 45px;
+        height: 45px;
+        border-radius: 50%;
+        background: #10b981;
+        color: white;
+        border: none;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        font-size: 1.2rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+    }
+
+    .main-layout {
+        flex-direction: row;
+    }
+
     .framing-section {
-        min-height: 50vh;
         border-right: none;
-        border-bottom: 1px solid var(--border-color);
-    }
-    .filter-section {
-        border-right: none;
-        border-bottom: 1px solid var(--border-color);
-    }
-    .sidebar {
         width: 100%;
-        height: auto;
     }
-    .list-panel {
-        min-height: 50vh;
+
+    .filter-section {
+        position: absolute;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        transform: translateX(-100%);
+        transition: transform 0.3s ease;
+        box-shadow: 2px 0 5px rgba(0,0,0,0.5);
+    }
+
+    .filter-section.mobile-visible {
+        transform: translateX(0);
+    }
+
+    .sidebar {
+        position: absolute;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: 85%;
+        max-width: 350px;
+        transform: translateX(100%);
+        transition: transform 0.3s ease;
+        background: rgba(17, 24, 39, 0.95); /* Semi-transparent overlay */
+        box-shadow: -2px 0 5px rgba(0,0,0,0.5);
+    }
+
+    .sidebar.mobile-visible {
+        transform: translateX(0);
+    }
+
+    .graph-panel {
+        height: 150px;
     }
 }
 </style>

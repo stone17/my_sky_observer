@@ -536,8 +536,9 @@ const locationDisplay = computed(() => {
 
 <style scoped>
 .top-bar {
-    position: relative;
-    z-index: 1000;
+    position: sticky;
+    top: 0;
+    z-index: 2000;
     display: flex;
     align-items: center;
     background: #1f2937;
