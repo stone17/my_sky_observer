@@ -105,7 +105,7 @@ watch(selectedObject, (newVal, oldVal) => {
             downloadImage(newVal);
         }
         // Auto-hide list on mobile when an object is selected
-        if (window.innerWidth <= 768) {
+        if (window.innerWidth <= 1024) {
             showMobileList.value = false;
         }
     }
@@ -485,8 +485,8 @@ body {
     display: none;
 }
 
-/* Responsive adjustments for mobile */
-@media (max-width: 768px) {
+/* Responsive adjustments for mobile and tablets */
+@media (max-width: 1024px) {
     body {
         overflow: hidden;
     }
@@ -518,21 +518,24 @@ body {
 
     .main-layout {
         flex-direction: row;
+        position: relative;
     }
 
     .framing-section {
         border-right: none;
         width: 100%;
+        flex: 1 1 100%;
     }
 
     .filter-section {
-        position: absolute;
+        position: absolute !important;
         top: 0;
         left: 0;
         bottom: 0;
         transform: translateX(-100%);
         transition: transform 0.3s ease;
         box-shadow: 2px 0 5px rgba(0,0,0,0.5);
+        z-index: 2000;
     }
 
     .filter-section.mobile-visible {
@@ -540,7 +543,7 @@ body {
     }
 
     .sidebar {
-        position: absolute;
+        position: absolute !important;
         top: 0;
         right: 0;
         bottom: 0;
@@ -550,6 +553,7 @@ body {
         transition: transform 0.3s ease;
         background: rgba(17, 24, 39, 0.95); /* Semi-transparent overlay */
         box-shadow: -2px 0 5px rgba(0,0,0,0.5);
+        z-index: 2000;
     }
 
     .sidebar.mobile-visible {
