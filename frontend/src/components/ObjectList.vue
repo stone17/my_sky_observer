@@ -191,8 +191,12 @@ watch(filteredAndSortedObjects, (newList) => {
         if (!currentStillExists) {
             handleObjectClick(newList[0]);
         }
+    } else {
+        if (props.selectedId) {
+            emit('select', null);
+        }
     }
-});
+}, { immediate: true });
 
 const onScroll = (e) => {
     const { scrollTop, scrollHeight, clientHeight } = e.target;
@@ -205,6 +209,7 @@ const onScroll = (e) => {
 
 const handleObjectClick = async (item) => {
     emit('select', item);
+    if (!item) return;
 
     // If the object doesn't have its heavy details loaded yet (e.g. scrolled past top 500)
     if (!item.altitude_graph) {

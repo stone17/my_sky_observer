@@ -214,12 +214,17 @@ const startStream = (mode = 'selected') => {
             const newObjects = JSON.parse(e.data);
             const currentId = selectedObject.value?.name;
             objects.value = newObjects;
+            
+            // If we had an object selected, verify it still exists in the raw list
             if (currentId) {
                 const found = objects.value.find(o => o.name === currentId);
-                if (found) selectedObject.value = found;
-            } else if (objects.value.length > 0 && !selectedObject.value) {
-                selectedObject.value = objects.value[0];
+                if (found) {
+                    selectedObject.value = found;
+                } else {
+                    selectedObject.value = null;
+                }
             }
+            
             streamStatus.value = `Loaded ${newObjects.length} objects.`;
         } catch (err) { }
     });

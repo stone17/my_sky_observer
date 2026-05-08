@@ -513,7 +513,7 @@ const locationDisplay = computed(() => {
 
         <div class="tb-item relative push-right">
             <button class="tb-btn" @click="toggleDropdown('cache')" title="Cache">
-                <span class="mobile-icon">💾</span>
+                <span class="mobile-icon">🗑️</span>
                 <span class="desktop-text">Cache: {{ cacheStatus.size_mb }} MB ▼</span>
             </button>
             <div class="dropdown-menu right-aligned" v-if="activeDropdown === 'cache'">
