@@ -454,6 +454,7 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
     border-radius: 2px;
     height: 36px;
     box-sizing: border-box;
+    margin: 0;
 }
 
 .stepper-col {
@@ -461,6 +462,8 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
     flex-direction: column;
     gap: 2px;
     margin-right: 4px;
+    height: 36px;
+    justify-content: center;
 }
 
 .stepper-btn {
@@ -476,6 +479,8 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
     justify-content: center;
     cursor: pointer;
     padding: 0;
+    margin: 0;
+    box-sizing: border-box;
 }
 
 .stepper-btn:hover {
@@ -565,8 +570,9 @@ onUnmounted(() => { if (resizeObserver) resizeObserver.disconnect(); });
 
 .group {
     display: flex;
-    gap: 2px;
+    gap: 4px;
     align-items: center;
+    height: 36px;
 }
 
 .framing-viewport {
