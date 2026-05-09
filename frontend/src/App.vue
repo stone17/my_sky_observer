@@ -17,6 +17,7 @@ const nightTimes = ref({});
 const isDownloading = ref(false);
 const downloadProgress = ref("");
 const searchQuery = ref("");
+const isLoading = ref(false);
 
 // Mobile UI State
 const showMobileList = ref(false);
@@ -153,6 +154,8 @@ const saveSettings = (newSettings) => {
 const startStream = (mode = 'selected') => {
     if (eventSource) eventSource.close();
     streamStatus.value = 'Connecting...';
+    isLoading.value = true;
+    
     if (mode === 'filtered' || mode === 'all') {
         isDownloading.value = true;
         downloadProgress.value = "Starting...";
@@ -226,6 +229,7 @@ const startStream = (mode = 'selected') => {
             }
             
             streamStatus.value = `Loaded ${newObjects.length} objects.`;
+            isLoading.value = false;
         } catch (err) { }
     });
 
@@ -252,12 +256,12 @@ const startStream = (mode = 'selected') => {
         }
     });
 
-    eventSource.addEventListener('close', () => { streamStatus.value = 'Stream Complete'; isDownloading.value = false; eventSource.close(); });
-    eventSource.addEventListener('error', () => { streamStatus.value = 'Error/Disconnected'; isDownloading.value = false; eventSource?.close(); });
+    eventSource.addEventListener('close', () => { streamStatus.value = 'Stream Complete'; isDownloading.value = false; isLoading.value = false; eventSource.close(); });
+    eventSource.addEventListener('error', () => { streamStatus.value = 'Error/Disconnected'; isDownloading.value = false; isLoading.value = false; eventSource?.close(); });
 };
 
 const stopStream = () => {
-    if (eventSource) { eventSource.close(); eventSource = null; streamStatus.value = 'Stopped'; isDownloading.value = false; }
+    if (eventSource) { eventSource.close(); eventSource = null; streamStatus.value = 'Stopped'; isDownloading.value = false; isLoading.value = false; }
 };
 
 const handlePurge = () => { objects.value = []; selectedObject.value = null; startStream('selected'); };
@@ -347,6 +351,11 @@ watch(clientSettings, () => { saveSettings({}); }, { deep: true });
                         @update-fov="handleFovUpdate" @update-search="searchQuery = $event"
                         @select-object="selectedObject = $event" @update-settings="saveSettings"
                         @update-client-settings="Object.assign(clientSettings, $event)" />
+                </div>
+                <div v-else-if="isLoading" class="empty-state">
+                    <div class="spinner"></div>
+                    <h2>Loading Targets...</h2>
+                    <p>Calculating visibility and altitudes, please wait.</p>
                 </div>
                 <div v-else class="empty-state">
                     <h2>Select an object to view</h2>
@@ -443,6 +452,21 @@ body {
     color: #6b7280;
     text-align: center;
     padding: 20px;
+}
+
+.spinner {
+    border: 4px solid rgba(255, 255, 255, 0.1);
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border-left-color: #10b981;
+    animation: spin 1s linear infinite;
+    margin-bottom: 15px;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
 }
 
 .sidebar {
