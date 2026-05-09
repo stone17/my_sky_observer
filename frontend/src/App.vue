@@ -331,10 +331,10 @@ watch(clientSettings, () => { saveSettings({}); }, { deep: true });
 
         <!-- Mobile Floating Action Buttons -->
         <div class="mobile-fabs">
-            <button class="fab" @click="showMobileFilters = !showMobileFilters" title="Toggle Filters">
+            <button class="fab" type="button" @click="showMobileFilters = !showMobileFilters" title="Toggle Filters" aria-label="Toggle Filters">
                 🏷️
             </button>
-            <button class="fab" @click="showMobileList = !showMobileList" title="Toggle Target List">
+            <button class="fab" type="button" @click="showMobileList = !showMobileList" title="Toggle Target List" aria-label="Toggle Target List">
                 📋
             </button>
         </div>
