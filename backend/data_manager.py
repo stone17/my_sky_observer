@@ -119,7 +119,7 @@ class CatalogManager:
         final_df = pd.concat(all_dfs, ignore_index=True)
         
         # 1. Intra-catalog deduplication (e.g. M 51 is listed twice in messier.csv)
-        final_df = final_df.drop_duplicates(subset=['id'], keep='first')
+        # We will skip dropping them here so we can aggregate their aliases in step 2
         
         # 2. Cross-catalog deduplication based on coordinates (rounded to 3 decimal places ~ 3.6 arcsec)
         final_df['ra_round'] = final_df['ra'].round(3)
@@ -127,10 +127,37 @@ class CatalogManager:
         
         # Sort so that entries with a valid common name appear first
         final_df['has_name'] = final_df['name'] != 'N/A'
-        final_df = final_df.sort_values(by='has_name', ascending=False)
+        final_df = final_df.sort_values(by=['has_name', 'id'], ascending=[False, True])
         
+        # Aggregate aliases before dropping duplicates
+        final_df['all_ids'] = final_df['id'].astype(str) + ',' + final_df['name'].astype(str) + ',' + final_df['other_id'].astype(str)
+        agg_df = final_df.groupby(['ra_round', 'dec_round'])['all_ids'].apply(lambda x: ','.join(x.dropna())).reset_index()
+        
+        # Now drop the duplicates keeping the best one
         final_df = final_df.drop_duplicates(subset=['ra_round', 'dec_round'], keep='first')
-        final_df = final_df.drop(columns=['ra_round', 'dec_round', 'has_name'])
+        
+        # Merge the aggregated aliases back
+        final_df = final_df.merge(agg_df, on=['ra_round', 'dec_round'], suffixes=('', '_agg'))
+        
+        def clean_aliases(row):
+            parts = str(row['all_ids_agg']).split(',')
+            aliases = set()
+            for p in parts:
+                p_clean = p.strip()
+                if p_clean and p_clean.lower() not in ('n/a', 'nan'):
+                    aliases.add(p_clean)
+            
+            # Remove the primary id and name from the aliases list
+            if str(row['id']).strip() in aliases: 
+                aliases.remove(str(row['id']).strip())
+            if str(row['name']).strip() in aliases: 
+                aliases.remove(str(row['name']).strip())
+            return ", ".join(sorted(list(aliases)))
+            
+        final_df['aliases'] = final_df.apply(clean_aliases, axis=1)
+        
+        # Clean up temporary columns
+        final_df = final_df.drop(columns=['ra_round', 'dec_round', 'has_name', 'all_ids', 'all_ids_agg'])
 
         print(f"-> Concatenation & Deduplication complete. Total unique objects: {len(final_df)}")
         print("--- Finished merging catalogs ---\n")

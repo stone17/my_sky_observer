@@ -336,6 +336,7 @@ class StreamSession:
                     "type": obj.get("type", ""),
                     "constellation": obj.get("constellation", ""),
                     "other_id": obj.get("other_id", ""),
+                    "aliases": obj.get("aliases", ""),
                     "ra": obj["ra"],
                     "dec": obj["dec"],
                     "mag": mag,
@@ -570,12 +571,38 @@ class StreamSession:
 # --- API Endpoints ---
 @app.get("/api/settings")
 def get_settings():
-    return JSONResponse(content=load_settings())
+    settings = load_settings()
+    # Strip catalogs from profiles so they don't overwrite global settings when loaded
+    if "profiles" in settings:
+        for p in settings["profiles"].values():
+            if "catalogs" in p:
+                del p["catalogs"]
+    return JSONResponse(content=settings)
 
 
 @app.post("/api/settings")
 async def set_settings(request: Request):
-    save_settings(await request.json())
+    data = await request.json()
+    
+    # Ensure catalogs is a list, in case the frontend sends it as a comma-separated string
+    if "catalogs" in data and isinstance(data["catalogs"], str):
+        data["catalogs"] = [c.strip() for c in data["catalogs"].split(",") if c.strip()]
+        
+    # Merge with existing settings to prevent dropping other fields
+    current_settings = load_settings()
+    for k, v in data.items():
+        if isinstance(v, dict) and k in current_settings and isinstance(current_settings[k], dict):
+            current_settings[k].update(v)
+        else:
+            current_settings[k] = v
+            
+    # Strip catalogs from profiles before saving, just to be absolutely sure
+    if "profiles" in current_settings:
+        for p in current_settings["profiles"].values():
+            if "catalogs" in p:
+                del p["catalogs"]
+                
+    save_settings(current_settings)
     return {"status": "ok"}
 
 
@@ -713,7 +740,7 @@ async def get_object_details(obj_id: str):
         )
     )
     session_start, session_end = calculator.get_observing_session(observer, Time.now())
-    twilight = calculator.get_twilight_times(observer, session_start)
+    twilight = calculator.get_twilight_periods(location, session_start)
 
     alt_data = await asyncio.to_thread(
         calculator.get_altitude_graph,
@@ -734,6 +761,7 @@ async def get_object_details(obj_id: str):
 
     detail = {
         "name": obj_id,
+        "aliases": obj.get("aliases", ""),
         "image_url": url if is_cached else "",
         "altitude_graph": [p.model_dump() for p in alt_data["target"]],
         "moon_graph": [p.model_dump() for p in alt_data["moon"]],
@@ -755,12 +783,19 @@ def get_catalogs():
 
 @app.get("/api/profiles")
 def get_profiles():
-    return load_settings().get("profiles", {})
+    settings = load_settings()
+    profiles = settings.get("profiles", {})
+    for p in profiles.values():
+        if "catalogs" in p:
+            del p["catalogs"]
+    return profiles
 
 
 @app.post("/api/profiles/{name}")
 async def save_profile(name: str, request: Request):
     data = await request.json()
+    if "catalogs" in data:
+        del data["catalogs"]
     settings = load_settings()
     settings["profiles"][name] = data
     save_settings(settings)
