@@ -86,10 +86,11 @@ const filteredAndSortedObjects = computed(() => {
             o._normId = (o.name || '').toLowerCase().replace(/\s+/g, '');
             o._normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
             o._normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
+            o._normAliases = (o.aliases || '').toLowerCase().replace(/\s+/g, '');
         }
 
         if (normQ) {
-            if (o._normId.includes(normQ) || o._normCommon.includes(normQ) || o._normOther.includes(normQ)) {
+            if (o._normId.includes(normQ) || o._normCommon.includes(normQ) || o._normOther.includes(normQ) || o._normAliases.includes(normQ)) {
                 o._dynamicHours = o.hours_visible || 0;
                 result.push(o);
             }
@@ -390,6 +391,7 @@ onUnmounted(() => {
             <div class="modal-content" @click.stop>
                 <h3>{{ infoObject?.common_name && infoObject?.common_name !== 'N/A' ? infoObject.common_name : infoObject?.name }}</h3>
                 <p v-if="infoObject?.common_name && infoObject?.common_name !== 'N/A'"><strong>Catalog Name:</strong> {{ infoObject.name }}</p>
+                <p v-if="infoObject?.aliases"><strong>Aliases:</strong> {{ infoObject.aliases }}</p>
                 <p><strong>RA/DEC:</strong> {{ typeof infoObject?.ra === 'number' ? infoObject.ra.toFixed(3) : infoObject?.ra }} / {{ typeof infoObject?.dec === 'number' ? infoObject.dec.toFixed(3) : infoObject?.dec }}</p>
                 <p><strong>Type:</strong> {{ infoObject?.type }}</p>
                 <p><strong>Constellation:</strong> {{ infoObject?.constellation }}</p>

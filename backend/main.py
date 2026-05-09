@@ -336,6 +336,7 @@ class StreamSession:
                     "type": obj.get("type", ""),
                     "constellation": obj.get("constellation", ""),
                     "other_id": obj.get("other_id", ""),
+                    "aliases": obj.get("aliases", ""),
                     "ra": obj["ra"],
                     "dec": obj["dec"],
                     "mag": mag,
@@ -734,6 +735,7 @@ async def get_object_details(obj_id: str):
 
     detail = {
         "name": obj_id,
+        "aliases": obj.get("aliases", ""),
         "image_url": url if is_cached else "",
         "altitude_graph": [p.model_dump() for p in alt_data["target"]],
         "moon_graph": [p.model_dump() for p in alt_data["moon"]],
