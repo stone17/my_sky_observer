@@ -89,74 +89,86 @@ const filteredAndSortedObjects = computed(() => {
             o._normAliases = (o.aliases || '').toLowerCase().replace(/\s+/g, '');
         }
 
+        let isMatch = false;
         if (normQ) {
             if (o._normId.includes(normQ) || o._normCommon.includes(normQ) || o._normOther.includes(normQ) || o._normAliases.includes(normQ)) {
-                o._dynamicHours = o.hours_visible || 0;
-                result.push(o);
-            }
-            continue;
-        }
-
-        if (activeHrs) {
-            const isNaHrs = o.hours_visible === undefined || o.hours_visible === null;
-            if (isNaHrs) {
-                if (!naHrs) continue;
-            } else {
-                if (minHrs > 0 && o.hours_visible < minHrs) continue;
+                isMatch = true;
             }
         }
 
-        if (activeAlt) {
-            const isNaAlt = o.max_altitude === undefined || o.max_altitude === null;
-            if (isNaAlt) {
-                if (!naAlt) continue;
-            } else {
-                if (minAlt > 0 && o.max_altitude < minAlt) continue;
+        // If it's not a search match, apply normal filters. 
+        // (Search matches bypass filters so you can always find what you search for)
+        if (!isMatch) {
+            if (activeHrs) {
+                const isNaHrs = o.hours_visible === undefined || o.hours_visible === null;
+                if (isNaHrs) {
+                    if (!naHrs) continue;
+                } else {
+                    if (minHrs > 0 && o.hours_visible < minHrs) continue;
+                }
             }
-        }
 
-        if (activeMag) {
-            const isNaMag = o.mag === undefined || o.mag === null || o.mag >= 99;
-            if (isNaMag) {
-                if (!naMag) continue;
-            } else {
-                if (maxMag !== undefined && o.mag > maxMag) continue;
+            if (activeAlt) {
+                const isNaAlt = o.max_altitude === undefined || o.max_altitude === null;
+                if (isNaAlt) {
+                    if (!naAlt) continue;
+                } else {
+                    if (minAlt > 0 && o.max_altitude < minAlt) continue;
+                }
             }
-        }
 
-        if (activeSize) {
-            const isNaSize = o.maj_ax === undefined || o.maj_ax === null || o.maj_ax === 0;
-            if (isNaSize) {
-                if (!naSize) continue;
-            } else {
-                if (minSize > 0 && o.maj_ax < minSize) continue;
+            if (activeMag) {
+                const isNaMag = o.mag === undefined || o.mag === null || o.mag >= 99;
+                if (isNaMag) {
+                    if (!naMag) continue;
+                } else {
+                    if (maxMag !== undefined && o.mag > maxMag) continue;
+                }
             }
-        }
 
-        const selectedTypes = localClientSettings.value.selected_types || [];
-        if (selectedTypes.length > 0 && !selectedTypes.includes(o.type)) continue;
+            if (activeSize) {
+                const isNaSize = o.maj_ax === undefined || o.maj_ax === null || o.maj_ax === 0;
+                if (isNaSize) {
+                    if (!naSize) continue;
+                } else {
+                    if (minSize > 0 && o.maj_ax < minSize) continue;
+                }
+            }
+
+            const selectedTypes = localClientSettings.value.selected_types || [];
+            if (selectedTypes.length > 0 && !selectedTypes.includes(o.type)) continue;
+        }
 
         o._dynamicHours = o.hours_visible || 0;
+        o._isSearchMatch = isMatch;
         result.push(o);
     }
 
     result.sort((a, b) => {
+        // Always put search matches at the very top
         if (normQ) {
-            const normA = a._normId;
-            const normB = b._normId;
+            if (a._isSearchMatch && !b._isSearchMatch) return -1;
+            if (!a._isSearchMatch && b._isSearchMatch) return 1;
 
-            if (normA === normQ && normB !== normQ) return -1;
-            if (normB === normQ && normA !== normQ) return 1;
+            // If both are search matches, sort them by relevance
+            if (a._isSearchMatch && b._isSearchMatch) {
+                const normA = a._normId;
+                const normB = b._normId;
 
-            const aStarts = normA.startsWith(normQ);
-            const bStarts = normB.startsWith(normQ);
-            if (aStarts && !bStarts) return -1;
-            if (bStarts && !aStarts) return 1;
+                if (normA === normQ && normB !== normQ) return -1;
+                if (normB === normQ && normA !== normQ) return 1;
 
-            if (normA.length !== normB.length) return normA.length - normB.length;
-            return normA.localeCompare(normB);
+                const aStarts = normA.startsWith(normQ);
+                const bStarts = normB.startsWith(normQ);
+                if (aStarts && !bStarts) return -1;
+                if (bStarts && !aStarts) return 1;
+
+                if (normA.length !== normB.length) return normA.length - normB.length;
+                return normA.localeCompare(normB);
+            }
         }
 
+        // Normal sorting for non-matches (or if no search query)
         let valA, valB, dir = -1;
 
         if (sortKey === 'time' || sortKey === 'altitude') {
@@ -327,7 +339,7 @@ onUnmounted(() => {
 
             <div class="scrollable-list" @scroll="onScroll">
                 <div v-for="item in displayedObjects" :key="item.name" :id="`obj-card-${item.name}`"
-                    class="object-card" :class="{ active: selectedId === item.name }" @click="handleObjectClick(item)">
+                    class="object-card" :class="{ active: selectedId === item.name, 'search-match': item._isSearchMatch }" @click="handleObjectClick(item)">
                     <div class="card-content">
                         <div class="info-col">
                             <div style="display: flex; align-items: center; gap: 5px; width: 100%;">
@@ -533,6 +545,10 @@ onUnmounted(() => {
 .object-card.active {
     border-color: #10b981;
     background: #1f2937;
+}
+
+.object-card.search-match {
+    border-left: 3px solid #60a5fa;
 }
 
 .card-content {
