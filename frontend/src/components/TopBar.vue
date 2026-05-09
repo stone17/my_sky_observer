@@ -545,7 +545,7 @@ const locationDisplay = computed(() => {
 .top-bar {
     position: sticky;
     top: 0;
-    z-index: 2000;
+    z-index: 2100;
     display: flex;
     align-items: center;
     background: #1f2937;
