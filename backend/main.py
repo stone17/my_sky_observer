@@ -571,7 +571,13 @@ class StreamSession:
 # --- API Endpoints ---
 @app.get("/api/settings")
 def get_settings():
-    return JSONResponse(content=load_settings())
+    settings = load_settings()
+    # Strip catalogs from profiles so they don't overwrite global settings when loaded
+    if "profiles" in settings:
+        for p in settings["profiles"].values():
+            if "catalogs" in p:
+                del p["catalogs"]
+    return JSONResponse(content=settings)
 
 
 @app.post("/api/settings")
@@ -590,6 +596,12 @@ async def set_settings(request: Request):
         else:
             current_settings[k] = v
             
+    # Strip catalogs from profiles before saving, just to be absolutely sure
+    if "profiles" in current_settings:
+        for p in current_settings["profiles"].values():
+            if "catalogs" in p:
+                del p["catalogs"]
+                
     save_settings(current_settings)
     return {"status": "ok"}
 
@@ -771,12 +783,19 @@ def get_catalogs():
 
 @app.get("/api/profiles")
 def get_profiles():
-    return load_settings().get("profiles", {})
+    settings = load_settings()
+    profiles = settings.get("profiles", {})
+    for p in profiles.values():
+        if "catalogs" in p:
+            del p["catalogs"]
+    return profiles
 
 
 @app.post("/api/profiles/{name}")
 async def save_profile(name: str, request: Request):
     data = await request.json()
+    if "catalogs" in data:
+        del data["catalogs"]
     settings = load_settings()
     settings["profiles"][name] = data
     save_settings(settings)
