@@ -576,7 +576,21 @@ def get_settings():
 
 @app.post("/api/settings")
 async def set_settings(request: Request):
-    save_settings(await request.json())
+    data = await request.json()
+    
+    # Ensure catalogs is a list, in case the frontend sends it as a comma-separated string
+    if "catalogs" in data and isinstance(data["catalogs"], str):
+        data["catalogs"] = [c.strip() for c in data["catalogs"].split(",") if c.strip()]
+        
+    # Merge with existing settings to prevent dropping other fields
+    current_settings = load_settings()
+    for k, v in data.items():
+        if isinstance(v, dict) and k in current_settings and isinstance(current_settings[k], dict):
+            current_settings[k].update(v)
+        else:
+            current_settings[k] = v
+            
+    save_settings(current_settings)
     return {"status": "ok"}
 
 
@@ -714,7 +728,7 @@ async def get_object_details(obj_id: str):
         )
     )
     session_start, session_end = calculator.get_observing_session(observer, Time.now())
-    twilight = calculator.get_twilight_times(observer, session_start)
+    twilight = calculator.get_twilight_periods(location, session_start)
 
     alt_data = await asyncio.to_thread(
         calculator.get_altitude_graph,
