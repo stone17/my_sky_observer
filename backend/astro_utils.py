@@ -1,6 +1,7 @@
 import math
 import pandas as pd
 import re
+import warnings
 from typing import Tuple, List, Dict, Optional
 import astropy.units as u
 from astropy.time import Time
@@ -37,26 +38,33 @@ class AstroCalculator:
         If currently day, returns (next_sunset, next_sunrise).
         """
         try:
-            next_sunrise = observer.sun_rise_time(now, which='next')
-            next_sunset = observer.sun_set_time(now, which='next')
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                next_sunrise = observer.sun_rise_time(now, which='next')
+                next_sunset = observer.sun_set_time(now, which='next')
 
-            if next_sunrise < next_sunset:
-                # We are currently in the night (or early morning)
-                start_time = observer.sun_set_time(now, which='previous')
-                end_time = next_sunrise
-            else:
-                # We are in the day, preparing for tonight
-                start_time = next_sunset
-                end_time = observer.sun_rise_time(start_time, which='next')
+                if hasattr(next_sunrise, 'masked') and next_sunrise.masked:
+                    raise ValueError("Sun does not rise")
+                if hasattr(next_sunset, 'masked') and next_sunset.masked:
+                    raise ValueError("Sun does not set")
+
+                if next_sunrise < next_sunset:
+                    # We are currently in the night (or early morning)
+                    start_time = observer.sun_set_time(now, which='previous')
+                    end_time = next_sunrise
+                else:
+                    # We are in the day, preparing for tonight
+                    start_time = next_sunset
+                    end_time = observer.sun_rise_time(start_time, which='next')
+                    
+                # Add a small buffer (e.g. +/- 30 mins) to show context
+                start_time = start_time - 0.5 * u.hour
+                end_time = end_time + 0.5 * u.hour
                 
-            # Add a small buffer (e.g. +/- 30 mins) to show context
-            start_time = start_time - 0.5 * u.hour
-            end_time = end_time + 0.5 * u.hour
-            
-            return start_time, end_time
+                return start_time, end_time
         except Exception as e:
-            print(f"Error calculating session times: {e}")
-            return now, now + 24 * u.hour
+            # If sun doesn't set/rise, just return a 24h window centered on now
+            return now - 12 * u.hour, now + 12 * u.hour
 
     def get_max_altitude(self, dec: float, latitude: float) -> float:
         """Calculates an object's maximum possible altitude. Very fast."""
@@ -159,7 +167,16 @@ class AstroCalculator:
             print(f"Error calculating moon altitude: {e}")
             moon_points = []
 
-        return {"target": target_points, "moon": moon_points}
+        # Sun Altitudes
+        try:
+            sun_coords = get_sun(times)
+            sun_altaz = sun_coords.transform_to(altaz_frame)
+            sun_points = [AltitudePoint(time=t.isot + 'Z', altitude=round(alt.deg, 2)) for t, alt in zip(times, sun_altaz.alt)]
+        except Exception as e:
+            print(f"Error calculating sun altitude: {e}")
+            sun_points = []
+
+        return {"target": target_points, "moon": moon_points, "sun": sun_points}
 
 
     def prepare_night_frame(self, location: Location, night_start: Time, night_end: Time) -> Optional[Tuple[AltAz, float]]:
@@ -285,73 +302,101 @@ class AstroCalculator:
         """Calculates twilight periods for the 24 hours starting from base_time (or now)."""
         observer = Observer(location=EarthLocation(lat=location.latitude*u.deg, lon=location.longitude*u.deg))
         now = base_time if base_time else Time.now()
-        
-        # If we are given a start time (e.g. sunset - 30m), we want to find events relative to THAT.
-        # However, astroplan's 'next'/'previous' are relative to the time passed.
-        # If we pass the start of the night, 'next sunset' might be the following day.
-        # We want the events *within* the session.
-        
-        # Strategy: Use the provided time as the anchor.
-        # But wait, if base_time is "sunset - 30m", then "next sunset" is ~24h away.
-        # We want the sunset that is close to base_time.
-        
-        # Actually, for the graph visualization, we just want the events that happen to fall within the graph's range.
-        # But the frontend expects a dictionary of "civil", "nautical", etc.
-        # Let's stick to the standard logic but ensure we are looking at the *relevant* night.
-        
-        # If base_time is provided, it's likely the start of our graph (approx sunset).
-        # So we should look for events starting from there.
-        
         end_time = now + 24*u.hour
         
         periods = {}
-        try:
-            # We want the sunset/sunrise that define this night.
-            # If 'now' is the start of the session (evening), then:
-            sunset = observer.sun_set_time(now, which='next')
-            # If now is slightly *after* sunset (due to padding), 'next' sunset is tomorrow.
-            # We need to be careful.
-            
-            # Let's try to find the sunset closest to 'now'.
-            prev_sunset = observer.sun_set_time(now, which='previous')
-            next_sunset = observer.sun_set_time(now, which='next')
-            
-            if abs((now - prev_sunset).value) < abs((now - next_sunset).value):
-                sunset = prev_sunset
-            else:
-                sunset = next_sunset
+        
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                # 1. Find Sunset and Sunrise
+                sunset = observer.sun_set_time(now, which='nearest')
+                if hasattr(sunset, 'masked') and sunset.masked:
+                    sunset = now
                 
-            sunrise = observer.sun_rise_time(sunset, which='next')
-            
-            # Now calculate twilights relative to this sunset/sunrise
-            eve_civil = observer.twilight_evening_civil(sunset, which='next')
-            eve_nautical = observer.twilight_evening_nautical(sunset, which='next')
-            eve_astro = observer.twilight_evening_astronomical(sunset, which='next')
-            
-            morn_astro = observer.twilight_morning_astronomical(sunrise, which='previous')
-            morn_nautical = observer.twilight_morning_nautical(sunrise, which='previous')
-            morn_civil = observer.twilight_morning_civil(sunrise, which='previous')
-            
-            # Construct periods
-            periods["day"] = [now.isot, sunset.isot] if sunset > now else None # Rough approx for start of graph
-            
-            # Helper to safely add period if valid
-            def add_p(name, start, end):
-                if start < end: periods[name] = [start.isot + 'Z', end.isot + 'Z']
+                sunrise = observer.sun_rise_time(sunset, which='next')
+                if hasattr(sunrise, 'masked') and sunrise.masked:
+                    sun_alt = get_sun(now).transform_to(AltAz(location=observer.location, obstime=now)).alt.deg
+                    if sun_alt > 0: return {"day": [now.isot + 'Z', end_time.isot + 'Z']}
+                    elif sun_alt > -6: return {"civil": [now.isot + 'Z', end_time.isot + 'Z']}
+                    elif sun_alt > -12: return {"nautical": [now.isot + 'Z', end_time.isot + 'Z']}
+                    elif sun_alt > -18: return {"astronomical": [now.isot + 'Z', end_time.isot + 'Z']}
+                    else: return {"night": [now.isot + 'Z', end_time.isot + 'Z']}
 
-            add_p("civil", sunset, eve_civil)
-            add_p("nautical", eve_civil, eve_nautical)
-            add_p("astronomical", eve_nautical, eve_astro)
-            add_p("night", eve_astro, morn_astro)
-            add_p("astronomical_morn", morn_astro, morn_nautical)
-            add_p("nautical_morn", morn_nautical, morn_civil)
-            add_p("civil_morn", morn_civil, sunrise)
-            
-            return periods
-        except Exception as e:
-            # print(f"Error calculating twilight: {e}")
-            sun_alt = get_sun(now).transform_to(AltAz(location=observer.location, obstime=now)).alt
-            return {"day": [now.isot, end_time.isot]} if sun_alt > -18*u.deg else {"night": [now.isot, end_time.isot]}
+                if sunrise < sunset:
+                    sunset = observer.sun_set_time(now, which='previous')
+                    sunrise = observer.sun_rise_time(sunset, which='next')
+
+                # 2. Calculate Twilights using 'next' from sunset and 'previous' from sunrise
+                def get_t(func, ref_time, which):
+                    try:
+                        t = func(ref_time, which=which)
+                        if hasattr(t, 'masked') and t.masked: return None
+                        if hasattr(t, 'jd') and np.isnan(t.jd): return None
+                        # Ensure the twilight event actually happens within the current night bounds
+                        if which == 'next' and t > sunrise: return None
+                        if which == 'previous' and t < sunset: return None
+                        return t
+                    except Exception:
+                        return None
+
+                eve_civil = get_t(observer.twilight_evening_civil, sunset, 'next')
+                eve_naut = get_t(observer.twilight_evening_nautical, sunset, 'next')
+                eve_astro = get_t(observer.twilight_evening_astronomical, sunset, 'next')
+
+                morn_astro = get_t(observer.twilight_morning_astronomical, sunrise, 'previous')
+                morn_naut = get_t(observer.twilight_morning_nautical, sunrise, 'previous')
+                morn_civil = get_t(observer.twilight_morning_civil, sunrise, 'previous')
+
+                # 3. Build periods
+                def add_p(name, start, end):
+                    if start and end and start < end:
+                        periods[name] = [start.isot + 'Z', end.isot + 'Z']
+
+                t1 = sunset
+                if eve_civil:
+                    add_p("civil", t1, eve_civil)
+                    t1 = eve_civil
+                if eve_naut:
+                    add_p("nautical", t1, eve_naut)
+                    t1 = eve_naut
+                if eve_astro:
+                    add_p("astronomical", t1, eve_astro)
+                    t1 = eve_astro
+
+                t2 = sunrise
+                if morn_civil:
+                    add_p("civil_morn", morn_civil, t2)
+                    t2 = morn_civil
+                if morn_naut:
+                    add_p("nautical_morn", morn_naut, t2)
+                    t2 = morn_naut
+                if morn_astro:
+                    add_p("astronomical_morn", morn_astro, t2)
+                    t2 = morn_astro
+
+                if t1 and t2 and t1 < t2:
+                    # Determine the darkest phase reached
+                    midnight = t1 + (t2 - t1) / 2
+                    midnight_alt = get_sun(midnight).transform_to(AltAz(location=observer.location, obstime=midnight)).alt.deg
+                    
+                    if midnight_alt >= -6: middle_phase = "civil"
+                    elif midnight_alt >= -12: middle_phase = "nautical"
+                    elif midnight_alt >= -18: middle_phase = "astronomical"
+                    else: middle_phase = "night"
+                        
+                    add_p(middle_phase, t1, t2)
+
+                print(f"\n--- Twilight Periods Calculated for Lat: {location.latitude}, Lon: {location.longitude} ---")
+                for k, v in periods.items():
+                    print(f"{k}: {v[0]} -> {v[1]}")
+                print("-------------------------------------------------------------------\n")
+
+                return periods
+            except Exception as e:
+                print(f"Twilight calculation error: {e}")
+                sun_alt = get_sun(now).transform_to(AltAz(location=observer.location, obstime=now)).alt.deg
+                return {"day": [now.isot + 'Z', end_time.isot + 'Z']} if sun_alt > -18 else {"night": [now.isot + 'Z', end_time.isot + 'Z']}
 
 def auto_stretch_image(image_bytes: bytes) -> bytes:
     """

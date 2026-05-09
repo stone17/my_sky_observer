@@ -488,6 +488,7 @@ class StreamSession:
                 "image_url": image_url,
                 "altitude_graph": [p.model_dump() for p in alt_data["target"]],
                 "moon_graph": [p.model_dump() for p in alt_data["moon"]],
+                "sun_graph": [p.model_dump() for p in alt_data.get("sun", [])],
                 "fov_rectangle": self.fov_rect.model_dump(),
                 "sensor_fov": self.sensor_fov_data,
                 "image_fov": self.download_fov,
@@ -756,8 +757,12 @@ async def get_object_details(obj_id: str):
     )
 
     # 4. Sensor FOV rectangle
+    download_fov = max(max(fov_w, fov_h) * padding, 0.25)
     sensor_fov_data = {"width": fov_w, "height": fov_h}
-    fov_rect = calculator.get_fov_rectangle(obj["ra"], obj["dec"], fov_w, fov_h)
+    fov_rect = FOVRectangle(
+        width_percent=(fov_w / download_fov) * 100.0,
+        height_percent=(fov_h / download_fov) * 100.0,
+    )
 
     detail = {
         "name": obj_id,
@@ -765,9 +770,10 @@ async def get_object_details(obj_id: str):
         "image_url": url if is_cached else "",
         "altitude_graph": [p.model_dump() for p in alt_data["target"]],
         "moon_graph": [p.model_dump() for p in alt_data["moon"]],
+        "sun_graph": [p.model_dump() for p in alt_data.get("sun", [])],
         "fov_rectangle": fov_rect.model_dump(),
         "sensor_fov": sensor_fov_data,
-        "image_fov": max(max(fov_w, fov_h) * padding, 0.25),
+        "image_fov": download_fov,
         "hours_above_min": hours,
         "setup_hash": setup_hash,
         "status": "cached" if is_cached else "pending",

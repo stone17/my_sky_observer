@@ -13,6 +13,8 @@ const maxAlt = 90;
 const hoverX = ref(null);
 const hoverTime = ref(null);
 const hoverAlt = ref(null);
+const hoverSunAlt = ref(null);
+const hoverZone = ref(null);
 
 const getX = (timeStr) => {
     if (!props.object || !props.object.altitude_graph || props.object.altitude_graph.length === 0) return 0;
@@ -110,22 +112,24 @@ const nightZones = computed(() => {
     if (!props.nightTimes) return [];
 
     const zones = [];
-    const mapZone = (key, color, opacity) => {
+    const mapZone = (key, color, opacity, label) => {
         if (props.nightTimes[key] && props.nightTimes[key].length === 2) {
             const x1 = Math.max(0, getX(props.nightTimes[key][0]));
             const x2 = Math.min(width, getX(props.nightTimes[key][1]));
             if (x2 > x1) {
-                zones.push({ x: x1, width: x2 - x1, color, opacity });
+                zones.push({ x: x1, width: x2 - x1, color, opacity, label });
             }
         }
     };
 
-    // Removed civil twilight as requested
-    mapZone('nautical', '#2563eb', 0.3);
-    mapZone('astronomical', '#1d4ed8', 0.4);
-    mapZone('night', '#1e3a8a', 0.5);
-    mapZone('astronomical_morn', '#1d4ed8', 0.4);
-    mapZone('nautical_morn', '#2563eb', 0.3);
+    // Map all twilight phases with increasing opacity/darkness
+    mapZone('civil', '#3b82f6', 0.2, 'Civil');
+    mapZone('nautical', '#2563eb', 0.3, 'Nautical');
+    mapZone('astronomical', '#1d4ed8', 0.4, 'Astro');
+    mapZone('night', '#1e3a8a', 0.5, 'Night');
+    mapZone('astronomical_morn', '#1d4ed8', 0.4, 'Astro');
+    mapZone('nautical_morn', '#2563eb', 0.3, 'Nautical');
+    mapZone('civil_morn', '#3b82f6', 0.2, 'Civil');
 
     return zones;
 });
@@ -158,19 +162,38 @@ const handleMouseMove = (e) => {
     const idx = (constrainedX / width) * (props.object.altitude_graph.length - 1);
     const i1 = Math.floor(idx);
     const i2 = Math.ceil(idx);
+    const pct = idx - i1;
     
     if (props.object.altitude_graph[i1] && props.object.altitude_graph[i2]) {
         const alt1 = props.object.altitude_graph[i1].altitude;
         const alt2 = props.object.altitude_graph[i2].altitude;
-        const pct = idx - i1;
         hoverAlt.value = (alt1 + (alt2 - alt1) * pct).toFixed(1);
     }
+
+    if (props.object.sun_graph && props.object.sun_graph[i1] && props.object.sun_graph[i2]) {
+        const salt1 = props.object.sun_graph[i1].altitude;
+        const salt2 = props.object.sun_graph[i2].altitude;
+        hoverSunAlt.value = (salt1 + (salt2 - salt1) * pct).toFixed(1);
+    } else {
+        hoverSunAlt.value = null;
+    }
+
+    // Determine Twilight Zone
+    let currentZone = 'Day';
+    for (const z of nightZones.value) {
+        if (constrainedX >= z.x && constrainedX <= z.x + z.width) {
+            currentZone = z.label;
+        }
+    }
+    hoverZone.value = currentZone;
 };
 
 const handleMouseLeave = () => {
     hoverX.value = null;
     hoverTime.value = null;
     hoverAlt.value = null;
+    hoverSunAlt.value = null;
+    hoverZone.value = null;
 };
 </script>
 
@@ -182,7 +205,7 @@ const handleMouseLeave = () => {
             <div class="legend-inline" v-if="object">
                  <span class="target-label">■ {{ object.name }}</span>
                  <span v-if="showMoon" class="moon-label">■ Moon</span>
-                 <span class="night-label">■ Night</span>
+                 <span class="night-label" title="Civil, Nautical, Astro, Night">■ Twilights/Night</span>
             </div>
             <div class="controls">
                 <input type="checkbox" id="chkMoon" v-model="showMoon">
@@ -260,9 +283,11 @@ const handleMouseLeave = () => {
                 
                 <!-- Hover Tooltip (Simulated with text/rect) -->
                 <g v-if="hoverX !== null && hoverTime">
-                    <rect :x="Math.min(width - 70, Math.max(0, hoverX - 35))" :y="10" width="70" height="30" rx="4" fill="rgba(0,0,0,0.8)" stroke="#666" />
+                    <rect :x="Math.min(width - 70, Math.max(0, hoverX - 35))" :y="10" width="70" :height="hoverSunAlt !== null ? 54 : 42" rx="4" fill="rgba(0,0,0,0.8)" stroke="#666" />
                     <text :x="Math.min(width - 35, Math.max(35, hoverX))" :y="22" fill="#fff" font-size="10" text-anchor="middle" font-weight="bold">{{ hoverTime }}</text>
-                    <text :x="Math.min(width - 35, Math.max(35, hoverX))" :y="34" fill="#10b981" font-size="10" text-anchor="middle">{{ hoverAlt }}°</text>
+                    <text :x="Math.min(width - 35, Math.max(35, hoverX))" :y="34" fill="#10b981" font-size="10" text-anchor="middle">Alt: {{ hoverAlt }}°</text>
+                    <text v-if="hoverSunAlt !== null" :x="Math.min(width - 35, Math.max(35, hoverX))" :y="46" fill="#f59e0b" font-size="10" text-anchor="middle">Sun: {{ hoverSunAlt }}°</text>
+                    <text :x="Math.min(width - 35, Math.max(35, hoverX))" :y="hoverSunAlt !== null ? 58 : 46" fill="#9ca3af" font-size="9" text-anchor="middle">{{ hoverZone }}</text>
                 </g>
              </svg>
         </div>
@@ -309,5 +334,5 @@ const handleMouseLeave = () => {
 }
 .target-label { color: #10b981; }
 .moon-label { color: #fbbf24; }
-.night-label { color: #1e3a8a; font-weight: bold; }
+.night-label { color: #1e3a8a; font-weight: bold; cursor: help; }
 </style>
