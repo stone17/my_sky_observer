@@ -184,9 +184,19 @@ const displayedObjects = computed(() => {
     return filteredAndSortedObjects.value.slice(0, renderedLimit.value);
 });
 
-watch(filteredAndSortedObjects, () => {
+watch(filteredAndSortedObjects, (newList) => {
     renderedLimit.value = 50;
-});
+    if (newList.length > 0) {
+        const currentStillExists = newList.find(o => o.name === props.selectedId);
+        if (!currentStillExists) {
+            handleObjectClick(newList[0]);
+        }
+    } else {
+        if (props.selectedId) {
+            emit('select', null);
+        }
+    }
+}, { immediate: true });
 
 const onScroll = (e) => {
     const { scrollTop, scrollHeight, clientHeight } = e.target;
@@ -199,6 +209,7 @@ const onScroll = (e) => {
 
 const handleObjectClick = async (item) => {
     emit('select', item);
+    if (!item) return;
 
     // If the object doesn't have its heavy details loaded yet (e.g. scrolled past top 500)
     if (!item.altitude_graph) {
@@ -694,5 +705,21 @@ onUnmounted(() => {
 
 .close-btn:hover {
     background: #4b5563;
+}
+
+/* Responsive adjustments for mobile */
+@media (max-width: 768px) {
+    .card-content {
+        height: auto;
+        flex-wrap: wrap;
+    }
+    .img-col {
+        width: 80px;
+        height: 80px;
+    }
+    .graph-col {
+        width: 100%;
+        flex: none;
+    }
 }
 </style>
