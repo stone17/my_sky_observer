@@ -316,11 +316,18 @@ const locationDisplay = computed(() => {
         <div class="mobile-backdrop" v-if="activeDropdown" @click="closeDropdown"></div>
 
         <div class="tb-item relative">
-            <button class="tb-btn" @click="toggleDropdown('profile')" title="Profile">
+            <button
+                class="tb-btn"
+                @click="toggleDropdown('profile')"
+                title="Profile"
+                aria-label="Profile settings"
+                :aria-expanded="activeDropdown === 'profile' ? 'true' : 'false'"
+                aria-controls="profile-dropdown-menu"
+            >
                 <span class="mobile-icon">👤</span>
                 <span class="desktop-text">Profile: {{ selectedProfileName || 'Custom' }} ▼</span>
             </button>
-            <div class="dropdown-menu" v-if="activeDropdown === 'profile'">
+            <div id="profile-dropdown-menu" class="dropdown-menu" v-if="activeDropdown === 'profile'">
                 <div class="mobile-menu-header">
                     <h3>Profile Settings</h3>
                     <button class="close-btn" @click="closeDropdown">✕</button>
