@@ -140,8 +140,13 @@ class CatalogManager:
         final_df = final_df.merge(agg_df, on=['ra_round', 'dec_round'], suffixes=('', '_agg'))
         
         def clean_aliases(row):
-            parts = str(row['all_ids_agg']).replace('N/A', '').replace('nan', '').split(',')
-            aliases = set(p.strip() for p in parts if p.strip())
+            parts = str(row['all_ids_agg']).split(',')
+            aliases = set()
+            for p in parts:
+                p_clean = p.strip()
+                if p_clean and p_clean.lower() not in ('n/a', 'nan'):
+                    aliases.add(p_clean)
+            
             # Remove the primary id and name from the aliases list
             if str(row['id']).strip() in aliases: 
                 aliases.remove(str(row['id']).strip())

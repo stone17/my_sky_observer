@@ -89,12 +89,12 @@ const suggestionList = computed(() => {
     if (!q) return [];
     const normQ = q.toLowerCase().replace(/\s+/g, '');
     const matches = (props.objects || []).filter(o => {
-        if (o._normId === undefined) {
-            o._normId = (o.name || '').toLowerCase().replace(/\s+/g, '');
-            o._normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
-            o._normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
-        }
-        return o._normId.includes(normQ) || o._normCommon.includes(normQ);
+        if (o._normId === undefined) o._normId = (o.name || '').toLowerCase().replace(/\s+/g, '');
+        if (o._normCommon === undefined) o._normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
+        if (o._normOther === undefined) o._normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
+        if (o._normAliases === undefined) o._normAliases = (o.aliases || '').toLowerCase().replace(/\s+/g, '');
+        
+        return o._normId.includes(normQ) || o._normCommon.includes(normQ) || o._normOther.includes(normQ) || o._normAliases.includes(normQ);
     });
     return matches.slice(0, 10);
 });

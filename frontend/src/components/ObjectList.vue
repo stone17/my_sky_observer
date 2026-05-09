@@ -82,12 +82,10 @@ const filteredAndSortedObjects = computed(() => {
     let result = [];
 
     for (const o of props.objects) {
-        if (o._normId === undefined) {
-            o._normId = (o.name || '').toLowerCase().replace(/\s+/g, '');
-            o._normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
-            o._normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
-            o._normAliases = (o.aliases || '').toLowerCase().replace(/\s+/g, '');
-        }
+        if (o._normId === undefined) o._normId = (o.name || '').toLowerCase().replace(/\s+/g, '');
+        if (o._normCommon === undefined) o._normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
+        if (o._normOther === undefined) o._normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
+        if (o._normAliases === undefined) o._normAliases = (o.aliases || '').toLowerCase().replace(/\s+/g, '');
 
         let isMatch = false;
         if (normQ) {
