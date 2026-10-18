@@ -19,7 +19,8 @@ const clientSettings = ref({
     filter_active_mag: true,
     filter_na_mag: true,
     filter_active_size: true,
-    filter_na_size: true
+    filter_na_size: true,
+    show_object_overlays: true
 });
 const objects = ref([]);
 const selectedObject = ref(null);
@@ -449,6 +450,14 @@ const typeCounts = computed(() => {
     return counts;
 });
 
+const typeFilteredObjectsCount = computed(() => {
+    const sel = clientSettings.value?.selected_types || [];
+    if (sel.length === 0) return objects.value.length;
+    if (sel.includes('__NONE__')) return 0;
+    const activeSet = new Set(sel);
+    return objects.value.filter(o => activeSet.has(o.type)).length;
+});
+
 const streamParams = computed(() => ({
     loc: settings.value.location,
     tel: settings.value.telescope,
@@ -523,7 +532,7 @@ watch(clientSettings, () => {
                 :download-progress="downloadProgress"
                 :system-fov="systemFov"
                 :selected-object="selectedObject"
-                :total-objects-count="objects.length"
+                :total-objects-count="typeFilteredObjectsCount"
                 @update-settings="saveSettings"
                 @update-client-settings="updateClientSettings"
                 @start-stream="startStream"

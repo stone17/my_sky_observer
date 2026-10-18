@@ -21,6 +21,14 @@ def validate_image_source(source: str) -> str:
     return source
 
 
+def _strip_win_device_prefix(path: str) -> str:
+    if path.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + path[8:]
+    if path.startswith("\\\\?\\"):
+        return path[4:]
+    return path
+
+
 def resolve_safe_cache_path(cache_dir: str, *parts: str) -> str:
     """Resolve a path inside cache_dir and prevent directory traversal."""
     if not parts:
@@ -31,18 +39,23 @@ def resolve_safe_cache_path(cache_dir: str, *parts: str) -> str:
             or part in (".", "..")
             or "/" in part
             or "\\" in part
+            or ":" in part
             or ".." in part
         ):
             raise ValueError(f"Unsafe path segment: {part!r}")
 
-    base_real = os.path.realpath(cache_dir)
-    target_real = os.path.realpath(os.path.join(base_real, *parts))
+    base_real = _strip_win_device_prefix(os.path.abspath(cache_dir))
+    target_real = _strip_win_device_prefix(
+        os.path.abspath(os.path.join(base_real, *parts))
+    )
     try:
         common = os.path.commonpath([base_real, target_real])
     except ValueError as exc:
         raise ValueError("Path resolves across different drives") from exc
 
-    if common != base_real or target_real == base_real:
+    if os.path.normcase(common) != os.path.normcase(base_real) or os.path.normcase(
+        target_real
+    ) == os.path.normcase(base_real):
         raise ValueError("Path escapes cache directory")
     return target_real
 

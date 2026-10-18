@@ -155,7 +155,8 @@ const isAllTypesSelected = computed(() => {
     const sel = localClientSettings.value.selected_types || [];
     if (sel.length === 0) return true;
     if (sel.includes('__NONE__')) return false;
-    return props.availableTypes?.length > 0 && sel.length >= props.availableTypes.length;
+    const allTypes = props.availableTypes || [];
+    return allTypes.length > 0 && allTypes.every(t => sel.includes(t));
 });
 
 const isTypeActive = (type) => {
@@ -179,7 +180,7 @@ const toggleType = (type) => {
     const allTypes = props.availableTypes || [];
     const current = localClientSettings.value.selected_types || [];
 
-    if (current.length === 0) {
+    if (current.length === 0 || isAllTypesSelected.value) {
         // Currently "All" are active -> clicking one unchecks it (selects all except this one)
         const remaining = allTypes.filter(t => t !== type);
         localClientSettings.value.selected_types = remaining.length > 0 ? remaining : ['__NONE__'];
@@ -187,8 +188,8 @@ const toggleType = (type) => {
         // Currently "None" are active -> clicking one selects just that type
         localClientSettings.value.selected_types = [type];
     } else {
-        const idx = current.indexOf(type);
-        let next = [...current];
+        let next = current.filter(t => allTypes.includes(t));
+        const idx = next.indexOf(type);
         if (idx === -1) {
             next.push(type);
         } else {
@@ -196,7 +197,7 @@ const toggleType = (type) => {
         }
         if (next.length === 0) {
             localClientSettings.value.selected_types = ['__NONE__'];
-        } else if (allTypes.length > 0 && next.length >= allTypes.length) {
+        } else if (allTypes.length > 0 && allTypes.every(t => next.includes(t))) {
             localClientSettings.value.selected_types = [];
         } else {
             localClientSettings.value.selected_types = next;
@@ -370,7 +371,7 @@ const fovDisplay = computed(() => {
     const sensor = computeSensorFov(tel, cam);
     if (sensor.w > 0 && sensor.h > 0) {
         const imgFov = computeDefaultImageFov(tel, cam, pad);
-        return `${sensor.w.toFixed(2)}° × ${sensor.h.toFixed(2)}° (Image: ${imgFov.toFixed(2)}°)`;
+        return `Optics: ${sensor.w.toFixed(2)}° × ${sensor.h.toFixed(2)}° (View: ${imgFov.toFixed(2)}°)`;
     }
     if (props.systemFov) return `${props.systemFov.toFixed(2)}°`;
     return "-";
@@ -469,10 +470,6 @@ const activeFiltersCount = computed(() => {
             </div>
 
             <div class="rail-bottom">
-                <div class="fov-pill" :title="`System FOV: ${fovDisplay}`">
-                    <span class="fov-lbl">FOV</span>
-                    <span class="fov-val">{{ fovDisplay }}</span>
-                </div>
                 <div
                     class="status-dot"
                     :class="{

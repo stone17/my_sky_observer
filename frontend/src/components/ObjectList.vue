@@ -92,6 +92,12 @@ const suggestionList = computed(() => {
         if (o._normCommon === undefined) o._normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
         if (o._normOther === undefined) o._normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
         if (o._normAliases === undefined) o._normAliases = (o.aliases || '').toLowerCase().replace(/\s+/g, '');
+        if (o._normAliasTokens === undefined) {
+            o._normAliasTokens = (o.aliases || '')
+                .split(',')
+                .map(t => t.toLowerCase().replace(/\s+/g, ''))
+                .filter(Boolean);
+        }
         
         return o._normId.includes(normQ) || o._normCommon.includes(normQ) || o._normOther.includes(normQ) || o._normAliases.includes(normQ);
     });
@@ -192,8 +198,10 @@ const filteredAndSortedObjects = computed(() => {
                 const normA = a._normId;
                 const normB = b._normId;
 
-                if (normA === normQ && normB !== normQ) return -1;
-                if (normB === normQ && normA !== normQ) return 1;
+                const exactA = normA === normQ || (a._normAliasTokens && a._normAliasTokens.includes(normQ));
+                const exactB = normB === normQ || (b._normAliasTokens && b._normAliasTokens.includes(normQ));
+                if (exactA && !exactB) return -1;
+                if (exactB && !exactA) return 1;
 
                 const aStarts = normA.startsWith(normQ);
                 const bStarts = normB.startsWith(normQ);
@@ -231,6 +239,14 @@ const filteredAndSortedObjects = computed(() => {
 
 const displayedObjects = computed(() => {
     return filteredAndSortedObjects.value.slice(0, renderedLimit.value);
+});
+
+const typePoolCount = computed(() => {
+    const selectedTypes = localClientSettings.value.selected_types || [];
+    if (selectedTypes.length === 0) return (props.objects || []).length;
+    if (selectedTypes.includes('__NONE__')) return 0;
+    const activeSet = new Set(selectedTypes);
+    return (props.objects || []).filter(o => activeSet.has(o.type)).length;
 });
 
 watch(filteredAndSortedObjects, (newList) => {
@@ -341,7 +357,10 @@ onUnmounted(() => {
                             class="suggestion-item"
                             @mousedown.prevent="selectSuggestion(s)"
                         >
-                            <strong>{{ s.name }}</strong>
+                            <div class="sug-main">
+                                <strong>{{ s.name }}</strong>
+                                <span v-if="s.aliases" class="sug-aliases">({{ s.aliases }})</span>
+                            </div>
                             <span v-if="s.common_name && s.common_name !== 'N/A'" class="sug-common">
                                 {{ s.common_name }}
                             </span>
@@ -357,8 +376,8 @@ onUnmounted(() => {
                         </select>
                     </div>
 
-                    <div class="list-stats">
-                        <strong>{{ filteredAndSortedObjects.length }}</strong> / {{ props.objects.length }}
+                    <div class="list-stats" title="Matching targets / Total targets in selected object types">
+                        <strong>{{ filteredAndSortedObjects.length }}</strong> / {{ typePoolCount }}
                     </div>
                 </div>
             </div>
@@ -408,6 +427,14 @@ onUnmounted(() => {
                                 {{ item.constellation }}
                             </div>
 
+                            <div
+                                v-if="item.aliases"
+                                class="aliases-line"
+                                :title="`Same-names / collated IDs: ${item.aliases}`"
+                            >
+                                ≡ {{ item.aliases }}
+                            </div>
+
                             <div class="metrics-row">
                                 <span>Mag: <strong>{{ formatMagnitude(item.mag) }}</strong></span>
                                 <span>Size: <strong>{{ item.size }}</strong></span>
@@ -440,7 +467,11 @@ onUnmounted(() => {
             <div class="modal-content" @click.stop>
                 <h3>{{ infoObject?.common_name && infoObject?.common_name !== 'N/A' ? infoObject.common_name : infoObject?.name }}</h3>
                 <p v-if="infoObject?.common_name && infoObject?.common_name !== 'N/A'"><strong>Catalog Name:</strong> {{ infoObject.name }}</p>
-                <p v-if="infoObject?.aliases"><strong>Aliases:</strong> {{ infoObject.aliases }}</p>
+                <p v-if="infoObject?.aliases"><strong>Also Known As:</strong> {{ infoObject.aliases }}</p>
+                <p v-if="infoObject?.sub_objects && infoObject.sub_objects.length > 0">
+                    <strong>Collated in Field ({{ infoObject.sub_objects.length }}):</strong>
+                    {{ infoObject.sub_objects.map(s => s.name).join(', ') }}
+                </p>
                 <p><strong>RA/DEC:</strong> {{ typeof infoObject?.ra === 'number' ? infoObject.ra.toFixed(3) : infoObject?.ra }} / {{ typeof infoObject?.dec === 'number' ? infoObject.dec.toFixed(3) : infoObject?.dec }}</p>
                 <p><strong>Type:</strong> {{ getObjectTypeLabel(infoObject?.type) }} <small v-if="infoObject?.type">({{ infoObject.type }})</small></p>
                 <p><strong>Constellation:</strong> {{ infoObject?.constellation }}</p>
@@ -555,9 +586,28 @@ onUnmounted(() => {
     background: #374151;
 }
 
+.sug-main {
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sug-aliases {
+    color: #60a5fa;
+    font-size: 0.72rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .sug-common {
     color: #9ca3af;
     font-size: 0.75rem;
+    flex-shrink: 0;
+    margin-left: 6px;
 }
 
 .toolbar-row {
@@ -734,6 +784,16 @@ onUnmounted(() => {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.aliases-line {
+    font-size: 0.66rem;
+    line-height: 1.2;
+    color: #60a5fa;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    opacity: 0.9;
 }
 
 .metrics-row {

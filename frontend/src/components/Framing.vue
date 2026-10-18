@@ -46,6 +46,228 @@ const isObjectDownloading = computed(() => {
     return props.object && props.object.status === 'downloading';
 });
 
+// --- OBJECT OVERLAY TOGGLE & FOV PROJECTION ---
+const showOverlays = computed(() => {
+    return props.clientSettings?.show_object_overlays !== false;
+});
+
+const toggleOverlays = () => {
+    const next = !showOverlays.value;
+    emit('update-client-settings', {
+        ...(props.clientSettings || {}),
+        show_object_overlays: next
+    });
+};
+
+const parseSizeArcmin = (obj) => {
+    if (!obj) return 0;
+    if (typeof obj.maj_ax === 'number' && !Number.isNaN(obj.maj_ax) && obj.maj_ax > 0) {
+        return obj.maj_ax;
+    }
+    if (typeof obj.size === 'string') {
+        const m = obj.size.match(/([0-9]+(?:\.[0-9]+)?)/);
+        if (m) return parseFloat(m[1]);
+    }
+    return 0;
+};
+
+const fovOverlayObjects = computed(() => {
+    if (!showOverlays.value || !props.object) return [];
+
+    const imgFov = parseFloat(props.object.image_fov || localFov.value || defaultImageFov.value);
+    if (!imgFov || imgFov <= 0.001) return [];
+
+    const centerRa = parseFloat(
+        props.object.center_ra !== undefined ? props.object.center_ra : props.object.ra
+    );
+    const centerDec = parseFloat(
+        props.object.center_dec !== undefined ? props.object.center_dec : props.object.dec
+    );
+    if (Number.isNaN(centerRa) || Number.isNaN(centerDec)) return [];
+
+    const cosDec = Math.max(Math.cos((centerDec * Math.PI) / 180.0), 0.01);
+    const halfFov = imgFov * 0.5;
+
+    const projectCoord = (ra, dec) => {
+        const numRa = parseFloat(ra);
+        const numDec = parseFloat(dec);
+        if (Number.isNaN(numRa) || Number.isNaN(numDec)) return null;
+
+        let dRa = numRa - centerRa;
+        if (dRa > 180) dRa -= 360;
+        if (dRa < -180) dRa += 360;
+        const dDec = numDec - centerDec;
+
+        // Standard astronomical sky survey orientation: North is up (-Y), East is left (-X)
+        const dxDeg = -dRa * cosDec;
+        const dyDeg = -dDec;
+
+        if (Math.abs(dxDeg) > halfFov * 1.02 || Math.abs(dyDeg) > halfFov * 1.02) {
+            return null;
+        }
+
+        const xPct = 50 + (dxDeg / imgFov) * 100;
+        const yPct = 50 + (dyDeg / imgFov) * 100;
+        return { xPct, yPct, dxDeg, dyDeg };
+    };
+
+    const computeDiameterPct = (majArcmin, isPrimary) => {
+        const sizeDeg = (majArcmin || 0) / 60.0;
+        const rawPct = (sizeDeg / imgFov) * 100;
+        const minPct = isPrimary ? 4.5 : 3.2;
+        return Math.min(Math.max(rawPct, minPct), 92.0);
+    };
+
+    const items = [];
+
+    // 1. Primary selected object
+    const primaryProj = projectCoord(props.object.ra, props.object.dec);
+    const primaryMaj = parseSizeArcmin(props.object);
+    if (primaryProj) {
+        items.push({
+            key: `primary-${props.object.name}`,
+            name: props.object.name,
+            commonName:
+                props.object.common_name && props.object.common_name !== 'N/A'
+                    ? props.object.common_name
+                    : '',
+            aliases: props.object.aliases || '',
+            type: props.object.type || '',
+            ra: parseFloat(props.object.ra),
+            dec: parseFloat(props.object.dec),
+            majArcmin: primaryMaj,
+            xPct: primaryProj.xPct,
+            yPct: primaryProj.yPct,
+            diameterPct: computeDiameterPct(primaryMaj, true),
+            isPrimary: true,
+            isSubObject: false,
+            catalogRef: props.object
+        });
+    }
+
+    // Helper to check if a candidate is too close (< 0.35 arcmin) to an existing marker
+    const isNearExisting = (ra, dec) => {
+        const numRa = parseFloat(ra);
+        const numDec = parseFloat(dec);
+        for (const ex of items) {
+            let dRa = (numRa - ex.ra) * cosDec;
+            let dDec = numDec - ex.dec;
+            const distArcmin = Math.hypot(dRa, dDec) * 60.0;
+            if (distArcmin < 0.35) {
+                return ex;
+            }
+        }
+        return null;
+    };
+
+    // 2. Collated sub-objects belonging to the primary object
+    if (Array.isArray(props.object.sub_objects)) {
+        for (const sub of props.object.sub_objects) {
+            const proj = projectCoord(sub.ra, sub.dec);
+            if (!proj) continue;
+            const near = isNearExisting(sub.ra, sub.dec);
+            if (near) continue;
+
+            const subMaj = parseSizeArcmin(sub);
+            items.push({
+                key: `sub-${sub.name}`,
+                name: sub.name,
+                commonName:
+                    sub.common_name && sub.common_name !== 'N/A' ? sub.common_name : '',
+                aliases: '',
+                type: sub.type || '',
+                ra: parseFloat(sub.ra),
+                dec: parseFloat(sub.dec),
+                majArcmin: subMaj,
+                xPct: proj.xPct,
+                yPct: proj.yPct,
+                diameterPct: computeDiameterPct(subMaj, false),
+                isPrimary: false,
+                isSubObject: true,
+                catalogRef: null
+            });
+        }
+    }
+
+    // 3. Other catalog objects (and their sub-objects) falling within the current FOV
+    const allObjs = Array.isArray(props.objects) ? props.objects : [];
+    const secondaryCandidates = [];
+
+    for (const cand of allObjs) {
+        if (!cand || cand.name === props.object.name) continue;
+        // Quick declination bounding box reject before full projection
+        if (Math.abs(parseFloat(cand.dec) - centerDec) > halfFov * 1.1) continue;
+
+        const proj = projectCoord(cand.ra, cand.dec);
+        if (proj) {
+            secondaryCandidates.push({
+                cand,
+                sub: null,
+                proj,
+                maj: parseSizeArcmin(cand),
+                mag: typeof cand.mag === 'number' ? cand.mag : 99
+            });
+        }
+
+        if (Array.isArray(cand.sub_objects)) {
+            for (const sub of cand.sub_objects) {
+                if (Math.abs(parseFloat(sub.dec) - centerDec) > halfFov * 1.1) continue;
+                const subProj = projectCoord(sub.ra, sub.dec);
+                if (subProj) {
+                    secondaryCandidates.push({
+                        cand,
+                        sub,
+                        proj: subProj,
+                        maj: parseSizeArcmin(sub),
+                        mag: typeof sub.mag === 'number' ? sub.mag : 99
+                    });
+                }
+            }
+        }
+    }
+
+    // Sort secondary candidates by prominence (larger size first, then brighter magnitude)
+    secondaryCandidates.sort((a, b) => {
+        if (Math.abs(b.maj - a.maj) > 1.0) return b.maj - a.maj;
+        return a.mag - b.mag;
+    });
+
+    for (const entry of secondaryCandidates) {
+        if (items.length >= 25) break;
+        const target = entry.sub || entry.cand;
+        const near = isNearExisting(target.ra, target.dec);
+        if (near) continue;
+
+        items.push({
+            key: entry.sub ? `fov-sub-${target.name}` : `fov-${target.name}`,
+            name: target.name,
+            commonName:
+                target.common_name && target.common_name !== 'N/A'
+                    ? target.common_name
+                    : '',
+            aliases: target.aliases || '',
+            type: target.type || '',
+            ra: parseFloat(target.ra),
+            dec: parseFloat(target.dec),
+            majArcmin: entry.maj,
+            xPct: entry.proj.xPct,
+            yPct: entry.proj.yPct,
+            diameterPct: computeDiameterPct(entry.maj, false),
+            isPrimary: false,
+            isSubObject: Boolean(entry.sub),
+            catalogRef: entry.cand
+        });
+    }
+
+    return items;
+});
+
+const onOverlayObjectClick = (marker) => {
+    if (marker.catalogRef && marker.catalogRef.name !== props.object?.name) {
+        emit('select-object', marker.catalogRef);
+    }
+};
+
 // --- SENSOR RECTANGLE STYLE ---
 const sensorStyle = computed(() => {
     const sFov = systemSensorFov.value;
@@ -314,6 +536,13 @@ onUnmounted(() => {
                         {{ getObjectTypeLabel(object.type) }}
                     </span>
                     <span v-if="object.constellation" class="meta-badge">{{ object.constellation }}</span>
+                    <span
+                        v-if="object.aliases"
+                        class="aliases-badge"
+                        :title="`Same-names / collated IDs: ${object.aliases}`"
+                    >
+                        ≡ {{ object.aliases }}
+                    </span>
                 </div>
                 <div class="subtitle-line">
                     <span v-if="object.common_name && object.common_name !== 'N/A'" class="common-title">
@@ -365,6 +594,54 @@ onUnmounted(() => {
                     </div>
                 </div>
 
+                <!-- FOV Object Circles & Labels Overlay -->
+                <div
+                    v-if="showOverlays && !isObjectDownloading && fovOverlayObjects.length > 0"
+                    class="object-overlays-layer"
+                >
+                    <div
+                        v-for="marker in fovOverlayObjects"
+                        :key="marker.key"
+                        class="fov-object-marker"
+                        :class="{
+                            'is-primary': marker.isPrimary,
+                            'is-sub': marker.isSubObject && !marker.isPrimary,
+                            'is-neighbor': !marker.isPrimary && !marker.isSubObject,
+                            'is-clickable': Boolean(marker.catalogRef && !marker.isPrimary)
+                        }"
+                        :style="{
+                            left: `${marker.xPct}%`,
+                            top: `${marker.yPct}%`,
+                            width: `${marker.diameterPct}%`,
+                            height: `${marker.diameterPct}%`
+                        }"
+                    >
+                        <div class="fov-object-circle"></div>
+                        <div
+                            class="fov-object-label"
+                            :class="{
+                                'label-below': marker.yPct - marker.diameterPct / 2 < 10
+                            }"
+                            :title="
+                                [
+                                    marker.name,
+                                    marker.commonName ? `(${marker.commonName})` : '',
+                                    marker.aliases ? `[≡ ${marker.aliases}]` : '',
+                                    marker.majArcmin ? `${marker.majArcmin.toFixed(1)}'` : ''
+                                ]
+                                    .filter(Boolean)
+                                    .join(' ')
+                            "
+                            @click.stop="onOverlayObjectClick(marker)"
+                        >
+                            <span class="fov-label-id">{{ marker.name }}</span>
+                            <span v-if="marker.commonName" class="fov-label-common">
+                                · {{ marker.commonName }}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+
                 <div v-if="isObjectDownloading" class="download-overlay">
                     <div class="spinner"></div>
                     <span>Downloading sky survey...</span>
@@ -382,21 +659,49 @@ onUnmounted(() => {
 
             <!-- Top-Right Telemetry Readout -->
             <div class="osd-overlay">
-                <div>Image FOV: <strong>{{ (object.image_fov || localFov).toFixed(2) }}°</strong></div>
-                <div>Sensor: <strong>{{ systemSensorFov.w.toFixed(2) }}° × {{ systemSensorFov.h.toFixed(2) }}°</strong></div>
-                <div v-if="isZoomModified">Zoom: <strong>{{ zoomLevel.toFixed(1) }}×</strong></div>
+                <div class="osd-title">
+                    <span class="osd-title-lbl">Profile:</span>
+                    <strong class="osd-title-val">{{ settings?.active_profile || 'Custom' }}</strong>
+                </div>
+                <div class="osd-row" title="Field of View of your selected Telescope + Camera sensor (green frame)">
+                    <span class="osd-dot optics"></span>
+                    <span class="osd-lbl">Selected Optics:</span>
+                    <strong class="optics-val">{{ systemSensorFov.w.toFixed(2) }}° × {{ systemSensorFov.h.toFixed(2) }}°</strong>
+                </div>
+                <div class="osd-row" title="Field of View of the currently displayed sky survey image">
+                    <span class="osd-dot view"></span>
+                    <span class="osd-lbl">Current View:</span>
+                    <strong class="view-val">{{ (object.image_fov || localFov).toFixed(2) }}° × {{ (object.image_fov || localFov).toFixed(2) }}°</strong>
+                </div>
+                <div v-if="isZoomModified" class="osd-row">
+                    <span class="osd-lbl">Canvas Zoom:</span>
+                    <strong>{{ zoomLevel.toFixed(1) }}×</strong>
+                </div>
             </div>
 
             <!-- Bottom Floating Canvas HUD Toolbar -->
             <div class="canvas-hud">
-                <!-- FOV Control -->
-                <div class="hud-group">
-                    <span class="hud-label">FOV (°)</span>
+                <!-- Selected Optics Readout -->
+                <div
+                    class="hud-group hud-optics-readout"
+                    title="Selected Optics (Telescope + Camera sensor rectangle)"
+                >
+                    <span class="hud-label">OPTICS</span>
+                    <span class="hud-optics-badge">
+                        {{ systemSensorFov.w.toFixed(2) }}° × {{ systemSensorFov.h.toFixed(2) }}°
+                    </span>
+                </div>
+
+                <div class="hud-divider"></div>
+
+                <!-- Current View FOV Control -->
+                <div class="hud-group" title="Current View FOV (sky survey image width/height in degrees)">
+                    <span class="hud-label">CURRENT VIEW (°)</span>
                     <button
                         type="button"
                         class="hud-step-btn"
                         @click="stepFov(0.9)"
-                        title="Decrease FOV (Zoom In)"
+                        title="Decrease Current View FOV (Zoom In)"
                     >
                         −
                     </button>
@@ -413,7 +718,7 @@ onUnmounted(() => {
                         type="button"
                         class="hud-step-btn"
                         @click="stepFov(1.1)"
-                        title="Increase FOV (Zoom Out)"
+                        title="Increase Current View FOV (Zoom Out)"
                     >
                         +
                     </button>
@@ -451,6 +756,16 @@ onUnmounted(() => {
 
                 <!-- Quick Canvas Actions -->
                 <div class="hud-actions">
+                    <button
+                        type="button"
+                        class="hud-btn"
+                        :class="{ 'toggle-active': showOverlays }"
+                        @click="toggleOverlays"
+                        title="Toggle object circle & label overlays in the current Field of View"
+                    >
+                        ◎ Objects: {{ showOverlays ? 'ON' : 'OFF' }}
+                    </button>
+
                     <button
                         type="button"
                         class="hud-btn primary"
@@ -547,6 +862,20 @@ onUnmounted(() => {
     background: rgba(16, 185, 129, 0.15);
     color: #10b981;
     border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.aliases-badge {
+    font-size: 0.72rem;
+    background: rgba(96, 165, 250, 0.12);
+    color: #93c5fd;
+    border: 1px solid rgba(96, 165, 250, 0.28);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 500;
+    max-width: 420px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .subtitle-line {
@@ -652,26 +981,208 @@ onUnmounted(() => {
     font-size: 20px;
 }
 
+/* FOV Object Circles & Labels Overlay */
+.object-overlays-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 12;
+    overflow: hidden;
+}
+
+.fov-object-marker {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+}
+
+.fov-object-circle {
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    box-sizing: border-box;
+    pointer-events: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.fov-object-marker.is-primary .fov-object-circle {
+    border: 1.8px solid rgba(16, 185, 129, 0.9);
+    box-shadow: 0 0 10px rgba(16, 185, 129, 0.35), inset 0 0 8px rgba(16, 185, 129, 0.12);
+}
+
+.fov-object-marker.is-sub .fov-object-circle {
+    border: 1.5px dashed rgba(56, 189, 248, 0.85);
+    box-shadow: 0 0 6px rgba(56, 189, 248, 0.25);
+}
+
+.fov-object-marker.is-neighbor .fov-object-circle {
+    border: 1.5px solid rgba(96, 165, 250, 0.85);
+    box-shadow: 0 0 8px rgba(96, 165, 250, 0.3);
+}
+
+.fov-object-label {
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 4px);
+    transform: translateX(-50%);
+    background: rgba(15, 23, 42, 0.82);
+    backdrop-filter: blur(4px);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 0.68rem;
+    line-height: 1.25;
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    pointer-events: auto;
+    user-select: none;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
+}
+
+.fov-object-label.label-below {
+    bottom: auto;
+    top: calc(100% + 4px);
+}
+
+.fov-object-marker.is-primary .fov-object-label {
+    border: 1px solid rgba(16, 185, 129, 0.6);
+    color: #ecfdf5;
+}
+
+.fov-object-marker.is-primary .fov-label-id {
+    color: #34d399;
+    font-weight: 700;
+}
+
+.fov-object-marker.is-sub .fov-object-label {
+    border: 1px solid rgba(56, 189, 248, 0.5);
+    color: #e0f2fe;
+}
+
+.fov-object-marker.is-sub .fov-label-id {
+    color: #38bdf8;
+    font-weight: 600;
+}
+
+.fov-object-marker.is-neighbor .fov-object-label {
+    border: 1px solid rgba(96, 165, 250, 0.55);
+    color: #dbeafe;
+}
+
+.fov-object-marker.is-neighbor .fov-label-id {
+    color: #60a5fa;
+    font-weight: 600;
+}
+
+.fov-object-marker.is-clickable .fov-object-label {
+    cursor: pointer;
+}
+
+.fov-object-marker.is-clickable .fov-object-label:hover {
+    background: rgba(30, 41, 59, 0.95);
+    border-color: #93c5fd;
+}
+
+.fov-label-common {
+    color: #cbd5e1;
+    font-weight: 400;
+    max-width: 130px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 /* Top-Right Telemetry Overlay */
 .osd-overlay {
     position: absolute;
     top: 12px;
     right: 12px;
-    background: rgba(15, 23, 42, 0.8);
+    background: rgba(15, 23, 42, 0.85);
     backdrop-filter: blur(6px);
-    border: 1px solid rgba(51, 65, 85, 0.8);
-    border-radius: 6px;
+    border: 1px solid rgba(51, 65, 85, 0.85);
+    border-radius: 7px;
     color: #94a3b8;
-    font-size: 0.72rem;
-    padding: 6px 10px;
+    font-size: 0.74rem;
+    padding: 7px 11px;
     pointer-events: none;
     z-index: 90;
-    text-align: right;
-    line-height: 1.4;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    line-height: 1.35;
+}
+
+.osd-title {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 5px;
+    padding-bottom: 4px;
+    margin-bottom: 2px;
+    border-bottom: 1px solid rgba(71, 85, 105, 0.55);
+}
+
+.osd-title-lbl {
+    color: #94a3b8;
+    font-weight: 600;
+}
+
+.osd-overlay strong.osd-title-val {
+    color: #f8fafc;
+    font-weight: 700;
+}
+
+.osd-row {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+.osd-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    display: inline-block;
+    flex-shrink: 0;
+}
+
+.osd-dot.optics {
+    border: 2px solid #10b981;
+    background: rgba(16, 185, 129, 0.2);
+}
+
+.osd-dot.view {
+    border: 2px solid #38bdf8;
+    background: rgba(56, 189, 248, 0.2);
+}
+
+.osd-lbl {
+    color: #94a3b8;
 }
 
 .osd-overlay strong {
     color: #10b981;
+    font-variant-numeric: tabular-nums;
+}
+
+.osd-overlay strong.view-val {
+    color: #38bdf8;
+}
+
+.hud-optics-badge {
+    background: rgba(16, 185, 129, 0.12);
+    border: 1px solid rgba(16, 185, 129, 0.35);
+    color: #34d399;
+    font-size: 0.78rem;
+    font-weight: 700;
+    height: 28px;
+    padding: 0 9px;
+    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
 }
 
 /* Bottom Floating HUD Toolbar */
@@ -778,6 +1289,12 @@ onUnmounted(() => {
 .hud-btn.primary {
     border-color: #10b981;
     color: #10b981;
+}
+
+.hud-btn.toggle-active {
+    border-color: #38bdf8;
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.14);
 }
 
 .hud-btn.warning,

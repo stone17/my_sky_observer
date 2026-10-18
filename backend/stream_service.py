@@ -141,6 +141,7 @@ async def compute_object_detail_payload(
     }
     if include_aliases:
         detail["aliases"] = obj.get("aliases", "")
+        detail["sub_objects"] = obj.get("sub_objects", [])
     return detail
 
 
@@ -313,7 +314,21 @@ async def build_single_object_details(
     all_objects = get_sorted_objects(
         settings, location, telescope, camera, catalog_manager=catalog_manager
     )
-    obj = next((o for o in all_objects if o["id"] == obj_id), None)
+    norm_req = CatalogManager.normalize_designation(obj_id)
+    obj = next(
+        (
+            o
+            for o in all_objects
+            if o["id"] == obj_id
+            or CatalogManager.normalize_designation(o["id"]) == norm_req
+            or any(
+                CatalogManager.normalize_designation(a) == norm_req
+                for a in str(o.get("aliases", "")).split(",")
+                if a.strip()
+            )
+        ),
+        None,
+    )
     if not obj:
         raise HTTPException(status_code=404, detail="Object not found")
 
@@ -453,6 +468,7 @@ class StreamSession:
                     "constellation": obj.get("constellation", ""),
                     "other_id": obj.get("other_id", ""),
                     "aliases": obj.get("aliases", ""),
+                    "sub_objects": obj.get("sub_objects", []),
                     "ra": obj["ra"],
                     "dec": obj["dec"],
                     "mag": mag,

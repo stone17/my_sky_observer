@@ -400,3 +400,41 @@ def test_stream_objects_preloads_altitude_graphs_even_when_saved_types_none():
         assert "moon_graph" in first_detail and len(first_detail["moon_graph"]) > 0
         assert "sun_graph" in first_detail and len(first_detail["sun_graph"]) > 0
         assert "hours_above_min" in first_detail
+
+
+def test_smart_catalog_collation_and_aliases():
+    """
+    Tests that cross-catalog objects at the same coordinates or inside the same nebula
+    complex (e.g., M 31 / NGC 0224 / UGC 00454 and Rosette Nebula NGC 2237 / 2238 / 2239 / 2244 / Sh2-275)
+    are collated into a single primary target with all same-names in `aliases` and distinct
+    sub-components in `sub_objects`.
+    """
+    from backend.data_manager import CatalogManager
+
+    catalogs = CatalogManager()
+    df = catalogs.get_all_objects(["messier", "ngc", "ic", "sharpless", "collinder", "ugc"])
+    assert not df.empty
+
+    # M 31, M 32, and M 110 should collate their NGC synonyms while remaining distinct Messier entries
+    m31_rows = df[df["id"] == "M 31"]
+    assert len(m31_rows) == 1
+    assert "NGC 224" in m31_rows.iloc[0]["aliases"]
+    assert df[df["id"] == "NGC 0224"].empty
+    assert len(df[df["id"] == "M 32"]) == 1
+    assert "NGC 221" in df[df["id"] == "M 32"].iloc[0]["aliases"]
+    assert len(df[df["id"] == "M 110"]) == 1
+    assert "NGC 205" in df[df["id"] == "M 110"].iloc[0]["aliases"]
+
+    # Rosette Nebula (NGC 2237) should collate NGC 2238, NGC 2239, NGC 2244, NGC 2246, LBN 948
+    rosette = df[df["id"].str.contains("2237")]
+    assert len(rosette) == 1
+    rosette_row = rosette.iloc[0]
+    for expected_alias in ("NGC 2238", "NGC 2239", "NGC 2244", "NGC 2246", "LBN 948"):
+        assert expected_alias in rosette_row["aliases"]
+    assert isinstance(rosette_row["sub_objects"], list)
+    assert len(rosette_row["sub_objects"]) >= 2
+
+    # Separate Messier objects M 42 and M 43 must remain distinct primary targets
+    assert len(df[df["id"] == "M 42"]) == 1
+    assert len(df[df["id"] == "M 43"]) == 1
+
