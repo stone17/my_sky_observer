@@ -2,8 +2,8 @@
 FROM node:20-alpine AS frontend-builder
 WORKDIR /app/frontend
 
-COPY frontend/package*.json ./
-RUN npm install
+COPY frontend/package*.json frontend/.npmrc ./
+RUN npm ci --ignore-scripts
 
 COPY frontend/ ./
 RUN npm run build

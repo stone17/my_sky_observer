@@ -8,7 +8,18 @@ import TypeFilter from './components/TypeFilter.vue';
 
 const settings = ref({});
 const clientSettings = ref({
-    max_magnitude: 12.0, min_size: 0.0, min_hours: 0.0, selected_types: []
+    max_magnitude: 12.0,
+    min_size: 0.0,
+    min_hours: 0.0,
+    selected_types: [],
+    filter_active_alt: true,
+    filter_na_alt: true,
+    filter_active_hours: true,
+    filter_na_hours: true,
+    filter_active_mag: true,
+    filter_na_mag: true,
+    filter_active_size: true,
+    filter_na_size: true
 });
 const objects = ref([]);
 const selectedObject = ref(null);
@@ -32,13 +43,15 @@ const systemFov = computed(() => {
     const fl = settings.value.telescope.focal_length;
     const sw = settings.value.camera.sensor_width;
     if (!fl || !sw) return 1.0;
-    return parseFloat(((sw / fl) * 57.2958).toFixed(2));
+    const fovDeg = 2 * Math.atan(sw / (2 * fl)) * (180 / Math.PI);
+    return parseFloat(fovDeg.toFixed(2));
 });
 
 const getDownloadFocalLength = () => {
-    // Calculate Virtual FL if Manual Mode is active
+    // Calculate Virtual FL if Manual Mode is active (inverse of 2 * atan(sw / (2 * fl)))
     if (isManualFov.value && activeFov.value > 0 && settings.value.camera?.sensor_width) {
-        return (settings.value.camera.sensor_width / activeFov.value) * 57.2958;
+        const halfFovRad = (activeFov.value * Math.PI) / 360.0;
+        return settings.value.camera.sensor_width / (2 * Math.tan(halfFovRad));
     }
     return settings.value.telescope?.focal_length;
 };
@@ -73,7 +86,7 @@ const downloadImage = async (obj) => {
 
             // CRITICAL FIX: Ensure image_fov matches what we just downloaded.
             // If API returns it, good. If not, use the requestedFov we used to generate it.
-            const padding = settings.value.image_padding || 1.05;
+            const padding = settings.value.image_padding || 1.15;
             obj.image_fov = data.image_fov || (requestedFov * padding);
 
         } else {
@@ -129,6 +142,22 @@ const fetchSettings = async () => {
         const res = await fetch('/api/settings');
         if (res.ok) {
             const data = await res.json();
+            if (data.active_profile && data.profiles && data.profiles[data.active_profile]) {
+                const profileData = JSON.parse(JSON.stringify(data.profiles[data.active_profile]));
+                const savedLocation = data.location;
+                const savedNina = data.nina_host;
+                const savedCatalogs = data.catalogs;
+                const savedProfiles = data.profiles;
+                const activeProf = data.active_profile;
+
+                Object.assign(data, profileData, {
+                    active_profile: activeProf,
+                    profiles: savedProfiles
+                });
+                if (savedLocation) data.location = savedLocation;
+                if (savedNina !== undefined) data.nina_host = savedNina;
+                if (savedCatalogs) data.catalogs = savedCatalogs;
+            }
             settings.value = data;
             if (data.client_settings) Object.assign(clientSettings.value, data.client_settings);
         }
@@ -176,12 +205,12 @@ const startStream = (mode = 'selected') => {
     }
     if (settings.value.catalogs) params.append('catalogs', settings.value.catalogs.join(','));
     params.append('sort_key', settings.value.sort_key || 'time');
-    params.append('min_altitude', settings.value.min_altitude || 30.0);
-    params.append('image_padding', settings.value.image_padding || 1.05);
+    params.append('min_altitude', settings.value.min_altitude ?? 30.0);
+    params.append('image_padding', settings.value.image_padding || 1.15);
 
     if (settings.value.image_server) {
-        params.append('image_resolution', settings.value.image_server.resolution || 512);
-        params.append('image_timeout', settings.value.image_server.timeout || 60);
+        params.append('image_resolution', settings.value.image_server.resolution || 1024);
+        params.append('image_timeout', settings.value.image_server.timeout || 120);
         params.append('image_source', settings.value.image_server.source || 'dss2r');
     }
 
@@ -190,8 +219,8 @@ const startStream = (mode = 'selected') => {
     if (clientSettings.value.min_size !== undefined) params.append('min_size', clientSettings.value.min_size);
     if (clientSettings.value.min_hours !== undefined) params.append('min_hours', clientSettings.value.min_hours);
     
-    if (settings.value.filter_active_alt !== undefined) params.append('filter_active_alt', settings.value.filter_active_alt);
-    if (settings.value.filter_na_alt !== undefined) params.append('filter_na_alt', settings.value.filter_na_alt);
+    if (clientSettings.value.filter_active_alt !== undefined) params.append('filter_active_alt', clientSettings.value.filter_active_alt);
+    if (clientSettings.value.filter_na_alt !== undefined) params.append('filter_na_alt', clientSettings.value.filter_na_alt);
     if (clientSettings.value.filter_active_hours !== undefined) params.append('filter_active_hours', clientSettings.value.filter_active_hours);
     if (clientSettings.value.filter_na_hours !== undefined) params.append('filter_na_hours', clientSettings.value.filter_na_hours);
     if (clientSettings.value.filter_active_mag !== undefined) params.append('filter_active_mag', clientSettings.value.filter_active_mag);
@@ -282,8 +311,8 @@ const streamParams = computed(() => ({
     sort: settings.value.sort_key,
     max_mag: clientSettings.value.max_magnitude,
     min_sz: clientSettings.value.min_size,
-    fa_alt: settings.value.filter_active_alt,
-    fn_alt: settings.value.filter_na_alt,
+    fa_alt: clientSettings.value.filter_active_alt,
+    fn_alt: clientSettings.value.filter_na_alt,
     fa_hrs: clientSettings.value.filter_active_hours,
     fn_hrs: clientSettings.value.filter_na_hours,
     fa_mag: clientSettings.value.filter_active_mag,

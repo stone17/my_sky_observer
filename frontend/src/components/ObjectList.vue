@@ -22,8 +22,6 @@ watch(() => props.settings, (newVal) => {
     if (newVal && JSON.stringify(newVal) !== JSON.stringify(localSettings.value)) {
         localSettings.value = { ...newVal };
         if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
-        if (localSettings.value.filter_active_alt === undefined) localSettings.value.filter_active_alt = true;
-        if (localSettings.value.filter_na_alt === undefined) localSettings.value.filter_na_alt = true;
         if (!localSettings.value.sort_key) localSettings.value.sort_key = 'time';
     }
 }, { immediate: true, deep: true });
@@ -31,6 +29,8 @@ watch(() => props.settings, (newVal) => {
 watch(() => props.clientSettings, (newVal) => {
     if (newVal) {
         localClientSettings.value = { ...newVal };
+        if (localClientSettings.value.filter_active_alt === undefined) localClientSettings.value.filter_active_alt = true;
+        if (localClientSettings.value.filter_na_alt === undefined) localClientSettings.value.filter_na_alt = true;
         if (localClientSettings.value.filter_active_hours === undefined) localClientSettings.value.filter_active_hours = true;
         if (localClientSettings.value.filter_na_hours === undefined) localClientSettings.value.filter_na_hours = true;
         if (localClientSettings.value.filter_active_mag === undefined) localClientSettings.value.filter_active_mag = true;
@@ -59,8 +59,8 @@ const openInfo = (obj) => {
 
 const filteredAndSortedObjects = computed(() => {
     const minAlt = localSettings.value.min_altitude || 30;
-    const activeAlt = localSettings.value.filter_active_alt !== false;
-    const naAlt = localSettings.value.filter_na_alt !== false;
+    const activeAlt = localClientSettings.value.filter_active_alt !== false;
+    const naAlt = localClientSettings.value.filter_na_alt !== false;
 
     const minHrs = localClientSettings.value.min_hours || 0;
     const activeHrs = localClientSettings.value.filter_active_hours !== false;
@@ -282,11 +282,11 @@ onUnmounted(() => {
                 <div class="filter-header">
                     <label>Alt></label>
                     <div class="toggles">
-                        <input type="checkbox" v-model="localSettings.filter_active_alt" @change="updateSettings" title="Enable filter" class="cb-onoff" />
-                        <input type="checkbox" v-model="localSettings.filter_na_alt" @change="updateSettings" title="Include N/A" class="cb-na" />
+                        <input type="checkbox" v-model="localClientSettings.filter_active_alt" @change="updateClientSettings" title="Enable filter" class="cb-onoff" />
+                        <input type="checkbox" v-model="localClientSettings.filter_na_alt" @change="updateClientSettings" title="Include N/A" class="cb-na" />
                     </div>
                 </div>
-                <input type="number" v-model.number="localSettings.min_altitude" :disabled="!localSettings.filter_active_alt" @input="updateSettings" class="input-sm" />
+                <input type="number" v-model.number="localSettings.min_altitude" :disabled="!localClientSettings.filter_active_alt" @input="updateSettings" class="input-sm" />
             </div>
             <div class="filter-group">
                 <div class="filter-header">

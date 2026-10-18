@@ -1,17 +1,19 @@
 {
   "name": "my-sky-observer-frontend",
   "version": "0.0.0",
+  "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "audit:security": "npm audit --audit-level=moderate && npm audit signatures"
   },
   "dependencies": {
-    "@picocss/pico": "^2.0.6",
-    "vue": "^3.3.4"
+    "@picocss/pico": "2.1.1",
+    "vue": "3.5.44"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^6.0.5",
-    "vite": "^8.0.5"
+    "@vitejs/plugin-vue": "6.0.5",
+    "vite": "8.3.4"
   }
 }

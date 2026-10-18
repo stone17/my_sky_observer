@@ -16,7 +16,7 @@ const isObjectDownloading = computed(() => {
 });
 
 // --- PHYSICAL SENSOR CALCULATION ---
-// Calculates the sensor size in degrees based on HARDWARE settings.
+// Calculates the sensor size in degrees based on HARDWARE settings using exact trigonometric formula.
 const systemSensorFov = computed(() => {
     const tel = props.settings?.telescope;
     const cam = props.settings?.camera;
@@ -24,9 +24,8 @@ const systemSensorFov = computed(() => {
         return { w: 0, h: 0 };
     }
 
-    // (Sensor / FL) * 57.3
-    const w = (cam.sensor_width / tel.focal_length) * 57.2958;
-    const h = (cam.sensor_height / tel.focal_length) * 57.2958;
+    const w = 2 * Math.atan(cam.sensor_width / (2 * tel.focal_length)) * (180 / Math.PI);
+    const h = 2 * Math.atan(cam.sensor_height / (2 * tel.focal_length)) * (180 / Math.PI);
     return { w, h };
 });
 
@@ -167,7 +166,7 @@ const isZoomModified = computed(() => zoomLevel.value !== 1.0);
 
 const isFovModified = computed(() => {
     if (!props.object) return false;
-    const padding = props.settings?.image_padding || 1.05;
+    const padding = props.settings?.image_padding || 1.15;
     const currentTargetFov = localFov.value * padding;
     if (props.object.image_fov && Math.abs(currentTargetFov - props.object.image_fov) > 0.01) return true;
     return false;
@@ -175,16 +174,8 @@ const isFovModified = computed(() => {
 
 const isModified = computed(() => {
     if (!props.object) return false;
-    
-    // Check if offsets have changed
     if (Math.abs(offsetX.value) > 0.01 || Math.abs(offsetY.value) > 0.01) return true;
-    
-    // Check if FOV has changed compared to the downloaded image
-    const padding = props.settings?.image_padding || 1.05;
-    const currentTargetFov = localFov.value * padding;
-    if (props.object.image_fov && Math.abs(currentTargetFov - props.object.image_fov) > 0.01) return true;
-    
-    return false;
+    return isFovModified.value;
 });
 
 const updateImage = async () => {
@@ -193,7 +184,7 @@ const updateImage = async () => {
     
     props.object.status = 'downloading';
     
-    const padding = props.settings?.image_padding || 1.05;
+    const padding = props.settings?.image_padding || 1.15;
     const targetFov = localFov.value * padding;
     
     try {
@@ -204,9 +195,9 @@ const updateImage = async () => {
                 ra: coords.ra,
                 dec: coords.dec,
                 fov: targetFov,
-                resolution: props.settings.image_server?.resolution || 512,
+                resolution: props.settings.image_server?.resolution || 1024,
                 source: props.settings.image_server?.source || "dss2r",
-                timeout: props.settings.image_server?.timeout || 60
+                timeout: props.settings.image_server?.timeout || 120
             })
         });
         

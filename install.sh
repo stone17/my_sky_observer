@@ -9,7 +9,7 @@ pip install -r requirements.txt
 
 echo "[2/3] Installing Frontend Dependencies..."
 cd frontend
-npm install
+npm ci --ignore-scripts
 
 echo "[3/3] Building Frontend..."
 npm run build

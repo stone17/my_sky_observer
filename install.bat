@@ -1,5 +1,5 @@
 cd frontend
-call npm install
+call npm ci --ignore-scripts
 call npm run build
 cd ..
 uvicorn backend.main:app --reload

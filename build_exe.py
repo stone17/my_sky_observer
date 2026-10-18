@@ -35,7 +35,7 @@ def build_frontend():
     print("Building Frontend...")
     frontend_dir = os.path.join(os.getcwd(), 'frontend')
     if not os.path.exists(os.path.join(frontend_dir, 'node_modules')):
-        subprocess.check_call(['npm', 'install'], cwd=frontend_dir, shell=True)
+        subprocess.check_call(['npm', 'ci', '--ignore-scripts'], cwd=frontend_dir, shell=True)
     subprocess.check_call(['npm', 'run', 'build'], cwd=frontend_dir, shell=True)
     patch_frontend_dist()
     print("Frontend build complete.")

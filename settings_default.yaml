@@ -30,7 +30,9 @@ catalogs:
 - ugc
 
 min_altitude: 30.0
+sort_key: "time"
 image_padding: 1.15
+nina_host: ""
 
 active_profile: null
 
@@ -42,7 +44,16 @@ image_server:
   source: "dss2r"
 
 client_settings:
-  max_magnitude: 99.0
-  min_size: 10.0
-  min_hours: 2.0
+  max_magnitude: 12.0
+  min_size: 0.0
+  min_hours: 0.0
   selected_types: []
+  filter_active_alt: true
+  filter_na_alt: true
+  filter_active_hours: true
+  filter_na_hours: true
+  filter_active_mag: true
+  filter_na_mag: true
+  filter_active_size: true
+  filter_na_size: true
+

@@ -35,36 +35,7 @@ const fetchProfiles = async () => {
         const res = await fetch('/api/profiles');
         if (res.ok) {
             profiles.value = await res.json();
-
-            // Sync selected name with settings
-            if (localSettings.value.active_profile) {
-                selectedProfileName.value = localSettings.value.active_profile;
-                
-                // CRITICAL FIX: Auto-apply the active profile's settings on load
-                // to ensure missing fields (like padding) don't fall back to defaults.
-                if (profiles.value[selectedProfileName.value]) {
-                    const profileData = JSON.parse(JSON.stringify(profiles.value[selectedProfileName.value]));
-                    const savedLocation = localSettings.value.location;
-                    const savedNina = localSettings.value.nina_host;
-
-                    localSettings.value = {
-                        ...localSettings.value,
-                        ...profileData,
-                        active_profile: selectedProfileName.value
-                    };
-
-                    // Restore the current location and nina_host to avoid overwriting it
-                    if (savedLocation) {
-                        localSettings.value.location = savedLocation;
-                    }
-                    if (savedNina !== undefined) {
-                        localSettings.value.nina_host = savedNina;
-                    }
-
-                    // Sync the corrected settings back to the main App
-                    emit('update-settings', localSettings.value);
-                }
-            }
+            selectedProfileName.value = localSettings.value.active_profile || null;
         }
     } catch (e) { console.error(e); }
 };
@@ -104,15 +75,13 @@ watch(() => props.settings, (newVal) => {
         if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
         if (localSettings.value.nina_host === undefined) localSettings.value.nina_host = "";
         if (!localSettings.value.catalogs) localSettings.value.catalogs = ['messier'];
-        if (localSettings.value.image_padding === undefined) localSettings.value.image_padding = 1.05;
+        if (localSettings.value.image_padding === undefined) localSettings.value.image_padding = 1.15;
         if (!localSettings.value.image_server) {
-            localSettings.value.image_server = { resolution: 512, timeout: 60, source: 'dss2r' };
+            localSettings.value.image_server = { resolution: 1024, timeout: 120, source: 'dss2r' };
         }
 
         // Sync active profile if present
-        if (localSettings.value.active_profile) {
-            selectedProfileName.value = localSettings.value.active_profile;
-        }
+        selectedProfileName.value = localSettings.value.active_profile || null;
     }
 }, { immediate: true, deep: true });
 
@@ -172,6 +141,7 @@ const updateCurrentProfile = async () => {
     delete profileData.nina_host;
     delete profileData.active_profile;
     delete profileData.profiles;
+    delete profileData.client_settings;
 
     try {
         await fetch(`/api/profiles/${name}`, {
@@ -197,6 +167,7 @@ const createProfile = async () => {
     delete profileData.nina_host;
     delete profileData.active_profile;
     delete profileData.profiles;
+    delete profileData.client_settings;
 
     try {
         await fetch(`/api/profiles/${name}`, {
@@ -458,8 +429,8 @@ const locationDisplay = computed(() => {
                     <select v-model.number="localSettings.image_server.resolution" @change="updateImageSettings"
                         class="mini-select">
                         <option :value="256">256 px</option>
-                        <option :value="512">512 px (Default)</option>
-                        <option :value="1024">1024 px</option>
+                        <option :value="512">512 px</option>
+                        <option :value="1024">1024 px (Default)</option>
                         <option :value="2048">2048 px</option>
                     </select>
                 </div>
