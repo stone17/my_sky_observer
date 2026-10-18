@@ -27,26 +27,27 @@ TEST_SETTINGS = {
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_and_teardown():
-    # Before tests run, create a known state
-    # Ensure no old cache or settings interfere
+    # Back up user settings so running tests never clobbers the user's real settings_user.yaml
+    backup_file = "settings_user.yaml.pytest_bak"
+    had_user_settings = os.path.exists("settings_user.yaml")
+    if had_user_settings:
+        shutil.copy2("settings_user.yaml", backup_file)
+
     if os.path.exists("settings.json"):
         os.remove("settings.json")
-    
+
     # Save test settings
     save_settings(TEST_SETTINGS)
 
-    # Clear the image cache for a clean test run
-    if os.path.exists("image_cache"):
-        for setup_dir in os.listdir("image_cache"):
-            full_setup_dir = os.path.join("image_cache", setup_dir)
-            if os.path.isdir(full_setup_dir):
-                for f in os.listdir(full_setup_dir):
-                    os.remove(os.path.join(full_setup_dir, f))
-                os.rmdir(full_setup_dir)
-    
     yield
-    # Teardown (after tests) is not strictly necessary here, 
-    # but you could add cleanup if needed.
+
+    # Restore original user settings after tests finish
+    if had_user_settings and os.path.exists(backup_file):
+        shutil.move(backup_file, "settings_user.yaml")
+    elif os.path.exists("settings_user.yaml"):
+        os.remove("settings_user.yaml")
+    if os.path.exists(backup_file):
+        os.remove(backup_file)
 
 def test_get_presets():
     """Tests the /api/presets endpoint."""
@@ -344,3 +345,58 @@ def test_fetch_custom_image_with_special_chars():
         assert os.path.exists(path)
         assert '"' not in path
         assert '°' not in path
+
+
+def test_stream_objects_preloads_altitude_graphs_even_when_saved_types_none():
+    """
+    Tests that passing selected_types='' ('All' types) overrides any saved ['__NONE__']
+    in settings and streams preloaded altitude_graph data in object_details events.
+    """
+    from types import SimpleNamespace
+    from backend.stream_service import apply_stream_query_overrides
+
+    settings = {
+        "selected_types": ["__NONE__"],
+        "client_settings": {"selected_types": ["__NONE__"]},
+    }
+    dummy_req = SimpleNamespace(query_params={"selected_types": ""})
+    apply_stream_query_overrides(
+        settings,
+        dummy_req,
+        400.0,
+        23.5,
+        15.6,
+        52.5,
+        13.4,
+        "messier",
+        "time",
+    )
+    assert settings["selected_types"] == []
+    assert settings["client_settings"]["selected_types"] == []
+
+    params = (
+        "focal_length=400&sensor_width=23.5&sensor_height=15.6"
+        "&latitude=40.7&longitude=-74.0&catalogs=messier&sort_key=time"
+        "&selected_types=&download_mode=none"
+    )
+    with client.stream("GET", f"/api/stream-objects?{params}") as response:
+        assert response.status_code == 200
+        details_events = []
+        current_event = None
+        for line in response.iter_lines():
+            if not line:
+                continue
+            if line.startswith("event:"):
+                current_event = line.split("event:", 1)[1].strip()
+            elif line.startswith("data:") and current_event == "object_details":
+                data_str = line.split("data:", 1)[1].strip()
+                details_events.append(json.loads(data_str))
+                if len(details_events) >= 3:
+                    break
+
+        assert len(details_events) >= 1, "Expected object_details events to be streamed"
+        first_detail = details_events[0]
+        assert "altitude_graph" in first_detail and len(first_detail["altitude_graph"]) > 0
+        assert "moon_graph" in first_detail and len(first_detail["moon_graph"]) > 0
+        assert "sun_graph" in first_detail and len(first_detail["sun_graph"]) > 0
+        assert "hours_above_min" in first_detail

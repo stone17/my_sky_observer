@@ -73,32 +73,22 @@ class AstroCalculator:
             print(f"Error in batch_get_max_altitude: {e}")
             return np.zeros_like(dec_array)
 
-    def get_altitude_graph(
+    def prepare_session_ephemeris(
         self,
-        ra: str,
-        dec: str,
         location: Location,
-        num_points: int = 60,
         start_time: Optional[Time] = None,
         end_time: Optional[Time] = None,
-    ) -> Dict[str, List[AltitudePoint]]:
+        num_points: int = 60,
+        twilight_periods: Optional[Dict[str, List[str]]] = None,
+    ) -> dict:
         """
-        Generates altitude data for an object, the Moon, and the Sun.
-        If start_time/end_time are not provided, calculates them for the current observing session.
+        Precomputes the session AltAz time grid, Moon curve, Sun curve, and night mask once
+        so multiple objects can be evaluated without redundant ephemeris calculations.
         """
         observer_location = EarthLocation(
             lat=location.latitude * u.deg, lon=location.longitude * u.deg
         )
         observer = Observer(location=observer_location)
-
-        if isinstance(ra, (float, int)) and isinstance(dec, (float, int)):
-            target_coords = SkyCoord(ra, dec, unit=(u.deg, u.deg))
-        else:
-            ra_formatted = re.sub(r"[^\d.\-]", " ", str(ra)).strip()
-            dec_formatted = re.sub(r"[^\d.\-]", " ", str(dec)).strip()
-            target_coords = SkyCoord(
-                ra_formatted, dec_formatted, unit=(u.hourangle, u.deg)
-            )
 
         if start_time is None or end_time is None:
             start_time, end_time = self.get_observing_session(observer, Time.now())
@@ -108,37 +98,148 @@ class AstroCalculator:
             duration = 24.0
 
         times = start_time + np.linspace(0, duration, num_points) * u.hour
+        time_strings = [t.isot + "Z" for t in times]
         altaz_frame = AltAz(obstime=times, location=observer_location)
-
-        target_altaz = target_coords.transform_to(altaz_frame)
-        target_points = [
-            AltitudePoint(time=t.isot + "Z", altitude=round(alt.deg, 2))
-            for t, alt in zip(times, target_altaz.alt)
-        ]
 
         try:
             moon_coords = get_body("moon", times, location=observer_location)
             moon_altaz = moon_coords.transform_to(altaz_frame)
+            moon_alts = np.round(moon_altaz.alt.deg, 2)
             moon_points = [
-                AltitudePoint(time=t.isot + "Z", altitude=round(alt.deg, 2))
-                for t, alt in zip(times, moon_altaz.alt)
+                AltitudePoint(time=t_str, altitude=float(alt))
+                for t_str, alt in zip(time_strings, moon_alts)
+            ]
+            moon_dicts = [
+                {"time": t_str, "altitude": float(alt)}
+                for t_str, alt in zip(time_strings, moon_alts)
             ]
         except Exception as e:
             print(f"Error calculating moon altitude: {e}")
             moon_points = []
+            moon_dicts = []
 
         try:
             sun_coords = get_sun(times)
             sun_altaz = sun_coords.transform_to(altaz_frame)
+            sun_alts = np.round(sun_altaz.alt.deg, 2)
             sun_points = [
-                AltitudePoint(time=t.isot + "Z", altitude=round(alt.deg, 2))
-                for t, alt in zip(times, sun_altaz.alt)
+                AltitudePoint(time=t_str, altitude=float(alt))
+                for t_str, alt in zip(time_strings, sun_alts)
+            ]
+            sun_dicts = [
+                {"time": t_str, "altitude": float(alt)}
+                for t_str, alt in zip(time_strings, sun_alts)
             ]
         except Exception as e:
             print(f"Error calculating sun altitude: {e}")
             sun_points = []
+            sun_dicts = []
 
-        return {"target": target_points, "moon": moon_points, "sun": sun_points}
+        night_mask = np.ones(len(times), dtype=bool)
+        if twilight_periods and "night" in twilight_periods:
+            try:
+                night_start = Time(twilight_periods["night"][0])
+                night_end = Time(twilight_periods["night"][1])
+                night_mask = (times >= night_start) & (times <= night_end)
+            except Exception:
+                pass
+
+        time_step_hours = duration / (num_points - 1) if num_points > 1 else 0.0
+
+        return {
+            "times": times,
+            "time_strings": time_strings,
+            "altaz_frame": altaz_frame,
+            "moon_points": moon_points,
+            "sun_points": sun_points,
+            "moon_dicts": moon_dicts,
+            "sun_dicts": sun_dicts,
+            "night_mask": night_mask,
+            "time_step_hours": time_step_hours,
+        }
+
+    def batch_compute_altitude_graphs(
+        self,
+        ra_array: np.ndarray,
+        dec_array: np.ndarray,
+        ephemeris: dict,
+        min_altitude: float,
+    ) -> Tuple[List[List[dict]], List[float]]:
+        """
+        Vectorized computation of altitude graph dicts and hours_above_min for an array of objects.
+        """
+        if len(ra_array) == 0:
+            return [], []
+
+        altaz_frame = ephemeris["altaz_frame"]
+        time_strings = ephemeris["time_strings"]
+        night_mask = ephemeris["night_mask"]
+        time_step_hours = ephemeris["time_step_hours"]
+
+        targets = SkyCoord(ra_array, dec_array, unit=(u.deg, u.deg))[:, np.newaxis]
+        target_altaz = targets.transform_to(altaz_frame)
+        altitudes = np.round(target_altaz.alt.deg, 2)
+
+        above_mask = (altitudes >= min_altitude) & night_mask[np.newaxis, :]
+        valid_counts = np.sum(above_mask, axis=1)
+        hours_list = [round(int(c) * time_step_hours, 1) for c in valid_counts]
+
+        graphs_list = [
+            [
+                {"time": t_str, "altitude": float(alt)}
+                for t_str, alt in zip(time_strings, row_alts)
+            ]
+            for row_alts in altitudes
+        ]
+
+        return graphs_list, hours_list
+
+    def get_altitude_graph(
+        self,
+        ra: str,
+        dec: str,
+        location: Location,
+        num_points: int = 60,
+        start_time: Optional[Time] = None,
+        end_time: Optional[Time] = None,
+        ephemeris: Optional[dict] = None,
+    ) -> Dict[str, List[AltitudePoint]]:
+        """
+        Generates altitude data for an object, the Moon, and the Sun.
+        If start_time/end_time are not provided, calculates them for the current observing session.
+        """
+        if isinstance(ra, (float, int)) and isinstance(dec, (float, int)):
+            target_coords = SkyCoord(ra, dec, unit=(u.deg, u.deg))
+        else:
+            ra_formatted = re.sub(r"[^\d.\-]", " ", str(ra)).strip()
+            dec_formatted = re.sub(r"[^\d.\-]", " ", str(dec)).strip()
+            target_coords = SkyCoord(
+                ra_formatted, dec_formatted, unit=(u.hourangle, u.deg)
+            )
+
+        if ephemeris is None:
+            ephemeris = self.prepare_session_ephemeris(
+                location=location,
+                start_time=start_time,
+                end_time=end_time,
+                num_points=num_points,
+            )
+
+        altaz_frame = ephemeris["altaz_frame"]
+        time_strings = ephemeris["time_strings"]
+
+        target_altaz = target_coords.transform_to(altaz_frame)
+        target_alts = np.round(target_altaz.alt.deg, 2)
+        target_points = [
+            AltitudePoint(time=t_str, altitude=float(alt))
+            for t_str, alt in zip(time_strings, target_alts)
+        ]
+
+        return {
+            "target": target_points,
+            "moon": ephemeris["moon_points"],
+            "sun": ephemeris["sun_points"],
+        }
 
     def prepare_night_frame(
         self, location: Location, night_start: Time, night_end: Time
@@ -225,9 +326,18 @@ class AstroCalculator:
         if len(valid_points) < 1:
             return 0.0
 
-        time_step_hours = (
-            24.0 / (len(altitude_points) - 1) if len(altitude_points) > 1 else 0
-        )
+        if len(altitude_points) > 1:
+            try:
+                span_hours = (
+                    Time(altitude_points[-1].time) - Time(altitude_points[0].time)
+                ).to(u.hour).value
+                if span_hours <= 0:
+                    span_hours = 24.0
+            except Exception:
+                span_hours = 24.0
+            time_step_hours = span_hours / (len(altitude_points) - 1)
+        else:
+            time_step_hours = 0.0
         return round(len(valid_points) * time_step_hours, 1)
 
     def get_twilight_periods(

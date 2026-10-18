@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import os
 import shutil
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 import httpx
 from astropy.coordinates import SkyCoord
 import astropy.units as u
@@ -53,8 +53,13 @@ def get_setup_hash(
     image_padding: float,
     resolution: int,
     source: str,
+    override_fov: Optional[float] = None,
 ) -> str:
     source = validate_image_source(source)
+    default_fov = max(max(fov_w_deg, fov_h_deg) * image_padding, 0.25)
+    if override_fov is not None and abs(float(override_fov) - default_fov) >= 0.01:
+        effective_fov = max(float(override_fov), 0.25)
+        return f"fov_custom_{effective_fov:.2f}_r{int(resolution)}_{source}"
     return f"fov_{fov_w_deg:.2f}_{fov_h_deg:.2f}_p{image_padding:.2f}_r{int(resolution)}_{source}"
 
 

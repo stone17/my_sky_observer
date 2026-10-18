@@ -1,21 +1,28 @@
 <script setup>
 import { computed, ref, watch, nextTick, onMounted, onUnmounted } from 'vue';
+import {
+    getObjectTypeLabel,
+    getObjectTypeShort,
+    getObjectTypeDescription,
+    formatMagnitude
+} from '../utils/catalogMeta.js';
 
 const props = defineProps(['objects', 'selectedId', 'settings', 'clientSettings', 'nightTimes', 'searchQuery']);
-const emit = defineEmits(['select', 'fetch-all', 'update-settings', 'update-client-settings']);
+const emit = defineEmits(['select', 'fetch-all', 'update-settings', 'update-client-settings', 'update-search']);
 
 const showInfoModal = ref(false);
 const infoObject = ref(null);
+const showSuggestions = ref(false);
 
 const localSettings = ref({});
 const localClientSettings = ref({});
 const renderedLimit = ref(50);
 
 const sortOptions = [
-    { value: 'time', label: 'Altitude' },
-    { value: 'hours_above', label: 'Visible' },
-    { value: 'brightness', label: 'Brightness' },
-    { value: 'size', label: 'Size' }
+    { value: 'time', label: 'Peak Altitude' },
+    { value: 'hours_above', label: 'Visible Hours' },
+    { value: 'brightness', label: 'Brightness (Mag)' },
+    { value: 'size', label: 'Angular Size' }
 ];
 
 watch(() => props.settings, (newVal) => {
@@ -41,7 +48,6 @@ watch(() => props.clientSettings, (newVal) => {
 }, { immediate: true, deep: true });
 
 const updateSettings = () => emit('update-settings', localSettings.value);
-const updateClientSettings = () => emit('update-client-settings', localClientSettings.value);
 
 watch(() => props.selectedId, (newId) => {
     if (newId) {
@@ -56,6 +62,41 @@ const openInfo = (obj) => {
     infoObject.value = obj;
     showInfoModal.value = true;
 };
+
+const onSearchInput = (e) => {
+    emit('update-search', e.target.value);
+    showSuggestions.value = true;
+};
+
+const clearSearch = () => {
+    emit('update-search', '');
+    showSuggestions.value = false;
+};
+
+const selectSuggestion = (obj) => {
+    emit('update-search', obj.name);
+    handleObjectClick(obj);
+    showSuggestions.value = false;
+};
+
+const onSearchBlur = () => {
+    setTimeout(() => { showSuggestions.value = false; }, 200);
+};
+
+const suggestionList = computed(() => {
+    const q = (props.searchQuery || '').trim();
+    if (!q) return [];
+    const normQ = q.toLowerCase().replace(/\s+/g, '');
+    const matches = (props.objects || []).filter(o => {
+        if (o._normId === undefined) o._normId = (o.name || '').toLowerCase().replace(/\s+/g, '');
+        if (o._normCommon === undefined) o._normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
+        if (o._normOther === undefined) o._normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
+        if (o._normAliases === undefined) o._normAliases = (o.aliases || '').toLowerCase().replace(/\s+/g, '');
+        
+        return o._normId.includes(normQ) || o._normCommon.includes(normQ) || o._normOther.includes(normQ) || o._normAliases.includes(normQ);
+    });
+    return matches.slice(0, 8);
+});
 
 const filteredAndSortedObjects = computed(() => {
     const minAlt = localSettings.value.min_altitude || 30;
@@ -94,8 +135,7 @@ const filteredAndSortedObjects = computed(() => {
             }
         }
 
-        // If it's not a search match, apply normal filters. 
-        // (Search matches bypass filters so you can always find what you search for)
+        // If it's not a search match, apply normal filters.
         if (!isMatch) {
             if (activeHrs) {
                 const isNaHrs = o.hours_visible === undefined || o.hours_visible === null;
@@ -134,6 +174,7 @@ const filteredAndSortedObjects = computed(() => {
             }
 
             const selectedTypes = localClientSettings.value.selected_types || [];
+            if (selectedTypes.includes('__NONE__')) continue;
             if (selectedTypes.length > 0 && !selectedTypes.includes(o.type)) continue;
         }
 
@@ -143,12 +184,10 @@ const filteredAndSortedObjects = computed(() => {
     }
 
     result.sort((a, b) => {
-        // Always put search matches at the very top
         if (normQ) {
             if (a._isSearchMatch && !b._isSearchMatch) return -1;
             if (!a._isSearchMatch && b._isSearchMatch) return 1;
 
-            // If both are search matches, sort them by relevance
             if (a._isSearchMatch && b._isSearchMatch) {
                 const normA = a._normId;
                 const normB = b._normId;
@@ -166,7 +205,6 @@ const filteredAndSortedObjects = computed(() => {
             }
         }
 
-        // Normal sorting for non-matches (or if no search query)
         let valA, valB, dir = -1;
 
         if (sortKey === 'time' || sortKey === 'altitude') {
@@ -197,8 +235,6 @@ const displayedObjects = computed(() => {
 
 watch(filteredAndSortedObjects, (newList) => {
     renderedLimit.value = 50;
-    // Only auto-select the first item if nothing is currently selected (e.g., initial load)
-    // This prevents the main view from switching or crashing while typing a search query.
     if (!props.selectedId && newList.length > 0) {
         handleObjectClick(newList[0]);
     }
@@ -217,7 +253,6 @@ const handleObjectClick = async (item) => {
     emit('select', item);
     if (!item) return;
 
-    // If the object doesn't have its heavy details loaded yet (e.g. scrolled past top 500)
     if (!item.altitude_graph) {
         try {
             const res = await fetch(`/api/object-details/${encodeURIComponent(item.name)}`);
@@ -250,8 +285,6 @@ const getAltitudePath = (altitudeGraph) => {
 const handleKeydown = (e) => {
     const list = filteredAndSortedObjects.value;
     if (list.length === 0) return;
-    
-    // Only handle up/down if not typing in an input
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
 
     if (e.key === 'ArrowDown') {
@@ -277,74 +310,90 @@ onUnmounted(() => {
 
 <template>
     <div class="list-wrapper">
-        <div class="filter-sidebar">
-            <div class="filter-group">
-                <div class="filter-header">
-                    <label>Alt></label>
-                    <div class="toggles">
-                        <input type="checkbox" v-model="localClientSettings.filter_active_alt" @change="updateClientSettings" title="Enable filter" class="cb-onoff" />
-                        <input type="checkbox" v-model="localClientSettings.filter_na_alt" @change="updateClientSettings" title="Include N/A" class="cb-na" />
-                    </div>
-                </div>
-                <input type="number" v-model.number="localSettings.min_altitude" :disabled="!localClientSettings.filter_active_alt" @input="updateSettings" class="input-sm" />
-            </div>
-            <div class="filter-group">
-                <div class="filter-header">
-                    <label>Hrs&gt;</label>
-                    <div class="toggles">
-                        <input type="checkbox" v-model="localClientSettings.filter_active_hours" @change="updateClientSettings" title="Enable filter" class="cb-onoff" />
-                        <input type="checkbox" v-model="localClientSettings.filter_na_hours" @change="updateClientSettings" title="Include N/A" class="cb-na" />
-                    </div>
-                </div>
-                <input type="number" step="0.5" v-model.number="localClientSettings.min_hours" :disabled="!localClientSettings.filter_active_hours" @change="updateClientSettings" class="input-sm" />
-            </div>
-            <div class="filter-group">
-                <div class="filter-header">
-                    <label>Mag&lt;</label>
-                    <div class="toggles">
-                        <input type="checkbox" v-model="localClientSettings.filter_active_mag" @change="updateClientSettings" title="Enable filter" class="cb-onoff" />
-                        <input type="checkbox" v-model="localClientSettings.filter_na_mag" @change="updateClientSettings" title="Include N/A" class="cb-na" />
-                    </div>
-                </div>
-                <input type="number" step="0.5" v-model.number="localClientSettings.max_magnitude" :disabled="!localClientSettings.filter_active_mag" @change="updateClientSettings" class="input-sm" />
-            </div>
-            <div class="filter-group">
-                <div class="filter-header">
-                    <label>Size></label>
-                    <div class="toggles">
-                        <input type="checkbox" v-model="localClientSettings.filter_active_size" @change="updateClientSettings" title="Enable filter" class="cb-onoff" />
-                        <input type="checkbox" v-model="localClientSettings.filter_na_size" @change="updateClientSettings" title="Include N/A" class="cb-na" />
-                    </div>
-                </div>
-                <input type="number" step="1" v-model.number="localClientSettings.min_size" :disabled="!localClientSettings.filter_active_size" @change="updateClientSettings" class="input-sm" />
-            </div>
-            <div class="filter-group">
-                <label>Sort</label>
-                <select v-model="localSettings.sort_key" @change="updateSettings" class="input-sm sort-select">
-                    <option v-for="opt in sortOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-                </select>
-            </div>
-            <button v-if="localSettings.download_mode === 'filtered'" class="small primary fetch-btn"
-                @click="$emit('fetch-all')">Fetch All</button>
-        </div>
-
         <div class="list-content">
+            <!-- Unified Search + Sort + Count Header -->
             <div class="list-header">
-                <div class="list-stats">
-                    Showing {{ filteredAndSortedObjects.length }} / {{ props.objects.length }}
+                <div class="search-box">
+                    <span class="search-icon">🔍</span>
+                    <input
+                        type="text"
+                        :value="searchQuery"
+                        @input="onSearchInput"
+                        @focus="showSuggestions = true"
+                        @blur="onSearchBlur"
+                        placeholder="Search targets (name, M31, NGC...)"
+                        class="search-input"
+                    />
+                    <button
+                        v-if="searchQuery"
+                        type="button"
+                        class="clear-search-btn"
+                        @click="clearSearch"
+                        title="Clear search"
+                    >
+                        ✕
+                    </button>
+
+                    <div v-if="showSuggestions && suggestionList.length > 0" class="suggestions-popover">
+                        <div
+                            v-for="s in suggestionList"
+                            :key="s.name"
+                            class="suggestion-item"
+                            @mousedown.prevent="selectSuggestion(s)"
+                        >
+                            <strong>{{ s.name }}</strong>
+                            <span v-if="s.common_name && s.common_name !== 'N/A'" class="sug-common">
+                                {{ s.common_name }}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="toolbar-row">
+                    <div class="sort-control">
+                        <label for="sort-select">Sort:</label>
+                        <select id="sort-select" v-model="localSettings.sort_key" @change="updateSettings" class="sort-select">
+                            <option v-for="opt in sortOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                        </select>
+                    </div>
+
+                    <div class="list-stats">
+                        <strong>{{ filteredAndSortedObjects.length }}</strong> / {{ props.objects.length }}
+                    </div>
                 </div>
             </div>
 
+            <!-- Scrollable Target Cards -->
             <div class="scrollable-list" @scroll="onScroll">
-                <div v-for="item in displayedObjects" :key="item.name" :id="`obj-card-${item.name}`"
-                    class="object-card" :class="{ active: selectedId === item.name, 'search-match': item._isSearchMatch }" @click="handleObjectClick(item)">
+                <div
+                    v-for="item in displayedObjects"
+                    :key="item.name"
+                    :id="`obj-card-${item.name}`"
+                    class="object-card"
+                    :class="{ active: selectedId === item.name, 'search-match': item._isSearchMatch }"
+                    @click="handleObjectClick(item)"
+                >
                     <div class="card-content">
+                        <div class="img-col">
+                            <img v-if="item.image_url" :src="item.image_url" class="list-thumb" loading="lazy" />
+                            <div v-else class="img-placeholder">
+                                <span>✦</span>
+                            </div>
+                        </div>
+
                         <div class="info-col">
-                            <div style="display: flex; align-items: center; gap: 5px; width: 100%;">
+                            <div class="title-row">
                                 <h4 :title="item.name">{{ item.name }}</h4>
-                                <div class="info-icon" @click.stop="openInfo(item)">ⓘ</div>
-                                
-                                <div style="margin-left: auto; font-size: 0.9rem; font-weight: bold;" :class="`status-${item.status}`" :title="item.status">
+                                <span
+                                    v-if="item.type"
+                                    class="type-tag"
+                                    :title="`${getObjectTypeLabel(item.type)} (${item.type}) — ${getObjectTypeDescription(item.type)}`"
+                                >
+                                    {{ getObjectTypeShort(item.type) }}
+                                </span>
+                                <button type="button" class="info-icon" @click.stop="openInfo(item)" title="Target Details">ⓘ</button>
+
+                                <div class="status-indicator" :class="`status-${item.status}`" :title="item.status">
                                     <span v-if="item.status === 'cached'">✓</span>
                                     <span v-else-if="item.status === 'downloading'">⟳</span>
                                     <span v-else-if="item.status === 'error'">✗</span>
@@ -352,55 +401,50 @@ onUnmounted(() => {
                                 </div>
                             </div>
 
-                            <div class="common-name"
-                                :title="item.common_name && item.common_name !== 'N/A' ? item.common_name + ' • ' + item.constellation : item.constellation">
+                            <div class="common-name" :title="item.common_name && item.common_name !== 'N/A' ? item.common_name + ' • ' + item.constellation : item.constellation">
                                 <template v-if="item.common_name && item.common_name !== 'N/A'">
-                                    {{ item.common_name }} &bull; 
+                                    {{ item.common_name }} &bull;
                                 </template>
                                 {{ item.constellation }}
                             </div>
 
-                            <small>
-                                Mag: {{ typeof item.mag === 'number' ? item.mag.toFixed(2) : item.mag }}<br />
-                                Size: {{ item.size }}<br />
+                            <div class="metrics-row">
+                                <span>Mag: <strong>{{ formatMagnitude(item.mag) }}</strong></span>
+                                <span>Size: <strong>{{ item.size }}</strong></span>
                                 <span class="vis-time">Vis: {{ item._dynamicHours || 0 }}h</span>
-                            </small>
+                            </div>
                         </div>
-                        <div class="img-col">
-                            <img v-if="item.image_url" :src="item.image_url" class="list-thumb" loading="lazy" />
-                            <div v-else class="img-placeholder"></div>
-                        </div>
+
                         <div class="graph-col">
                             <div class="altitude-chart" v-if="item.altitude_graph && item.altitude_graph.length">
                                 <svg viewBox="0 0 100 40" preserveAspectRatio="none" width="100%" height="40">
-                                    <line x1="0" y1="26" x2="100" y2="26" stroke="#444" stroke-width="1"
-                                        stroke-dasharray="2" />
-                                    <path :d="getAltitudePath(item.altitude_graph)" fill="rgba(0, 255, 0, 0.2)"
-                                        stroke="#0f0" stroke-width="1" />
+                                    <line x1="0" y1="26" x2="100" y2="26" stroke="#374151" stroke-width="1" stroke-dasharray="2" />
+                                    <path :d="getAltitudePath(item.altitude_graph)" fill="rgba(16, 185, 129, 0.25)" stroke="#10b981" stroke-width="1.2" />
                                 </svg>
                             </div>
                             <div class="coord-label">
-                                {{ typeof item.ra === 'number' ? item.ra.toFixed(2) : item.ra }} / {{ typeof item.dec === 'number' ? item.dec.toFixed(2) : item.dec }}
+                                {{ typeof item.ra === 'number' ? item.ra.toFixed(1) : item.ra }}° / {{ typeof item.dec === 'number' ? item.dec.toFixed(1) : item.dec }}°
                             </div>
                         </div>
                     </div>
                 </div>
-                <div v-if="filteredAndSortedObjects.length === 0"
-                    style="text-align: center; color: gray; padding: 20px;">
-                    No objects match filters.
+
+                <div v-if="filteredAndSortedObjects.length === 0" class="empty-list">
+                    <p>No targets match your current filters.</p>
                 </div>
             </div>
         </div>
 
+        <!-- Info Modal -->
         <div v-if="showInfoModal" class="modal-overlay" @click="showInfoModal = false">
             <div class="modal-content" @click.stop>
                 <h3>{{ infoObject?.common_name && infoObject?.common_name !== 'N/A' ? infoObject.common_name : infoObject?.name }}</h3>
                 <p v-if="infoObject?.common_name && infoObject?.common_name !== 'N/A'"><strong>Catalog Name:</strong> {{ infoObject.name }}</p>
                 <p v-if="infoObject?.aliases"><strong>Aliases:</strong> {{ infoObject.aliases }}</p>
                 <p><strong>RA/DEC:</strong> {{ typeof infoObject?.ra === 'number' ? infoObject.ra.toFixed(3) : infoObject?.ra }} / {{ typeof infoObject?.dec === 'number' ? infoObject.dec.toFixed(3) : infoObject?.dec }}</p>
-                <p><strong>Type:</strong> {{ infoObject?.type }}</p>
+                <p><strong>Type:</strong> {{ getObjectTypeLabel(infoObject?.type) }} <small v-if="infoObject?.type">({{ infoObject.type }})</small></p>
                 <p><strong>Constellation:</strong> {{ infoObject?.constellation }}</p>
-                <p><strong>Magnitude:</strong> {{ infoObject?.mag }}</p>
+                <p><strong>Magnitude:</strong> {{ formatMagnitude(infoObject?.mag) }}</p>
                 <p><strong>Size:</strong> {{ infoObject?.size }}</p>
                 <p><strong>Surface Brightness:</strong> {{ infoObject?.surface_brightness }}</p>
                 <button @click="showInfoModal = false" class="close-btn">Close</button>
@@ -412,21 +456,10 @@ onUnmounted(() => {
 <style scoped>
 .list-wrapper {
     display: flex;
-    flex-direction: row;
+    flex-direction: column;
     height: 100%;
     overflow: hidden;
-}
-
-.filter-sidebar {
-    width: 100px;
     background: #111827;
-    border-right: 1px solid #374151;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    padding: 12px 6px;
-    align-items: center;
-    overflow-y: auto;
 }
 
 .list-content {
@@ -439,110 +472,158 @@ onUnmounted(() => {
 .list-header {
     background: #1f2937;
     border-bottom: 1px solid #374151;
-    padding: 10px;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
     z-index: 50;
 }
 
-.scrollable-list {
-    flex: 1;
-    overflow-y: auto;
-    padding: 5px;
-}
-
-.filter-group {
+.search-box {
+    position: relative;
     display: flex;
-    flex-direction: column;
     align-items: center;
-    width: 100%;
-    gap: 2px;
+    background: #111827;
+    border: 1px solid #4b5563;
+    border-radius: 6px;
+    padding: 0 8px;
+    height: 34px;
 }
 
-.filter-group label {
+.search-box:focus-within {
+    border-color: #10b981;
+}
+
+.search-icon {
     font-size: 0.8rem;
-    color: #9ca3af;
-    text-align: center;
-    margin-bottom: 2px;
+    margin-right: 6px;
+    opacity: 0.7;
 }
 
-.filter-header {
+.search-input {
+    flex: 1;
+    background: transparent !important;
+    border: none !important;
+    color: #f3f4f6 !important;
+    font-size: 0.85rem;
+    padding: 0 !important;
+    margin: 0 !important;
+    height: 100% !important;
+    outline: none !important;
+    box-shadow: none !important;
+}
+
+.clear-search-btn {
+    background: transparent;
+    border: none;
+    color: #9ca3af;
+    cursor: pointer;
+    font-size: 0.85rem;
+    padding: 2px 4px;
+    margin: 0;
+}
+
+.clear-search-btn:hover {
+    color: #fff;
+}
+
+.suggestions-popover {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    background: #1f2937;
+    border: 1px solid #4b5563;
+    border-radius: 6px;
+    max-height: 260px;
+    overflow-y: auto;
+    z-index: 100;
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.5);
+}
+
+.suggestion-item {
+    padding: 7px 10px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    border-bottom: 1px solid #374151;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    width: 100%;
-    margin-bottom: 2px;
 }
 
-.filter-header label {
-    margin-bottom: 0;
-    text-align: left;
+.suggestion-item:hover {
+    background: #374151;
 }
 
-.toggles {
+.sug-common {
+    color: #9ca3af;
+    font-size: 0.75rem;
+}
+
+.toolbar-row {
     display: flex;
-    gap: 4px;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
 }
 
-.cb-onoff {
-    accent-color: #10b981;
-    width: 12px;
-    height: 12px;
+.sort-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.sort-control label {
+    font-size: 0.75rem;
+    color: #9ca3af;
     margin: 0;
-    cursor: pointer;
-}
-
-.cb-na {
-    accent-color: #f59e0b;
-    width: 12px;
-    height: 12px;
-    margin: 0;
-    cursor: pointer;
-}
-
-.input-sm:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-
-.input-sm {
-    width: 100%;
-    background: #000;
-    color: white;
-    border: 1px solid #4b5563;
-    padding: 4px;
-    font-size: 0.9rem;
-    text-align: center;
 }
 
 .sort-select {
-    text-align: left;
-    font-size: 0.85rem;
-    padding: 4px;
+    background: #111827;
+    color: #e5e7eb;
+    border: 1px solid #4b5563;
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 0.78rem;
+    height: 26px;
+    margin: 0;
 }
 
-.fetch-btn {
-    width: 100%;
-    font-size: 0.85rem;
-    padding: 6px 4px;
-    margin-top: 10px;
-    text-align: center;
-    white-space: normal;
+.list-stats {
+    font-size: 0.75rem;
+    color: #9ca3af;
+}
+
+.list-stats strong {
+    color: #10b981;
+}
+
+/* Scrollable List & Cards */
+.scrollable-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px;
 }
 
 .object-card {
     background: #111827;
     border: 1px solid #374151;
-    margin-bottom: 5px;
+    margin-bottom: 6px;
     cursor: pointer;
-    border-radius: 4px;
+    border-radius: 6px;
+    overflow: hidden;
+    transition: border-color 0.15s, background-color 0.15s;
 }
 
 .object-card:hover {
     background: #1f2937;
+    border-color: #4b5563;
 }
 
 .object-card.active {
     border-color: #10b981;
-    background: #1f2937;
+    background: rgba(16, 185, 129, 0.08);
 }
 
 .object-card.search-match {
@@ -551,43 +632,18 @@ onUnmounted(() => {
 
 .card-content {
     display: flex;
-    height: 95px;
-}
-
-.info-col {
-    flex: 2;
-    padding: 8px;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    overflow: hidden;
+    min-height: 76px;
+    align-items: stretch;
 }
 
 .img-col {
-    width: 95px;
+    width: 68px;
+    flex-shrink: 0;
     background: #000;
     display: flex;
     align-items: center;
     justify-content: center;
     overflow: hidden;
-}
-
-.graph-col {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    padding: 4px;
-    background: #000;
-}
-
-.coord-label {
-    font-size: 0.65rem;
-    color: #9ca3af;
-    text-align: center;
-    margin-top: 4px;
-    white-space: nowrap;
 }
 
 .list-thumb {
@@ -599,80 +655,145 @@ onUnmounted(() => {
 .img-placeholder {
     width: 100%;
     height: 100%;
-    background: #222;
+    background: #0f172a;
+    color: #334155;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2rem;
+}
+
+.info-col {
+    flex: 1;
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 2px;
+    min-width: 0;
+}
+
+.title-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
 }
 
 .info-col h4 {
-    margin: 0 0 2px 0;
-    font-size: 1rem;
-    font-weight: bold;
+    margin: 0;
+    font-size: 0.88rem;
+    line-height: 1.2;
+    font-weight: 700;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     color: #f3f4f6;
 }
 
-.info-col small {
-    font-size: 0.75rem;
-    color: #9ca3af;
+.type-tag {
+    font-size: 0.63rem;
     line-height: 1.2;
-}
-
-.vis-time {
-    color: #10b981;
-    font-weight: bold;
-}
-
-.status-badge {
-    font-size: 0.7rem;
-    padding: 1px 4px;
-    border-radius: 2px;
     background: #374151;
-    margin-top: auto;
-    align-self: flex-start;
-}
-
-.status-cached {
-    color: #10b981;
-}
-
-.status-downloading {
-    color: #f59e0b;
-}
-
-.status-error {
-    color: #ef4444;
-}
-
-.altitude-chart {
-    width: 100%;
-    height: 45px;
+    color: #d1d5db;
+    padding: 1px 5px;
+    border-radius: 3px;
+    white-space: nowrap;
+    flex-shrink: 0;
 }
 
 .info-icon {
-    cursor: help;
+    background: transparent;
+    border: none;
+    cursor: pointer;
     color: #60a5fa;
-    font-size: 0.9rem;
+    font-size: 0.82rem;
+    padding: 0 2px;
+    margin: 0;
+    line-height: 1;
+    flex-shrink: 0;
 }
 
+.status-indicator {
+    margin-left: auto;
+    font-size: 0.8rem;
+    font-weight: bold;
+    line-height: 1;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.status-cached { color: #10b981; }
+.status-downloading { color: #f59e0b; }
+.status-error { color: #ef4444; }
+
 .common-name {
-    font-size: 0.75rem;
-    font-weight: normal;
+    font-size: 0.72rem;
+    line-height: 1.25;
     color: #9ca3af;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    margin-top: -2px;
-    margin-bottom: 2px;
 }
 
-.list-stats {
-    font-size: 0.75rem;
+.metrics-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.7rem;
+    line-height: 1.2;
     color: #9ca3af;
-    text-align: right;
-    margin-top: 4px;
+    white-space: nowrap;
 }
 
+.metrics-row span {
+    white-space: nowrap;
+}
+
+.metrics-row strong {
+    color: #e5e7eb;
+}
+
+.vis-time {
+    color: #10b981;
+    font-weight: 600;
+    margin-left: auto;
+    white-space: nowrap;
+}
+
+.graph-col {
+    width: 82px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 5px;
+    background: rgba(0, 0, 0, 0.35);
+    border-left: 1px solid rgba(55, 65, 81, 0.5);
+}
+
+.altitude-chart {
+    width: 100%;
+    height: 38px;
+}
+
+.coord-label {
+    font-size: 0.62rem;
+    color: #6b7280;
+    text-align: center;
+    margin-top: 2px;
+    white-space: nowrap;
+}
+
+.empty-list {
+    text-align: center;
+    color: #6b7280;
+    padding: 30px 15px;
+    font-size: 0.85rem;
+}
+
+/* Info Modal */
 .modal-overlay {
     position: fixed;
     top: 0;
@@ -683,7 +804,7 @@ onUnmounted(() => {
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 1000;
+    z-index: 3000;
 }
 
 .modal-content {
@@ -691,7 +812,7 @@ onUnmounted(() => {
     padding: 20px;
     border-radius: 8px;
     border: 1px solid #374151;
-    max-width: 300px;
+    max-width: 320px;
     width: 90%;
     color: #f3f4f6;
 }
@@ -716,21 +837,5 @@ onUnmounted(() => {
 
 .close-btn:hover {
     background: #4b5563;
-}
-
-/* Responsive adjustments for mobile */
-@media (max-width: 768px) {
-    .card-content {
-        height: auto;
-        flex-wrap: wrap;
-    }
-    .img-col {
-        width: 80px;
-        height: 80px;
-    }
-    .graph-col {
-        width: 100%;
-        flex: none;
-    }
 }
 </style>

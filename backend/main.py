@@ -231,22 +231,23 @@ async def fetch_custom_image(req: FetchImageRequest):
         except Exception:
             pass
 
+    effective_fov = max(float(req.fov), 0.25)
     setup_hash = get_custom_coord_hash(
-        req.ra, req.dec, req.fov, req.resolution, req.source
+        req.ra, req.dec, effective_fov, req.resolution, req.source
     )
     name = f"RADEC_{req.ra:.3f}_{req.dec:.3f}"
     try:
         url = await download_image(
             req.ra,
             req.dec,
-            req.fov,
+            effective_fov,
             name,
             setup_hash,
             resolution=req.resolution,
             source=req.source,
             timeout=req.timeout,
         )
-        return {"url": url}
+        return {"url": url, "status": "cached", "image_fov": effective_fov}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -256,9 +257,12 @@ async def download_object_endpoint(request: Request):
     try:
         data = await request.json()
         req_settings = data["settings"]
+        override_fov = data.get("fov", req_settings.get("fov"))
         telescope = Telescope(**req_settings["telescope"])
         camera = Camera(**req_settings["camera"])
-        fov_info = compute_fov_and_setup(telescope, camera, req_settings)
+        fov_info = compute_fov_and_setup(
+            telescope, camera, req_settings, override_fov=override_fov
+        )
 
         obj = data["object"]
         url = await download_image(
@@ -275,6 +279,9 @@ async def download_object_endpoint(request: Request):
             "url": url,
             "status": "cached",
             "image_fov": fov_info["download_fov"],
+            "sensor_fov": fov_info["sensor_fov"],
+            "fov_rectangle": fov_info["fov_rect"].model_dump(),
+            "setup_hash": fov_info["setup_hash"],
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

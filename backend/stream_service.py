@@ -27,7 +27,10 @@ catalogs = CatalogManager()
 
 
 def compute_fov_and_setup(
-    telescope: Telescope, camera: Camera, settings: dict
+    telescope: Telescope,
+    camera: Camera,
+    settings: dict,
+    override_fov: Optional[float] = None,
 ) -> dict:
     """Compute FOV geometry, download FOV, FOV rectangle, and image setup hash."""
     img_srv = settings.get("image_server", {})
@@ -41,7 +44,21 @@ def compute_fov_and_setup(
     fov_w_min, fov_h_min = calculator.calculate_fov(telescope, camera)
     fov_w_deg = fov_w_min / 60.0
     fov_h_deg = fov_h_min / 60.0
-    download_fov = max(max(fov_w_deg, fov_h_deg) * img_padding, 0.25)
+    default_download_fov = max(max(fov_w_deg, fov_h_deg) * img_padding, 0.25)
+
+    raw_override = override_fov if override_fov is not None else settings.get("fov")
+    parsed_override = None
+    if raw_override is not None:
+        try:
+            candidate = float(raw_override)
+            if candidate > 0:
+                parsed_override = max(candidate, 0.25)
+        except (TypeError, ValueError):
+            parsed_override = None
+
+    download_fov = (
+        parsed_override if parsed_override is not None else default_download_fov
+    )
 
     sensor_fov_data = {"w": fov_w_deg, "h": fov_h_deg}
     fov_rect = FOVRectangle(
@@ -49,13 +66,19 @@ def compute_fov_and_setup(
         height_percent=(fov_h_deg / download_fov) * 100.0,
     )
     setup_hash = get_setup_hash(
-        fov_w_deg, fov_h_deg, img_padding, img_res, img_source
+        fov_w_deg,
+        fov_h_deg,
+        img_padding,
+        img_res,
+        img_source,
+        override_fov=parsed_override,
     )
 
     return {
         "fov_w_deg": fov_w_deg,
         "fov_h_deg": fov_h_deg,
         "download_fov": download_fov,
+        "default_download_fov": default_download_fov,
         "sensor_fov": sensor_fov_data,
         "fov_rect": fov_rect,
         "setup_hash": setup_hash,
@@ -232,6 +255,11 @@ def apply_stream_query_overrides(
         client_cfg["min_size"] = val
     if "image_padding" in qp:
         settings["image_padding"] = float(qp["image_padding"])
+    if "fov" in qp and qp["fov"]:
+        try:
+            settings["fov"] = float(qp["fov"])
+        except ValueError:
+            pass
     if "image_timeout" in qp:
         val = int(qp["image_timeout"])
         settings["image_timeout"] = val
@@ -261,8 +289,9 @@ def apply_stream_query_overrides(
             settings[flag_key] = bool_val
             client_cfg[flag_key] = bool_val
 
-    if "selected_types" in qp and qp["selected_types"]:
-        types_list = qp["selected_types"].split(",")
+    if "selected_types" in qp:
+        raw_types = qp["selected_types"].strip()
+        types_list = [t for t in raw_types.split(",") if t.strip()] if raw_types else []
         settings["selected_types"] = types_list
         client_cfg["selected_types"] = types_list
 
@@ -515,6 +544,8 @@ class StreamSession:
                     return False
 
             if sel_types:
+                if "__none__" in sel_types:
+                    return False
                 o_type = str(o.get("type", "")).strip().lower()
                 if o_type not in sel_types:
                     return False
@@ -530,25 +561,82 @@ class StreamSession:
         else:
             self.download_list = []
 
+    def _build_batch_details_sync(self, download_ids: set, min_alt: float) -> List[dict]:
+        if not self.top_objects:
+            return []
+
+        ephemeris = calculator.prepare_session_ephemeris(
+            location=self.location,
+            start_time=self.session_start,
+            end_time=self.session_end,
+            num_points=60,
+            twilight_periods=self.twilight,
+        )
+
+        ra_array = np.array(
+            [float(o.get("ra") or 0.0) for o in self.top_objects], dtype=float
+        )
+        dec_array = np.array(
+            [float(o.get("dec") or 0.0) for o in self.top_objects], dtype=float
+        )
+        graphs_list, hours_list = calculator.batch_compute_altitude_graphs(
+            ra_array=ra_array,
+            dec_array=dec_array,
+            ephemeris=ephemeris,
+            min_altitude=min_alt,
+        )
+
+        fov_rect_dict = self.fov_info["fov_rect"].model_dump()
+        sensor_fov = self.fov_info["sensor_fov"]
+        image_fov = self.fov_info["download_fov"]
+        setup_hash = self.fov_info["setup_hash"]
+        moon_dicts = ephemeris["moon_dicts"]
+        sun_dicts = ephemeris["sun_dicts"]
+
+        results = []
+        for obj, alt_graph, hours in zip(self.top_objects, graphs_list, hours_list):
+            obj_id = obj["id"]
+            url, filepath, _ = get_cache_info(obj_id, setup_hash)
+            is_cached = os.path.exists(filepath)
+
+            if is_cached:
+                status = "cached"
+            elif obj_id in download_ids:
+                status = "queued"
+            else:
+                status = "pending"
+
+            results.append(
+                {
+                    "name": obj_id,
+                    "image_url": url if is_cached else "",
+                    "altitude_graph": alt_graph,
+                    "moon_graph": moon_dicts,
+                    "sun_graph": sun_dicts,
+                    "fov_rectangle": fov_rect_dict,
+                    "sensor_fov": sensor_fov,
+                    "image_fov": image_fov,
+                    "hours_above_min": hours,
+                    "setup_hash": setup_hash,
+                    "status": status,
+                }
+            )
+        return results
+
     async def stream_details(self):
+        if not self.top_objects:
+            return
+
         download_ids = set(o["id"] for o in self.download_list)
         min_alt = self.settings.get("min_altitude", 30.0)
 
-        for obj in self.top_objects:
-            if await self.request.is_disconnected():
-                return
+        details_batch = await asyncio.to_thread(
+            self._build_batch_details_sync, download_ids, min_alt
+        )
 
-            detail = await compute_object_detail_payload(
-                obj=obj,
-                location=self.location,
-                session_start=self.session_start,
-                session_end=self.session_end,
-                twilight=self.twilight,
-                min_altitude=min_alt,
-                fov_info=self.fov_info,
-                download_ids=download_ids,
-                include_aliases=False,
-            )
+        for idx, detail in enumerate(details_batch):
+            if idx % 25 == 0 and await self.request.is_disconnected():
+                return
             yield f"event: object_details\ndata: {json.dumps(detail)}\n\n"
 
     async def stream_downloads(self):
