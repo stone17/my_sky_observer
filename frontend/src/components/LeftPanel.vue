@@ -24,6 +24,14 @@ const props = defineProps({
     totalObjectsCount: {
         type: Number,
         default: 0
+    },
+    activeTab: {
+        type: String,
+        default: 'filters'
+    },
+    showMobileList: {
+        type: Boolean,
+        default: false
     }
 });
 
@@ -35,17 +43,30 @@ const emit = defineEmits([
     'purge-cache',
     'download-filtered',
     'download-all',
-    'stop-download'
+    'stop-download',
+    'update-active-tab',
+    'toggle-mobile-list'
 ]);
 
-const activeTab = ref('filters'); // 'filters' | 'equipment' | 'location' | 'images' | 'nina' | null
+const activeTab = ref(props.activeTab); // 'filters' | 'equipment' | 'location' | 'images' | 'nina' | null
+
+watch(() => props.activeTab, (newVal) => {
+    activeTab.value = newVal;
+});
 
 const toggleTab = (tabName) => {
-    activeTab.value = activeTab.value === tabName ? null : tabName;
+    const next = activeTab.value === tabName ? null : tabName;
+    activeTab.value = next;
+    emit('update-active-tab', next);
 };
 
 const closePanel = () => {
     activeTab.value = null;
+    emit('update-active-tab', null);
+};
+
+const onToggleMobileTargets = () => {
+    emit('toggle-mobile-list');
 };
 
 const localSettings = ref({});
@@ -466,6 +487,19 @@ const activeFiltersCount = computed(() => {
                 >
                     <span class="rail-icon">📡</span>
                     <span class="rail-label">NINA</span>
+                </button>
+
+                <button
+                    type="button"
+                    class="rail-btn mobile-targets-rail-btn"
+                    :class="{ active: showMobileList }"
+                    @click="onToggleMobileTargets"
+                    title="Targets & Altitude Graph"
+                    aria-label="Targets & Altitude Graph"
+                >
+                    <span class="rail-icon">📋</span>
+                    <span class="rail-label">Targets</span>
+                    <span v-if="totalObjectsCount > 0" class="rail-badge">{{ totalObjectsCount > 999 ? '999+' : totalObjectsCount }}</span>
                 </button>
             </div>
 
@@ -1699,14 +1733,22 @@ const activeFiltersCount = computed(() => {
     display: none;
 }
 
+.mobile-targets-rail-btn {
+    display: none;
+}
+
 @media (max-width: 1024px) {
+    .mobile-targets-rail-btn {
+        display: flex;
+    }
+
     .drawer-panel {
         position: fixed;
         top: 0;
         left: 56px;
         bottom: 0;
         width: calc(100vw - 56px);
-        max-width: 320px;
+        max-width: 340px;
         z-index: 2500;
     }
 
@@ -1719,6 +1761,81 @@ const activeFiltersCount = computed(() => {
         bottom: 0;
         background: rgba(0, 0, 0, 0.6);
         z-index: 2400;
+    }
+}
+
+/* Phone layout: convert left rail into a bottom navigation bar */
+@media (max-width: 768px) {
+    .left-panel-wrapper {
+        width: 0;
+        height: 0;
+    }
+
+    .activity-rail {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        top: auto;
+        width: 100vw;
+        height: calc(56px + env(safe-area-inset-bottom, 0px));
+        padding: 4px 6px calc(4px + env(safe-area-inset-bottom, 0px)) 6px;
+        box-sizing: border-box;
+        flex-direction: row;
+        justify-content: space-around;
+        border-right: none;
+        border-top: 1px solid #1e293b;
+        z-index: 2800;
+    }
+
+    .rail-top {
+        flex-direction: row;
+        justify-content: space-around;
+        align-items: center;
+        width: 100%;
+        gap: 2px;
+    }
+
+    .rail-btn {
+        flex: 1;
+        max-width: 68px;
+        height: 46px;
+        padding: 3px 2px;
+    }
+
+    .rail-icon {
+        font-size: 1.05rem;
+    }
+
+    .rail-label {
+        font-size: 0.58rem;
+    }
+
+    .rail-bottom {
+        display: none;
+    }
+
+    .drawer-panel {
+        top: 8vh;
+        left: 0;
+        right: 0;
+        bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+        width: 100vw;
+        max-width: 100vw;
+        height: auto;
+        border-right: none;
+        border-top: 1px solid #374151;
+        border-radius: 14px 14px 0 0;
+        box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.75);
+        z-index: 2600;
+    }
+
+    .mobile-backdrop {
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+        z-index: 2550;
     }
 }
 </style>

@@ -33,6 +33,25 @@ const isLoading = ref(false);
 
 // Mobile UI State
 const showMobileList = ref(false);
+const activeLeftTab = ref('filters');
+
+const handleTabChange = (tab) => {
+    activeLeftTab.value = tab;
+    if (tab && window.innerWidth <= 1024) {
+        showMobileList.value = false;
+    }
+};
+
+const toggleMobileList = () => {
+    showMobileList.value = !showMobileList.value;
+    if (showMobileList.value && window.innerWidth <= 1024) {
+        activeLeftTab.value = null;
+    }
+};
+
+const closeMobileList = () => {
+    showMobileList.value = false;
+};
 
 // --- FOV STATE (Single Source of Truth) ---
 const activeFov = ref(1.0);
@@ -494,6 +513,9 @@ watch(streamParams, (newVal, oldVal) => {
 }, { deep: true });
 
 onMounted(async () => {
+    if (window.innerWidth <= 1024) {
+        activeLeftTab.value = null;
+    }
     isInitializing = true;
     await fetchSettings();
     startStream('selected');
@@ -507,19 +529,6 @@ watch(clientSettings, () => {
 
 <template>
     <div class="app-container">
-        <!-- Mobile Floating Action Button for Target List -->
-        <div class="mobile-fabs">
-            <button
-                class="fab"
-                type="button"
-                @click="showMobileList = !showMobileList"
-                title="Toggle Target List"
-                aria-label="Toggle Target List"
-            >
-                📋
-            </button>
-        </div>
-
         <div class="main-layout">
             <!-- Left Expandable Panel (Activity Rail + Drawer) -->
             <LeftPanel
@@ -533,6 +542,10 @@ watch(clientSettings, () => {
                 :system-fov="systemFov"
                 :selected-object="selectedObject"
                 :total-objects-count="typeFilteredObjectsCount"
+                :active-tab="activeLeftTab"
+                :show-mobile-list="showMobileList"
+                @update-active-tab="handleTabChange"
+                @toggle-mobile-list="toggleMobileList"
                 @update-settings="saveSettings"
                 @update-client-settings="updateClientSettings"
                 @start-stream="startStream"
@@ -558,6 +571,7 @@ watch(clientSettings, () => {
                         @select-object="selectedObject = $event"
                         @update-settings="saveSettings"
                         @update-client-settings="updateClientSettings"
+                        @open-mobile-list="toggleMobileList"
                     />
                 </div>
                 <div v-else-if="isLoading" class="empty-state">
@@ -567,12 +581,37 @@ watch(clientSettings, () => {
                 </div>
                 <div v-else class="empty-state">
                     <h2>Select an object to view</h2>
-                    <p>Use the left panel to configure filters and equipment, or choose a target from the right sidebar.</p>
+                    <p>Use the navigation panel to configure filters and equipment, or choose a target from the Targets list.</p>
+                    <button type="button" class="empty-targets-btn mobile-only-btn" @click="toggleMobileList">
+                        📋 Browse Targets ({{ typeFilteredObjectsCount }})
+                    </button>
                 </div>
             </section>
 
+            <!-- Mobile Backdrop for Right Target Sidebar -->
+            <div
+                v-if="showMobileList"
+                class="sidebar-backdrop"
+                @click="closeMobileList"
+            ></div>
+
             <!-- Right Target Sidebar (Altitude Graph + Object List) -->
             <aside class="sidebar" :class="{ 'mobile-visible': showMobileList }">
+                <header class="mobile-sidebar-header">
+                    <div class="mobile-sidebar-title">
+                        <span>📋 Targets & Visibility</span>
+                        <span class="mobile-sidebar-badge">{{ typeFilteredObjectsCount }}</span>
+                    </div>
+                    <button
+                        type="button"
+                        class="mobile-sidebar-close"
+                        @click="closeMobileList"
+                        title="Close Targets Panel"
+                        aria-label="Close Targets Panel"
+                    >
+                        ✕
+                    </button>
+                </header>
                 <div class="graph-panel">
                     <AltitudeGraph :object="selectedObject" :location="settings.location" :nightTimes="nightTimes" />
                 </div>
@@ -613,13 +652,16 @@ body {
     color: var(--text-color);
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     height: 100vh;
+    height: 100dvh;
     overflow: hidden;
+    overscroll-behavior: none;
 }
 
 .app-container {
     display: flex;
     flex-direction: column;
     height: 100vh;
+    height: 100dvh;
     width: 100vw;
     overflow: hidden;
 }
@@ -630,6 +672,7 @@ body {
     overflow: hidden;
     position: relative;
     height: 100%;
+    min-height: 0;
 }
 
 .framing-section {
@@ -637,6 +680,7 @@ body {
     border-right: 1px solid var(--border-color);
     position: relative;
     min-width: 0;
+    min-height: 0;
     background: #000;
 }
 
@@ -653,6 +697,23 @@ body {
     color: #6b7280;
     text-align: center;
     padding: 20px;
+    box-sizing: border-box;
+}
+
+.empty-targets-btn {
+    margin-top: 14px;
+    background: #10b981;
+    color: #064e3b;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-size: 0.9rem;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.mobile-only-btn {
+    display: none;
 }
 
 .spinner {
@@ -679,6 +740,14 @@ body {
     z-index: 10;
 }
 
+.mobile-sidebar-header {
+    display: none;
+}
+
+.sidebar-backdrop {
+    display: none;
+}
+
 .graph-panel {
     height: 190px;
     border-bottom: 1px solid var(--border-color);
@@ -689,41 +758,19 @@ body {
 .list-panel {
     flex: 1;
     overflow: hidden;
+    min-height: 0;
 }
 
-.mobile-fabs {
-    display: none;
-}
-
-/* Responsive adjustments for mobile and tablets */
+/* Responsive adjustments for tablets and phones */
 @media (max-width: 1024px) {
     body {
         overflow: hidden;
     }
 
-    .mobile-fabs {
-        display: flex;
-        position: fixed;
-        bottom: 20px;
-        right: 14px;
-        flex-direction: column;
-        gap: 10px;
-        z-index: 3000;
-    }
-
-    .fab {
-        width: 46px;
-        height: 46px;
-        border-radius: 50%;
-        background: #10b981;
-        color: white;
-        border: none;
-        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4);
-        font-size: 1.2rem;
-        display: flex;
+    .mobile-only-btn {
+        display: inline-flex;
         align-items: center;
-        justify-content: center;
-        cursor: pointer;
+        gap: 6px;
     }
 
     .framing-section {
@@ -732,17 +779,25 @@ body {
         flex: 1 1 100%;
     }
 
+    .sidebar-backdrop {
+        display: block;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.6);
+        z-index: 2550;
+    }
+
     .sidebar {
-        position: absolute !important;
+        position: fixed !important;
         top: 0;
         right: 0;
         bottom: 0;
-        width: 85%;
-        max-width: 380px;
+        width: 88%;
+        max-width: 400px;
         transform: translateX(100%);
-        transition: transform 0.3s ease;
-        background: rgba(17, 24, 39, 0.98);
-        box-shadow: -4px 0 12px rgba(0, 0, 0, 0.5);
+        transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+        background: #111827;
+        box-shadow: -6px 0 20px rgba(0, 0, 0, 0.65);
         z-index: 2600;
     }
 
@@ -750,8 +805,86 @@ body {
         transform: translateX(0);
     }
 
+    .mobile-sidebar-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 14px;
+        background: #1f2937;
+        border-bottom: 1px solid #374151;
+        flex-shrink: 0;
+    }
+
+    .mobile-sidebar-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.92rem;
+        font-weight: 700;
+        color: #f3f4f6;
+    }
+
+    .mobile-sidebar-badge {
+        background: rgba(16, 185, 129, 0.18);
+        color: #10b981;
+        border: 1px solid rgba(16, 185, 129, 0.35);
+        font-size: 0.72rem;
+        padding: 1px 7px;
+        border-radius: 999px;
+    }
+
+    .mobile-sidebar-close {
+        background: #374151;
+        border: none;
+        color: #e5e7eb;
+        width: 30px;
+        height: 30px;
+        border-radius: 6px;
+        font-size: 0.95rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        padding: 0;
+        margin: 0;
+    }
+
     .graph-panel {
-        height: 155px;
+        height: 150px;
+    }
+}
+
+/* Phone layout: bottom navigation bar + full-width bottom sheets */
+@media (max-width: 768px) {
+    .main-layout {
+        padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+        box-sizing: border-box;
+    }
+
+    .sidebar-backdrop {
+        bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+    }
+
+    .sidebar {
+        top: 6vh;
+        left: 0;
+        right: 0;
+        bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+        width: 100%;
+        max-width: 100%;
+        border-top: 1px solid #374151;
+        border-radius: 14px 14px 0 0;
+        transform: translateY(105%);
+        box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.75);
+        overflow: hidden;
+    }
+
+    .sidebar.mobile-visible {
+        transform: translateY(0);
+    }
+
+    .graph-panel {
+        height: 135px;
     }
 }
 </style>

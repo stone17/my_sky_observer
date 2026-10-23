@@ -134,14 +134,13 @@ const nightZones = computed(() => {
     return zones;
 });
 
-const handleMouseMove = (e) => {
+const updateHoverFromClientX = (clientX, targetEl) => {
     if (!props.object || !props.object.altitude_graph || props.object.altitude_graph.length === 0) return;
 
-    // Use currentTarget to ensure we get the SVG's rect, not a child element's
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    
-    // Scale mouse position to SVG coordinate system
+    const rect = targetEl.getBoundingClientRect();
+    const x = clientX - rect.left;
+
+    // Scale mouse/touch position to SVG coordinate system
     const scaleX = width / rect.width;
     const svgX = x * scaleX;
 
@@ -154,16 +153,15 @@ const handleMouseMove = (e) => {
     const end = new Date(props.object.altitude_graph[props.object.altitude_graph.length - 1].time).getTime();
     const range = end - start;
     const timeAtX = new Date(start + (constrainedX / width) * range);
-    
+
     hoverTime.value = timeAtX.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
     // Calculate Altitude (approximate linear interpolation)
-    // Find closest points
     const idx = (constrainedX / width) * (props.object.altitude_graph.length - 1);
     const i1 = Math.floor(idx);
     const i2 = Math.ceil(idx);
     const pct = idx - i1;
-    
+
     if (props.object.altitude_graph[i1] && props.object.altitude_graph[i2]) {
         const alt1 = props.object.altitude_graph[i1].altitude;
         const alt2 = props.object.altitude_graph[i2].altitude;
@@ -186,6 +184,16 @@ const handleMouseMove = (e) => {
         }
     }
     hoverZone.value = currentZone;
+};
+
+const handleMouseMove = (e) => {
+    updateHoverFromClientX(e.clientX, e.currentTarget);
+};
+
+const handleTouchMove = (e) => {
+    if (e.touches && e.touches.length > 0) {
+        updateHoverFromClientX(e.touches[0].clientX, e.currentTarget);
+    }
 };
 
 const handleMouseLeave = () => {
@@ -219,6 +227,9 @@ const handleMouseLeave = () => {
                 class="chart-svg"
                 @mousemove="handleMouseMove"
                 @mouseleave="handleMouseLeave"
+                @touchstart.passive="handleTouchMove"
+                @touchmove.prevent="handleTouchMove"
+                @touchend="handleMouseLeave"
              >
                 <g class="graph-area">
                     <!-- Night Zones -->
@@ -335,4 +346,23 @@ const handleMouseLeave = () => {
 .target-label { color: #10b981; }
 .moon-label { color: #fbbf24; }
 .night-label { color: #1e3a8a; font-weight: bold; cursor: help; }
+
+@media (max-width: 768px) {
+    .altitude-wrapper {
+        padding: 6px 8px;
+    }
+    .chart-header {
+        font-size: 0.72rem;
+        margin-bottom: 3px;
+        gap: 6px;
+        flex-wrap: wrap;
+    }
+    .legend-inline {
+        gap: 6px;
+        font-size: 0.68rem;
+    }
+    .night-label {
+        display: none;
+    }
+}
 </style>

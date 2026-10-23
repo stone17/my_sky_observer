@@ -356,6 +356,7 @@ onUnmounted(() => {
                             :key="s.name"
                             class="suggestion-item"
                             @mousedown.prevent="selectSuggestion(s)"
+                            @touchstart.passive="selectSuggestion(s)"
                         >
                             <div class="sug-main">
                                 <strong>{{ s.name }}</strong>
@@ -897,5 +898,25 @@ onUnmounted(() => {
 
 .close-btn:hover {
     background: #4b5563;
+}
+
+@media (max-width: 768px) {
+    .search-box {
+        height: 38px;
+    }
+
+    .search-input {
+        font-size: 16px !important;
+    }
+
+    .sort-select {
+        height: 30px;
+        font-size: 0.82rem;
+    }
+
+    .info-icon {
+        padding: 4px 6px;
+        font-size: 0.95rem;
+    }
 }
 </style>

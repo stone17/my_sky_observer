@@ -13,7 +13,7 @@ import {
 } from '../utils/catalogMeta.js';
 
 const props = defineProps(['object', 'objects', 'settings', 'clientSettings', 'searchQuery', 'activeFov']);
-const emit = defineEmits(['update-settings', 'update-client-settings', 'update-search', 'select-object', 'update-fov']);
+const emit = defineEmits(['update-settings', 'update-client-settings', 'update-search', 'select-object', 'update-fov', 'open-mobile-list']);
 
 // --- PHYSICAL SENSOR & DEFAULT IMAGE FOV CALCULATION (Single Source of Truth) ---
 const systemSensorFov = computed(() => {
@@ -287,7 +287,8 @@ const sensorStyle = computed(() => {
         transform: `translate(-50%, -50%) rotate(${rotation.value}deg)`,
         border: '2px solid #ef4444',
         boxShadow: '0 0 12px rgba(239, 68, 68, 0.5)',
-        cursor: 'move'
+        cursor: 'move',
+        touchAction: 'none'
     };
 });
 
@@ -297,6 +298,7 @@ let rotInterval = null;
 let rotTimeout = null;
 
 const startRotate = (dir) => {
+    stopRotate();
     const update = () => {
         rotation.value = (rotation.value + dir + 360) % 360;
     };
@@ -309,12 +311,16 @@ const startRotate = (dir) => {
 const stopRotate = () => {
     if (rotTimeout) clearTimeout(rotTimeout);
     if (rotInterval) clearInterval(rotInterval);
+    rotTimeout = null;
+    rotInterval = null;
 };
 
 const offsetX = ref(0);
 const offsetY = ref(0);
 const isDragging = ref(false);
 const dragStart = ref({ x: 0, y: 0 });
+const pinchStartDist = ref(0);
+const pinchStartZoom = ref(1.0);
 
 const viewportRef = ref(null);
 const wrapperSize = ref(0);
@@ -381,7 +387,49 @@ const startDrag = (e) => {
     };
     e.preventDefault();
 };
-const stopDrag = () => { isDragging.value = false; };
+const stopDrag = () => {
+    isDragging.value = false;
+    pinchStartDist.value = 0;
+};
+
+const getTouchDistance = (t1, t2) => {
+    return Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+};
+
+const startTouchDrag = (e) => {
+    if (e.touches.length === 1) {
+        const t = e.touches[0];
+        isDragging.value = true;
+        dragStart.value = {
+            x: t.clientX - (offsetX.value * zoomLevel.value),
+            y: t.clientY - (offsetY.value * zoomLevel.value)
+        };
+    }
+};
+
+const onViewportTouchStart = (e) => {
+    if (e.touches.length === 2) {
+        isDragging.value = false;
+        pinchStartDist.value = getTouchDistance(e.touches[0], e.touches[1]);
+        pinchStartZoom.value = zoomLevel.value;
+    }
+};
+
+const onViewportTouchMove = (e) => {
+    if (e.touches.length === 2 && pinchStartDist.value > 0) {
+        const dist = getTouchDistance(e.touches[0], e.touches[1]);
+        const scale = dist / pinchStartDist.value;
+        zoomLevel.value = Math.min(Math.max(pinchStartZoom.value * scale, 0.5), 10.0);
+        e.preventDefault();
+        return;
+    }
+    if (isDragging.value && e.touches.length === 1) {
+        const t = e.touches[0];
+        offsetX.value = (t.clientX - dragStart.value.x) / zoomLevel.value;
+        offsetY.value = (t.clientY - dragStart.value.y) / zoomLevel.value;
+        e.preventDefault();
+    }
+};
 
 const getCurrentCenterCoordinates = () => {
     const baseFov = props.object?.image_fov || localFov.value;
@@ -565,7 +613,8 @@ onUnmounted(() => {
                     title="Send current framing coordinates and rotation to N.I.N.A. (Requires Advanced API plugin)"
                 >
                     <span>📡</span>
-                    <span>{{ ninaStatus || 'Send to N.I.N.A.' }}</span>
+                    <span class="nina-btn-text">{{ ninaStatus || 'Send to N.I.N.A.' }}</span>
+                    <span class="nina-btn-short">{{ ninaStatus || 'N.I.N.A.' }}</span>
                 </button>
             </div>
         </header>
@@ -577,6 +626,10 @@ onUnmounted(() => {
             @mousemove="onDrag"
             @mouseup="stopDrag"
             @mouseleave="stopDrag"
+            @touchstart="onViewportTouchStart"
+            @touchmove="onViewportTouchMove"
+            @touchend="stopDrag"
+            @touchcancel="stopDrag"
             @wheel.prevent="onWheel"
         >
             <div
@@ -651,6 +704,7 @@ onUnmounted(() => {
                     v-if="object && settings && !isObjectDownloading"
                     :style="sensorStyle"
                     @mousedown="startDrag"
+                    @touchstart.stop.prevent="startTouchDrag"
                     title="Drag to re-center framing (Shift + Scroll to rotate)"
                 >
                     <div class="crosshair">+</div>
@@ -696,7 +750,8 @@ onUnmounted(() => {
 
                 <!-- Current View FOV Control -->
                 <div class="hud-group" title="Current View FOV (sky survey image width/height in degrees)">
-                    <span class="hud-label">CURRENT VIEW (°)</span>
+                    <span class="hud-label hud-label-full">CURRENT VIEW (°)</span>
+                    <span class="hud-label hud-label-short">FOV</span>
                     <button
                         type="button"
                         class="hud-step-btn"
@@ -728,13 +783,17 @@ onUnmounted(() => {
 
                 <!-- Rotation Control -->
                 <div class="hud-group">
-                    <span class="hud-label">ROT (°)</span>
+                    <span class="hud-label hud-label-full">ROT (°)</span>
+                    <span class="hud-label hud-label-short">ROT</span>
                     <button
                         type="button"
                         class="hud-step-btn"
                         @mousedown="startRotate(-1)"
                         @mouseup="stopRotate"
                         @mouseleave="stopRotate"
+                        @touchstart.prevent="startRotate(-1)"
+                        @touchend="stopRotate"
+                        @touchcancel="stopRotate"
                         title="Rotate Counter-Clockwise"
                     >
                         ⟲
@@ -746,6 +805,9 @@ onUnmounted(() => {
                         @mousedown="startRotate(1)"
                         @mouseup="stopRotate"
                         @mouseleave="stopRotate"
+                        @touchstart.prevent="startRotate(1)"
+                        @touchend="stopRotate"
+                        @touchcancel="stopRotate"
                         title="Rotate Clockwise"
                     >
                         ⟳
@@ -1334,17 +1396,114 @@ onUnmounted(() => {
     100% { transform: rotate(360deg); }
 }
 
+.nina-btn-short {
+    display: none;
+}
+
+.hud-label-short {
+    display: none;
+}
+
 @media (max-width: 768px) {
     .framing-header {
-        padding: 8px 10px;
+        padding: 6px 10px !important;
+        gap: 8px;
     }
-    .canvas-hud {
-        bottom: 10px;
-        padding: 6px 8px;
+
+    .title-line {
         gap: 6px;
     }
+
+    .title-line h2 {
+        font-size: 1.05rem;
+    }
+
+    .aliases-badge {
+        max-width: 170px;
+        font-size: 0.65rem;
+    }
+
+    .subtitle-line {
+        font-size: 0.7rem;
+        gap: 4px;
+    }
+
+    .nina-btn {
+        padding: 5px 9px;
+        font-size: 0.75rem;
+    }
+
+    .nina-btn-text {
+        display: none;
+    }
+
+    .nina-btn-short {
+        display: inline;
+    }
+
+    .osd-overlay {
+        top: 8px;
+        right: 8px;
+        font-size: 0.65rem;
+        padding: 4px 8px;
+        gap: 2px;
+    }
+
+    .osd-title {
+        padding-bottom: 2px;
+        margin-bottom: 1px;
+    }
+
+    .hud-optics-readout {
+        display: none;
+    }
+
     .hud-divider {
         display: none;
+    }
+
+    .hud-label-full {
+        display: none;
+    }
+
+    .hud-label-short {
+        display: inline;
+    }
+
+    .canvas-hud {
+        bottom: 8px;
+        padding: 6px 8px;
+        gap: 6px 10px;
+        width: calc(100% - 16px);
+        max-width: 440px;
+        box-sizing: border-box;
+    }
+
+    .hud-step-btn {
+        width: 30px;
+        height: 30px;
+        font-size: 0.95rem;
+    }
+
+    .hud-input {
+        width: 54px;
+        height: 30px;
+        font-size: 0.8rem;
+    }
+
+    .hud-actions {
+        width: 100%;
+        justify-content: center;
+        flex-wrap: wrap;
+        gap: 5px;
+    }
+
+    .hud-btn {
+        height: 30px;
+        padding: 0 9px;
+        font-size: 0.72rem;
+        flex: 1 1 auto;
+        text-align: center;
     }
 }
 </style>
