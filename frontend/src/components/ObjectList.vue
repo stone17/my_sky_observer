@@ -266,6 +266,16 @@ const typePoolCount = computed(() => {
     return (props.objects || []).filter(o => activeSet.has(o.type)).length;
 });
 
+const uncachedFilteredCount = computed(() => {
+    let count = 0;
+    for (const o of filteredAndSortedObjects.value) {
+        if (o.status !== 'cached') {
+            count++;
+        }
+    }
+    return count;
+});
+
 watch(filteredAndSortedObjects, (newList) => {
     renderedLimit.value = 50;
     if (!props.selectedId && newList.length > 0) {
@@ -403,11 +413,23 @@ onUnmounted(() => {
                             v-if="!isDownloading"
                             type="button"
                             class="toolbar-dl-btn"
-                            :disabled="filteredAndSortedObjects.length === 0"
+                            :class="{ 'all-cached': filteredAndSortedObjects.length > 0 && uncachedFilteredCount === 0 }"
+                            :disabled="uncachedFilteredCount === 0"
                             @click="emit('download-filtered')"
-                            :title="`Download sky survey images for ${filteredAndSortedObjects.length} matching targets`"
+                            :title="
+                                uncachedFilteredCount > 0
+                                    ? `Download ${uncachedFilteredCount} remaining sky survey images (${filteredAndSortedObjects.length - uncachedFilteredCount} of ${filteredAndSortedObjects.length} already cached)`
+                                    : filteredAndSortedObjects.length > 0
+                                      ? `All ${filteredAndSortedObjects.length} matching targets are already downloaded`
+                                      : 'No matching targets to download'
+                            "
                         >
-                            ⬇️ Download ({{ filteredAndSortedObjects.length }})
+                            <template v-if="filteredAndSortedObjects.length > 0 && uncachedFilteredCount === 0">
+                                ✓ Cached ({{ filteredAndSortedObjects.length }})
+                            </template>
+                            <template v-else>
+                                ⬇️ Download ({{ uncachedFilteredCount }})
+                            </template>
                         </button>
                         <button
                             v-else
@@ -723,6 +745,13 @@ onUnmounted(() => {
 .toolbar-dl-btn:disabled {
     opacity: 0.45;
     cursor: not-allowed;
+}
+
+.toolbar-dl-btn.all-cached:disabled {
+    opacity: 0.75;
+    background: rgba(16, 185, 129, 0.08);
+    border-color: rgba(16, 185, 129, 0.3);
+    color: #10b981;
 }
 
 .toolbar-dl-btn.stop {

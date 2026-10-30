@@ -444,6 +444,15 @@ class StreamSession:
 
     def get_initial_metadata_event(self):
         metadata = []
+        cached_files = set()
+        if self.all_objects:
+            _, _, setup_dir = get_cache_info(self.all_objects[0]["id"], self.setup_hash)
+            try:
+                if os.path.isdir(setup_dir):
+                    cached_files = set(os.listdir(setup_dir))
+            except OSError:
+                cached_files = set()
+
         for obj in self.all_objects:
             maj = obj.get("maj_ax", 0)
             if isinstance(maj, (int, float)):
@@ -460,9 +469,13 @@ class StreamSession:
             if isinstance(mag, (int, float)):
                 mag = round(mag, 2)
 
+            obj_id = obj["id"]
+            url, filepath, _ = get_cache_info(obj_id, self.setup_hash)
+            is_cached = os.path.basename(filepath) in cached_files
+
             metadata.append(
                 {
-                    "name": obj["id"],
+                    "name": obj_id,
                     "common_name": obj.get("name", "N/A"),
                     "type": obj.get("type", ""),
                     "constellation": obj.get("constellation", ""),
@@ -476,7 +489,8 @@ class StreamSession:
                     "maj_ax": maj,
                     "max_altitude": obj.get("max_altitude", 0),
                     "hours_visible": obj.get("hours_visible", 0),
-                    "status": "pending",
+                    "status": "cached" if is_cached else "pending",
+                    "image_url": url if is_cached else "",
                     "sensor_fov": self.sensor_fov_data,
                     "image_fov": self.download_fov,
                 }

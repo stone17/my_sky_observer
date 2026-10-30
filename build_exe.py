@@ -9,6 +9,54 @@ from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 # Increase recursion limit for complex library analysis
 sys.setrecursionlimit(5000)
 
+CUSTOM_HOOKS_DIR = os.path.join("build", "_pyi_hooks")
+
+HOOK_ASTROPY_CONTENT = """import warnings
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
+
+def _filter_astropy(name):
+    excluded = (
+        'astropy.samp',
+        'astropy.visualization',
+        'astropy.cosmology',
+        'astropy.modeling',
+        'astropy.nddata',
+        'astropy.convolution',
+        'astropy.stats',
+        'astropy.timeseries',
+    )
+    return (
+        not name.startswith(excluded)
+        and '.tests' not in name
+        and '.conftest' not in name
+        and '.benchmarks' not in name
+    )
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    datas = collect_data_files('astropy')
+    for path, target in collect_data_files('astropy', include_py_files=True):
+        if path.endswith(('_parsetab.py', '_lextab.py')):
+            datas.append((path, target))
+    datas += copy_metadata('astropy')
+    datas += copy_metadata('numpy')
+    hiddenimports = collect_submodules('astropy', filter=_filter_astropy)
+    hiddenimports += ['numpy.lib.recfunctions']
+"""
+
+HOOK_NOOP_CONTENT = """# Override built-in hook to suppress missing optional hidden imports
+hiddenimports = []
+"""
+
+def ensure_custom_hooks():
+    os.makedirs(CUSTOM_HOOKS_DIR, exist_ok=True)
+    with open(os.path.join(CUSTOM_HOOKS_DIR, "hook-astropy.py"), "w", encoding="utf-8") as f:
+        f.write(HOOK_ASTROPY_CONTENT)
+    with open(os.path.join(CUSTOM_HOOKS_DIR, "hook-pycparser.py"), "w", encoding="utf-8") as f:
+        f.write(HOOK_NOOP_CONTENT)
+    with open(os.path.join(CUSTOM_HOOKS_DIR, "hook-pandas.io.sql.py"), "w", encoding="utf-8") as f:
+        f.write(HOOK_NOOP_CONTENT)
+
 def patch_frontend_dist():
     print("Patching frontend/dist/index.html...")
     dist_index = os.path.join("frontend", "dist", "index.html")
@@ -56,13 +104,14 @@ def collect_package_assets(pkg):
     return pkg_datas
 
 def prepare_pyinstaller_datas():
+    ensure_custom_hooks()
     datas = [
         ('frontend/dist', 'frontend/dist'),
         ('catalogs', 'catalogs'),
         ('settings_default.yaml', '.'),
         ('components.yaml', '.')
     ]
-    packages = ['astropy', 'astropy_iers_data', 'astroplan']
+    packages = ['astropy_iers_data', 'astroplan']
     with ThreadPoolExecutor(max_workers=len(packages)) as executor:
         for pkg_datas in executor.map(collect_package_assets, packages):
             datas.extend(pkg_datas)
@@ -103,8 +152,6 @@ def build_exe(datas):
         'xlsxwriter',
         'odf',
         'pyxlsb',
-        'pycparser.lextab',
-        'pycparser.yacctab',
     ]
 
     entry_script = 'run.py' if os.path.exists('run.py') else 'desktop_app.py'
@@ -115,6 +162,7 @@ def build_exe(datas):
         '--onefile',
         '--console', # Keep console enabled for debugging if it crashes
         '--icon=NONE',
+        f'--additional-hooks-dir={CUSTOM_HOOKS_DIR}',
     ]
 
     if '--clean' in sys.argv:
