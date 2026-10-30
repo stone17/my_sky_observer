@@ -7,8 +7,25 @@ import {
     formatMagnitude
 } from '../utils/catalogMeta.js';
 
-const props = defineProps(['objects', 'selectedId', 'settings', 'clientSettings', 'nightTimes', 'searchQuery']);
-const emit = defineEmits(['select', 'fetch-all', 'update-settings', 'update-client-settings', 'update-search']);
+const props = defineProps([
+    'objects',
+    'selectedId',
+    'settings',
+    'clientSettings',
+    'nightTimes',
+    'searchQuery',
+    'isDownloading',
+    'downloadProgress'
+]);
+const emit = defineEmits([
+    'select',
+    'fetch-all',
+    'download-filtered',
+    'stop-download',
+    'update-settings',
+    'update-client-settings',
+    'update-search'
+]);
 
 const showInfoModal = ref(false);
 const infoObject = ref(null);
@@ -377,8 +394,30 @@ onUnmounted(() => {
                         </select>
                     </div>
 
-                    <div class="list-stats" title="Matching targets / Total targets in selected object types">
-                        <strong>{{ filteredAndSortedObjects.length }}</strong> / {{ typePoolCount }}
+                    <div class="toolbar-right">
+                        <div class="list-stats" title="Matching targets / Total targets in selected object types">
+                            <strong>{{ filteredAndSortedObjects.length }}</strong> / {{ typePoolCount }}
+                        </div>
+
+                        <button
+                            v-if="!isDownloading"
+                            type="button"
+                            class="toolbar-dl-btn"
+                            :disabled="filteredAndSortedObjects.length === 0"
+                            @click="emit('download-filtered')"
+                            :title="`Download sky survey images for ${filteredAndSortedObjects.length} matching targets`"
+                        >
+                            ⬇️ Download ({{ filteredAndSortedObjects.length }})
+                        </button>
+                        <button
+                            v-else
+                            type="button"
+                            class="toolbar-dl-btn stop"
+                            @click="emit('stop-download')"
+                            :title="downloadProgress ? `${downloadProgress} — Click to stop` : 'Stop downloading images'"
+                        >
+                            🛑 {{ downloadProgress ? downloadProgress.replace('Downloading ', '') : 'Stop' }}
+                        </button>
                     </div>
                 </div>
             </div>
@@ -641,13 +680,61 @@ onUnmounted(() => {
     margin: 0;
 }
 
+.toolbar-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
 .list-stats {
     font-size: 0.75rem;
     color: #9ca3af;
+    white-space: nowrap;
 }
 
 .list-stats strong {
     color: #10b981;
+}
+
+.toolbar-dl-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(16, 185, 129, 0.15);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.45);
+    border-radius: 5px;
+    padding: 3px 8px;
+    font-size: 0.74rem;
+    font-weight: 600;
+    height: 26px;
+    margin: 0;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.toolbar-dl-btn:hover:not(:disabled) {
+    background: #10b981;
+    color: #06281e;
+    border-color: #10b981;
+}
+
+.toolbar-dl-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.toolbar-dl-btn.stop {
+    background: rgba(239, 68, 68, 0.18);
+    color: #f87171;
+    border-color: rgba(239, 68, 68, 0.5);
+}
+
+.toolbar-dl-btn.stop:hover {
+    background: #ef4444;
+    color: #ffffff;
+    border-color: #ef4444;
 }
 
 /* Scrollable List & Cards */

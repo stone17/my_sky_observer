@@ -669,7 +669,7 @@ class StreamSession:
         yield f"event: download_progress\ndata: {json.dumps({'current': 0, 'total': total})}\n\n"
 
         queue = asyncio.Queue()
-        semaphore = asyncio.Semaphore(5)
+        semaphore = asyncio.Semaphore(2)
         completed = 0
 
         async def worker(obj):

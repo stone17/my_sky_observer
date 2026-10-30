@@ -158,16 +158,21 @@ watch(selectedObject, (newVal, oldVal) => {
     if (!isManualFov.value) {
         activeFov.value = systemFov.value;
     }
+    const isSameObject = newVal?.name === oldVal?.name;
     const targetFov = isManualFov.value ? activeFov.value : systemFov.value;
     const hasMatchingImage =
         Boolean(newVal.image_url) &&
         newVal.status === 'cached' &&
         Math.abs((newVal.image_fov || 0) - targetFov) < 0.01;
 
-    if (!hasMatchingImage && newVal.status !== 'downloading') {
+    if (
+        !hasMatchingImage &&
+        newVal.status !== 'downloading' &&
+        (!isSameObject || newVal.status !== 'error')
+    ) {
         downloadImage(newVal, targetFov);
     }
-    if (newVal?.name !== oldVal?.name && window.innerWidth <= 1024) {
+    if (!isSameObject && window.innerWidth <= 1024) {
         showMobileList.value = false;
     }
 });
@@ -623,11 +628,15 @@ watch(clientSettings, () => {
                         :searchQuery="searchQuery"
                         :clientSettings="clientSettings"
                         :nightTimes="nightTimes"
+                        :isDownloading="isDownloading"
+                        :downloadProgress="downloadProgress"
                         @select="selectedObject = $event"
                         @update-search="searchQuery = $event"
                         @update-settings="saveSettings"
                         @update-client-settings="updateClientSettings"
                         @fetch-all="startStream('all')"
+                        @download-filtered="startStream('filtered')"
+                        @stop-download="stopStream"
                     />
                 </div>
             </aside>

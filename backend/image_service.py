@@ -12,6 +12,21 @@ from .config import CACHE_DIR
 
 ALLOWED_IMAGE_SOURCES = {"dss2r", "dss2b", "dss2ir"}
 
+# Limit concurrent SkyView CGI queries to avoid triggering NASA's "Too Many Processes" limit
+_SKYVIEW_SEMAPHORE: Optional[asyncio.Semaphore] = None
+_SKYVIEW_SEMAPHORE_LOOP: Optional[asyncio.AbstractEventLoop] = None
+_INFLIGHT_DOWNLOADS: dict[str, asyncio.Future] = {}
+
+
+def _get_skyview_semaphore() -> asyncio.Semaphore:
+    global _SKYVIEW_SEMAPHORE, _SKYVIEW_SEMAPHORE_LOOP
+    loop = asyncio.get_running_loop()
+    if _SKYVIEW_SEMAPHORE is None or _SKYVIEW_SEMAPHORE_LOOP is not loop:
+        _SKYVIEW_SEMAPHORE = asyncio.Semaphore(2)
+        _SKYVIEW_SEMAPHORE_LOOP = loop
+        _INFLIGHT_DOWNLOADS.clear()
+    return _SKYVIEW_SEMAPHORE
+
 
 def validate_image_source(source: str) -> str:
     if not isinstance(source, str) or source not in ALLOWED_IMAGE_SOURCES:
@@ -111,6 +126,103 @@ def get_cache_info(
     return url, filepath, setup_dir
 
 
+async def _perform_skyview_download(
+    ra: float,
+    dec: float,
+    fov: float,
+    object_id: str,
+    url: str,
+    filepath: str,
+    setup_dir: str,
+    resolution: int,
+    source: str,
+    timeout: int,
+) -> str:
+    if os.path.exists(filepath):
+        return url
+
+    coords = SkyCoord(ra, dec, unit=(u.deg, u.deg))
+    download_fov = max(fov, 0.25)
+    base_url = "https://skyview.gsfc.nasa.gov/current/cgi/runquery.pl"
+    params = {
+        "Survey": source,
+        "Position": f"{coords.ra.deg:.5f},{coords.dec.deg:.5f}",
+        "Size": f"{download_fov:.4f}",
+        "Pixels": str(int(resolution)),
+        "Return": "JPG",
+    }
+
+    semaphore = _get_skyview_semaphore()
+    max_attempts = 4
+    base_delay = 1.5
+
+    async with semaphore:
+        if os.path.exists(filepath):
+            return url
+
+        if not os.path.exists(setup_dir):
+            os.makedirs(setup_dir, exist_ok=True)
+
+        last_err: Optional[Exception] = None
+        async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    if attempt == 1:
+                        print(f"    -> Downloading {object_id} from SkyView...")
+                    else:
+                        print(
+                            f"    -> Retrying {object_id} from SkyView (attempt {attempt}/{max_attempts})..."
+                        )
+
+                    response = await client.get(base_url, params=params)
+                    if response.status_code in (429, 502, 503, 504):
+                        raise RuntimeError(
+                            f"SkyView HTTP {response.status_code} (transient server overload)"
+                        )
+                    response.raise_for_status()
+
+                    content_type = response.headers.get("Content-Type", "")
+                    if "text" in content_type:
+                        body_snippet = response.text[:150]
+                        if (
+                            "Too Many Processes" in body_snippet
+                            or "busy" in body_snippet.lower()
+                        ) and attempt < max_attempts:
+                            delay = base_delay * (2 ** (attempt - 1))
+                            print(
+                                f"    -> SkyView busy ('Too Many Processes') for {object_id}, waiting {delay:.1f}s..."
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        raise ValueError(
+                            f"SkyView returned text/html: {response.text[:100]}"
+                        )
+
+                    stretched_bytes = await asyncio.to_thread(
+                        auto_stretch_image, response.content
+                    )
+
+                    with open(filepath, "wb") as f:
+                        f.write(stretched_bytes)
+                    return url
+
+                except (httpx.TransportError, RuntimeError) as transient_err:
+                    last_err = transient_err
+                    if attempt < max_attempts:
+                        delay = base_delay * (2 ** (attempt - 1))
+                        await asyncio.sleep(delay)
+                        continue
+                    print(f"    -> ERROR downloading {object_id}: {transient_err}")
+                    raise transient_err
+                except Exception as e:
+                    print(f"    -> ERROR downloading {object_id}: {e}")
+                    raise e
+
+        if last_err:
+            raise last_err
+        raise RuntimeError(f"Failed to download {object_id} from SkyView")
+
+
 async def download_image(
     ra: float,
     dec: float,
@@ -127,40 +239,31 @@ async def download_image(
     if os.path.exists(filepath):
         return url
 
-    coords = SkyCoord(ra, dec, unit=(u.deg, u.deg))
-    download_fov = max(fov, 0.25)
-    base_url = "https://skyview.gsfc.nasa.gov/current/cgi/runquery.pl"
-    params = {
-        "Survey": source,
-        "Position": f"{coords.ra.deg:.5f},{coords.dec.deg:.5f}",
-        "Size": f"{download_fov:.4f}",
-        "Pixels": str(int(resolution)),
-        "Return": "JPG",
-    }
+    _get_skyview_semaphore()
+    existing_task = _INFLIGHT_DOWNLOADS.get(filepath)
+    if existing_task is not None and not existing_task.done():
+        return await asyncio.shield(existing_task)
 
+    task = asyncio.create_task(
+        _perform_skyview_download(
+            ra=ra,
+            dec=dec,
+            fov=fov,
+            object_id=object_id,
+            url=url,
+            filepath=filepath,
+            setup_dir=setup_dir,
+            resolution=resolution,
+            source=source,
+            timeout=timeout,
+        )
+    )
+    _INFLIGHT_DOWNLOADS[filepath] = task
     try:
-        if not os.path.exists(setup_dir):
-            os.makedirs(setup_dir, exist_ok=True)
-        print(f"    -> Downloading {object_id} from SkyView...")
-
-        async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
-            response = await client.get(base_url, params=params)
-            response.raise_for_status()
-
-            content_type = response.headers.get("Content-Type", "")
-            if "text" in content_type:
-                raise ValueError(f"SkyView returned text/html: {response.text[:100]}")
-
-            stretched_bytes = await asyncio.to_thread(
-                auto_stretch_image, response.content
-            )
-
-            with open(filepath, "wb") as f:
-                f.write(stretched_bytes)
-        return url
-    except Exception as e:
-        print(f"    -> ERROR downloading {object_id}: {e}")
-        raise e
+        return await asyncio.shield(task)
+    finally:
+        if _INFLIGHT_DOWNLOADS.get(filepath) is task and task.done():
+            _INFLIGHT_DOWNLOADS.pop(filepath, None)
 
 
 def get_cache_status_info(cache_dir: str = CACHE_DIR) -> dict:
