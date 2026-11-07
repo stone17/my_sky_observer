@@ -266,16 +266,45 @@ async def download_image(
             _INFLIGHT_DOWNLOADS.pop(filepath, None)
 
 
-def get_cache_status_info(cache_dir: str = CACHE_DIR) -> dict:
+def get_cache_status_info(
+    cache_dir: str = CACHE_DIR, setup_hash: Optional[str] = None
+) -> dict:
     if not os.path.exists(cache_dir):
-        return {"size_mb": 0, "count": 0}
+        return {
+            "size_mb": 0,
+            "count": 0,
+            "setup_count": 0,
+            "setup_size_mb": 0,
+            "setup_hash": setup_hash or "",
+        }
     total_size = sum(
         os.path.getsize(os.path.join(r, f))
         for r, _, files in os.walk(cache_dir)
         for f in files
     )
     count = sum(len(files) for _, _, files in os.walk(cache_dir))
-    return {"size_mb": round(total_size / (1024 * 1024), 2), "count": count}
+
+    setup_count = 0
+    setup_size = 0
+    if setup_hash:
+        try:
+            setup_dir = resolve_safe_cache_path(cache_dir, setup_hash)
+            if os.path.isdir(setup_dir):
+                for f in os.listdir(setup_dir):
+                    fp = os.path.join(setup_dir, f)
+                    if os.path.isfile(fp):
+                        setup_count += 1
+                        setup_size += os.path.getsize(fp)
+        except ValueError:
+            pass
+
+    return {
+        "size_mb": round(total_size / (1024 * 1024), 2),
+        "count": count,
+        "setup_count": setup_count,
+        "setup_size_mb": round(setup_size / (1024 * 1024), 2),
+        "setup_hash": setup_hash or "",
+    }
 
 
 def purge_image_cache(cache_dir: str = CACHE_DIR) -> dict:

@@ -30,6 +30,26 @@ const props = defineProps({
         type: Number,
         default: 0
     },
+    allCatalogCount: {
+        type: Number,
+        default: 0
+    },
+    filteredCount: {
+        type: Number,
+        default: 0
+    },
+    uncachedFilteredCount: {
+        type: Number,
+        default: 0
+    },
+    uncachedAllCount: {
+        type: Number,
+        default: 0
+    },
+    setupHash: {
+        type: String,
+        default: ''
+    },
     activeTab: {
         type: String,
         default: 'filters'
@@ -78,7 +98,7 @@ const localSettings = ref({});
 const localClientSettings = ref({});
 const profiles = ref({});
 const presets = ref({ cameras: {} });
-const cacheStatus = ref({ size_mb: 0, count: 0 });
+const cacheStatus = ref({ size_mb: 0, count: 0, setup_count: 0, setup_size_mb: 0 });
 const selectedProfileName = ref(null);
 const newProfileName = ref("");
 const availableCatalogs = ref([]);
@@ -103,10 +123,15 @@ const fetchPresets = async () => {
 
 const fetchCacheStatus = async () => {
     try {
-        const res = await fetch('/api/cache/status');
+        const query = props.setupHash ? `?setup_hash=${encodeURIComponent(props.setupHash)}` : '';
+        const res = await fetch(`/api/cache/status${query}`);
         if (res.ok) cacheStatus.value = await res.json();
     } catch (e) { console.error(e); }
 };
+
+watch(() => props.setupHash, () => {
+    fetchCacheStatus();
+});
 
 const fetchCatalogs = async () => {
     try {
@@ -983,14 +1008,48 @@ const activeFiltersCount = computed(() => {
                     <div class="section-card">
                         <h4>Batch Image Downloads</h4>
                         <p class="helper-text">
-                            Pre-fetch sky survey images for offline use or rapid browsing.
+                            Pre-fetch sky survey images for offline use or rapid browsing. Already cached images for the current equipment setup are automatically skipped.
                         </p>
                         <div v-if="!isDownloading" class="btn-col">
-                            <button type="button" class="btn-primary" @click="$emit('download-filtered')">
-                                ⬇️ Download Filtered Objects
+                            <button
+                                type="button"
+                                class="btn-primary"
+                                :disabled="uncachedFilteredCount === 0"
+                                @click="$emit('download-filtered')"
+                                :title="
+                                    uncachedFilteredCount > 0
+                                        ? `Download ${uncachedFilteredCount} remaining filtered targets (${filteredCount - uncachedFilteredCount} of ${filteredCount} already cached)`
+                                        : filteredCount > 0
+                                          ? `All ${filteredCount} filtered targets are already cached for this setup`
+                                          : 'No filtered targets to download'
+                                "
+                            >
+                                <template v-if="filteredCount > 0 && uncachedFilteredCount === 0">
+                                    ✓ All Filtered Cached ({{ filteredCount }})
+                                </template>
+                                <template v-else>
+                                    ⬇️ Download Filtered ({{ uncachedFilteredCount }}<template v-if="filteredCount > uncachedFilteredCount"> of {{ filteredCount }}</template>)
+                                </template>
                             </button>
-                            <button type="button" class="btn-secondary" @click="$emit('download-all')">
-                                ⬇️ Download Entire Catalog
+                            <button
+                                type="button"
+                                class="btn-secondary"
+                                :disabled="uncachedAllCount === 0"
+                                @click="$emit('download-all')"
+                                :title="
+                                    uncachedAllCount > 0
+                                        ? `Download ${uncachedAllCount} remaining catalog targets (${allCatalogCount - uncachedAllCount} of ${allCatalogCount} already cached)`
+                                        : allCatalogCount > 0
+                                          ? `All ${allCatalogCount} catalog targets are already cached for this setup`
+                                          : 'No catalog targets to download'
+                                "
+                            >
+                                <template v-if="allCatalogCount > 0 && uncachedAllCount === 0">
+                                    ✓ Entire Catalog Cached ({{ allCatalogCount }})
+                                </template>
+                                <template v-else>
+                                    ⬇️ Download Entire Catalog ({{ uncachedAllCount }}<template v-if="allCatalogCount > uncachedAllCount"> of {{ allCatalogCount }}</template>)
+                                </template>
                             </button>
                         </div>
                         <div v-else class="download-active-box">
@@ -1041,8 +1100,12 @@ const activeFiltersCount = computed(() => {
                             <h4>Local Image Cache</h4>
                             <span class="badge-accent">{{ cacheStatus.size_mb }} MB</span>
                         </div>
-                        <div class="info-banner" style="margin-bottom: 10px;">
-                            <span>Cached Files:</span>
+                        <div class="info-banner" style="margin-bottom: 6px;" title="Images cached specifically for your current telescope, camera, padding, resolution, and survey source">
+                            <span>Current Setup:</span>
+                            <strong>{{ cacheStatus.setup_count ?? (allCatalogCount - uncachedAllCount) }} images</strong>
+                        </div>
+                        <div class="info-banner" style="margin-bottom: 10px;" title="Total images stored on disk across all equipment setups, resolutions, and custom framings">
+                            <span>All Setups (Total):</span>
                             <strong>{{ cacheStatus.count }} images</strong>
                         </div>
                         <button type="button" class="btn-danger full-width" @click="purgeCache">

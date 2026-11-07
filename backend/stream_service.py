@@ -575,6 +575,7 @@ class StreamSession:
                     "image_url": url if is_cached else "",
                     "sensor_fov": self.sensor_fov_data,
                     "image_fov": self.download_fov,
+                    "setup_hash": self.setup_hash,
                 }
             )
         return f"event: catalog_metadata\ndata: {json.dumps(metadata)}\n\n"
@@ -764,10 +765,12 @@ class StreamSession:
                 to_download.append(obj)
 
         total = len(to_download)
+        total_candidates = len(self.download_list)
+        already_cached = max(0, total_candidates - total)
         if total == 0:
             return
 
-        yield f"event: download_progress\ndata: {json.dumps({'current': 0, 'total': total})}\n\n"
+        yield f"event: download_progress\ndata: {json.dumps({'current': 0, 'total': total, 'already_cached': already_cached, 'total_candidates': total_candidates})}\n\n"
 
         queue = asyncio.Queue()
         semaphore = asyncio.Semaphore(2)
@@ -805,7 +808,13 @@ class StreamSession:
                 finally:
                     completed += 1
                     await queue.put(
-                        {"progress": True, "current": completed, "total": total}
+                        {
+                            "progress": True,
+                            "current": completed,
+                            "total": total,
+                            "already_cached": already_cached,
+                            "total_candidates": total_candidates,
+                        }
                     )
 
         tasks = [asyncio.create_task(worker(o)) for o in to_download]

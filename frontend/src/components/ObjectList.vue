@@ -459,7 +459,7 @@ onUnmounted(() => {
                             @click="emit('stop-download')"
                             :title="downloadProgress ? `${downloadProgress} — Click to stop` : 'Stop downloading images'"
                         >
-                            🛑 {{ downloadProgress ? downloadProgress.replace('Downloading ', '') : 'Stop' }}
+                            🛑 {{ downloadProgress ? downloadProgress.replace('Downloading ', '').replace(/\s*\(.*\)/, '') : 'Stop' }}
                         </button>
                     </div>
                 </div>

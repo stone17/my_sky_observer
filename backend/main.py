@@ -211,8 +211,20 @@ async def get_object_details(obj_id: str):
 
 # --- Image & Cache Endpoints ---
 @app.get("/api/cache/status")
-def get_cache_status():
-    return get_cache_status_info(CACHE_DIR)
+def get_cache_status(setup_hash: str = ""):
+    effective_hash = setup_hash.strip()
+    if not effective_hash:
+        try:
+            settings = load_settings()
+            telescope = Telescope(**settings.get("telescope", {"focal_length": 400}))
+            camera = Camera(
+                **settings.get("camera", {"sensor_width": 23.5, "sensor_height": 15.6})
+            )
+            fov_info = compute_fov_and_setup(telescope, camera, settings)
+            effective_hash = fov_info["setup_hash"]
+        except Exception:
+            effective_hash = ""
+    return get_cache_status_info(CACHE_DIR, setup_hash=effective_hash or None)
 
 
 @app.post("/api/cache/purge")

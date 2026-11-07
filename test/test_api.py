@@ -567,3 +567,27 @@ def test_time_window_hour_range_filter():
     assert settings["tz_offset"] == -60.0
 
 
+def test_cache_status_setup_hash_and_download_progress(tmp_path):
+    """Tests setup-specific cache status counting and download_progress already_cached reporting."""
+    from backend.image_service import get_cache_status_info
+
+    setup_a = tmp_path / "fl400_sw23.5_sh15.6_px1024_DSS2Red"
+    setup_b = tmp_path / "fov_custom_1.500_px1024_DSS2Red"
+    setup_a.mkdir()
+    setup_b.mkdir()
+
+    (setup_a / "M31.jpg").write_bytes(b"a" * 1024)
+    (setup_a / "M42.jpg").write_bytes(b"b" * 1024)
+    (setup_b / "M45.jpg").write_bytes(b"c" * 1024)
+
+    info_a = get_cache_status_info(str(tmp_path), setup_hash="fl400_sw23.5_sh15.6_px1024_DSS2Red")
+    assert info_a["count"] == 3
+    assert info_a["setup_count"] == 2
+    assert info_a["setup_hash"] == "fl400_sw23.5_sh15.6_px1024_DSS2Red"
+
+    info_b = get_cache_status_info(str(tmp_path), setup_hash="fov_custom_1.500_px1024_DSS2Red")
+    assert info_b["count"] == 3
+    assert info_b["setup_count"] == 1
+
+
+

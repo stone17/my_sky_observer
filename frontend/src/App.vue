@@ -5,7 +5,11 @@ import ObjectList from './components/ObjectList.vue';
 import Framing from './components/Framing.vue';
 import AltitudeGraph from './components/AltitudeGraph.vue';
 import { computeDefaultImageFov, normalizeImageFov } from './utils/fov.js';
-import { getAstroNightDefaults } from './utils/timeWindow.js';
+import {
+    getAstroNightDefaults,
+    resolveEffectiveTimeWindow,
+    isTimestampInTimeWindow
+} from './utils/timeWindow.js';
 
 const settings = ref({});
 const clientSettings = ref({
@@ -303,7 +307,7 @@ const startStream = (mode = 'selected') => {
     params.append('sort_key', settings.value.sort_key || 'time');
     params.append('min_altitude', settings.value.min_altitude ?? 30.0);
     params.append('image_padding', settings.value.image_padding || 1.15);
-    const effectiveStreamFov = isManualFov.value ? activeFov.value : systemFov.value;
+    const effectiveStreamFov = systemFov.value;
     if (effectiveStreamFov > 0) {
         params.append('fov', effectiveStreamFov);
     }
@@ -346,7 +350,13 @@ const startStream = (mode = 'selected') => {
     eventSource.addEventListener('download_progress', (e) => {
         try {
             const p = JSON.parse(e.data);
-            if (p.current !== undefined) downloadProgress.value = `Downloading ${p.current} of ${p.total}`;
+            if (p.current !== undefined) {
+                if (p.already_cached && p.already_cached > 0) {
+                    downloadProgress.value = `Downloading ${p.current} of ${p.total} (${p.already_cached} cached)`;
+                } else {
+                    downloadProgress.value = `Downloading ${p.current} of ${p.total}`;
+                }
+            }
         } catch (err) { }
     });
     eventSource.addEventListener('night_times', (e) => {
@@ -372,7 +382,7 @@ const startStream = (mode = 'selected') => {
             lastStreamLocationKey = locKey;
 
             const nextMap = new Map();
-            const targetFov = isManualFov.value ? activeFov.value : systemFov.value;
+            const streamTargetFov = systemFov.value;
 
             for (const item of newObjects) {
                 const prevObj = objectMap.get(item.name);
@@ -385,9 +395,17 @@ const startStream = (mode = 'selected') => {
                             item.hours_above_min = prevObj.hours_above_min;
                         }
                     }
+                    const isPrevSelectedManual =
+                        currentId &&
+                        item.name === currentId &&
+                        (prevObj.custom_framed ||
+                            (isManualFov.value &&
+                                prevObj.image_url &&
+                                Math.abs((prevObj.image_fov || 0) - activeFov.value) < 0.01));
                     if (
                         prevObj.status === 'downloading' ||
-                        (prevObj.image_url && Math.abs((prevObj.image_fov || 0) - targetFov) < 0.01)
+                        isPrevSelectedManual ||
+                        (prevObj.image_url && Math.abs((prevObj.image_fov || 0) - streamTargetFov) < 0.01)
                     ) {
                         item.image_url = prevObj.image_url;
                         item.image_fov = prevObj.image_fov;
@@ -508,6 +526,112 @@ const typeFilteredObjectsCount = computed(() => {
     return objects.value.filter(o => activeSet.has(o.type)).length;
 });
 
+const currentSetupHash = computed(() => {
+    for (const o of objects.value) {
+        if (o.setup_hash) return o.setup_hash;
+    }
+    return '';
+});
+
+const filteredObjectsList = computed(() => {
+    const minAlt = settings.value?.min_altitude || 30;
+    const activeAlt = clientSettings.value?.filter_active_alt !== false;
+    const naAlt = clientSettings.value?.filter_na_alt !== false;
+
+    const minHrs = clientSettings.value?.min_hours || 0;
+    const activeHrs = clientSettings.value?.filter_active_hours !== false;
+    const naHrs = clientSettings.value?.filter_na_hours !== false;
+
+    const tw = resolveEffectiveTimeWindow(clientSettings.value || {}, nightTimes.value);
+
+    const maxMag = clientSettings.value?.max_magnitude ?? 12;
+    const activeMag = clientSettings.value?.filter_active_mag !== false;
+    const naMag = clientSettings.value?.filter_na_mag !== false;
+
+    const minSize = clientSettings.value?.min_size || 0;
+    const activeSize = clientSettings.value?.filter_active_size !== false;
+    const naSize = clientSettings.value?.filter_na_size !== false;
+
+    const selectedTypes = clientSettings.value?.selected_types || [];
+    if (selectedTypes.includes('__NONE__')) return [];
+    const activeSet = selectedTypes.length > 0 ? new Set(selectedTypes) : null;
+
+    const result = [];
+    for (const o of objects.value) {
+        if (activeSet && !activeSet.has(o.type)) continue;
+
+        let effectiveHrs = o.hours_visible;
+        if (tw.active && o.altitude_graph && o.altitude_graph.length > 1) {
+            const t0 = new Date(o.altitude_graph[0].time).getTime();
+            const t1 = new Date(o.altitude_graph[o.altitude_graph.length - 1].time).getTime();
+            const spanHours = t1 > t0 ? (t1 - t0) / 3600000 : 24.0;
+            const stepHours = spanHours / (o.altitude_graph.length - 1);
+            let validCount = 0;
+            for (const p of o.altitude_graph) {
+                if (p.altitude >= minAlt && isTimestampInTimeWindow(p.time, tw.startMin, tw.endMin)) {
+                    validCount++;
+                }
+            }
+            effectiveHrs = Math.round(validCount * stepHours * 10) / 10;
+        }
+
+        if (activeHrs) {
+            const isNaHrs = effectiveHrs === undefined || effectiveHrs === null;
+            if (isNaHrs) {
+                if (!naHrs) continue;
+            } else if (minHrs > 0 && effectiveHrs < minHrs) {
+                continue;
+            }
+        }
+
+        if (activeAlt) {
+            const isNaAlt = o.max_altitude === undefined || o.max_altitude === null;
+            if (isNaAlt) {
+                if (!naAlt) continue;
+            } else if (minAlt > 0 && o.max_altitude < minAlt) {
+                continue;
+            }
+        }
+
+        if (activeMag) {
+            const isNaMag = o.mag === undefined || o.mag === null || o.mag >= 99;
+            if (isNaMag) {
+                if (!naMag) continue;
+            } else if (maxMag !== undefined && o.mag > maxMag) {
+                continue;
+            }
+        }
+
+        if (activeSize) {
+            const isNaSize = o.maj_ax === undefined || o.maj_ax === null || o.maj_ax === 0;
+            if (isNaSize) {
+                if (!naSize) continue;
+            } else if (minSize > 0 && o.maj_ax < minSize) {
+                continue;
+            }
+        }
+
+        result.push(o);
+    }
+    return result;
+});
+
+const uncachedFilteredCount = computed(() => {
+    let count = 0;
+    for (const o of filteredObjectsList.value) {
+        if (o.status !== 'cached') count++;
+    }
+    return count;
+});
+
+const uncachedAllCount = computed(() => {
+    let count = 0;
+    for (const o of objects.value) {
+        if (o.status !== 'cached') count++;
+    }
+    return count;
+});
+
 const streamParams = computed(() => ({
     loc: settings.value.location,
     tel: settings.value.telescope,
@@ -577,6 +701,11 @@ watch(clientSettings, () => {
                 :system-fov="systemFov"
                 :selected-object="selectedObject"
                 :total-objects-count="typeFilteredObjectsCount"
+                :all-catalog-count="objects.length"
+                :filtered-count="filteredObjectsList.length"
+                :uncached-filtered-count="uncachedFilteredCount"
+                :uncached-all-count="uncachedAllCount"
+                :setup-hash="currentSetupHash"
                 :active-tab="activeLeftTab"
                 :show-mobile-list="showMobileList"
                 @update-active-tab="handleTabChange"
