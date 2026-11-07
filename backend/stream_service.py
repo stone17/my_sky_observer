@@ -89,6 +89,19 @@ def compute_fov_and_setup(
     }
 
 
+def _extract_min_hours_altitude(settings: dict) -> float:
+    """Extract the lower altitude limit (°) for what counts as visible hours."""
+    client_cfg = settings.get("client_settings", {}) or {}
+    raw_val = settings.get(
+        "min_hours_altitude",
+        client_cfg.get("min_hours_altitude", settings.get("min_altitude", 30.0)),
+    )
+    try:
+        return float(raw_val)
+    except (TypeError, ValueError):
+        return float(settings.get("min_altitude", 30.0))
+
+
 def _extract_time_window_settings(settings: dict) -> dict:
     """Extract time window filter configuration from settings and client_settings."""
     client_cfg = settings.get("client_settings", {}) or {}
@@ -218,7 +231,7 @@ def get_sorted_objects(
 
     if altaz_frame is not None:
         all_ras = pd.to_numeric(df["ra"], errors="coerce").fillna(0).values
-        min_alt = settings.get("min_altitude", 30.0)
+        min_hours_alt = _extract_min_hours_altitude(settings)
         tw_cfg = _extract_time_window_settings(settings)
         time_mask = None
         if tw_cfg["active"]:
@@ -239,7 +252,7 @@ def get_sorted_objects(
             all_decs,
             altaz_frame,
             night_duration,
-            min_alt,
+            min_hours_alt,
             time_mask=time_mask,
         )
     else:
@@ -302,6 +315,10 @@ def apply_stream_query_overrides(
         val = float(qp["min_hours"])
         settings["min_hours"] = val
         client_cfg["min_hours"] = val
+    if "min_hours_altitude" in qp:
+        val = float(qp["min_hours_altitude"])
+        settings["min_hours_altitude"] = val
+        client_cfg["min_hours_altitude"] = val
     if "image_resolution" in qp:
         val = int(qp["image_resolution"])
         settings["image_resolution"] = val
@@ -426,6 +443,7 @@ async def build_single_object_details(
     session_start, session_end = calculator.get_observing_session(observer, Time.now())
     twilight = calculator.get_twilight_periods(location, session_start)
     tw_cfg = _extract_time_window_settings(settings)
+    min_hours_alt = _extract_min_hours_altitude(settings)
 
     return await compute_object_detail_payload(
         obj=obj,
@@ -433,7 +451,7 @@ async def build_single_object_details(
         session_start=session_start,
         session_end=session_end,
         twilight=twilight,
-        min_altitude=settings.get("min_altitude", 30.0),
+        min_altitude=min_hours_alt,
         fov_info=fov_info,
         include_aliases=True,
         time_window_active=tw_cfg["active"],
@@ -775,10 +793,10 @@ class StreamSession:
             return
 
         download_ids = set(o["id"] for o in self.download_list)
-        min_alt = self.settings.get("min_altitude", 30.0)
+        min_hours_alt = _extract_min_hours_altitude(self.settings)
 
         details_batch = await asyncio.to_thread(
-            self._build_batch_details_sync, download_ids, min_alt
+            self._build_batch_details_sync, download_ids, min_hours_alt
         )
 
         for idx, detail in enumerate(details_batch):

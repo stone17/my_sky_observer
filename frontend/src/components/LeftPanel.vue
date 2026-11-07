@@ -162,6 +162,9 @@ watch(() => props.clientSettings, (newVal) => {
         if (localClientSettings.value.filter_na_alt === undefined) localClientSettings.value.filter_na_alt = true;
         if (localClientSettings.value.filter_active_hours === undefined) localClientSettings.value.filter_active_hours = true;
         if (localClientSettings.value.filter_na_hours === undefined) localClientSettings.value.filter_na_hours = true;
+        if (localClientSettings.value.min_hours_altitude === undefined) {
+            localClientSettings.value.min_hours_altitude = localSettings.value.min_altitude ?? 30.0;
+        }
         if (localClientSettings.value.filter_active_mag === undefined) localClientSettings.value.filter_active_mag = true;
         if (localClientSettings.value.filter_na_mag === undefined) localClientSettings.value.filter_na_mag = true;
         if (localClientSettings.value.filter_active_size === undefined) localClientSettings.value.filter_active_size = true;
@@ -683,6 +686,21 @@ const activeFiltersCount = computed(() => {
                                     :disabled="!localClientSettings.filter_active_hours"
                                     @change="emitClientSettings"
                                     class="num-input"
+                                />
+                            </div>
+                            <div class="threshold-sub-row">
+                                <span class="sub-input-label" title="Lower altitude threshold (°) for what counts as visible time">
+                                    Lower Altitude Limit (°)
+                                </span>
+                                <input
+                                    type="number"
+                                    step="1"
+                                    min="0"
+                                    max="90"
+                                    v-model.number="localClientSettings.min_hours_altitude"
+                                    @change="emitClientSettings"
+                                    class="num-input"
+                                    title="Minimum altitude in degrees required for an object to count as visible"
                                 />
                             </div>
                             <label class="na-toggle" v-if="localClientSettings.filter_active_hours">
@@ -1431,6 +1449,19 @@ const activeFiltersCount = computed(() => {
     justify-content: space-between;
     align-items: center;
     gap: 8px;
+}
+
+.threshold-sub-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin: 5px 0 0 20px;
+}
+
+.sub-input-label {
+    font-size: 0.74rem;
+    color: #9ca3af;
 }
 
 .toggle-label {

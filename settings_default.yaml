@@ -47,6 +47,7 @@ client_settings:
   max_magnitude: 12.0
   min_size: 0.0
   min_hours: 0.0
+  min_hours_altitude: 30.0
   selected_types: []
   filter_active_alt: true
   filter_na_alt: true

@@ -61,6 +61,9 @@ watch(() => props.clientSettings, (newVal) => {
         if (localClientSettings.value.filter_na_alt === undefined) localClientSettings.value.filter_na_alt = true;
         if (localClientSettings.value.filter_active_hours === undefined) localClientSettings.value.filter_active_hours = true;
         if (localClientSettings.value.filter_na_hours === undefined) localClientSettings.value.filter_na_hours = true;
+        if (localClientSettings.value.min_hours_altitude === undefined) {
+            localClientSettings.value.min_hours_altitude = localSettings.value.min_altitude ?? 30.0;
+        }
         if (localClientSettings.value.filter_active_mag === undefined) localClientSettings.value.filter_active_mag = true;
         if (localClientSettings.value.filter_na_mag === undefined) localClientSettings.value.filter_na_mag = true;
         if (localClientSettings.value.filter_active_size === undefined) localClientSettings.value.filter_active_size = true;
@@ -171,6 +174,7 @@ const filteredAndSortedObjects = computed(() => {
     const naAlt = localClientSettings.value.filter_na_alt !== false;
 
     const minHrs = localClientSettings.value.min_hours || 0;
+    const minHoursAlt = localClientSettings.value.min_hours_altitude ?? minAlt;
     const activeHrs = localClientSettings.value.filter_active_hours !== false;
     const naHrs = localClientSettings.value.filter_na_hours !== false;
 
@@ -217,7 +221,7 @@ const filteredAndSortedObjects = computed(() => {
             const stepHours = spanHours / (o.altitude_graph.length - 1);
             let validCount = 0;
             for (const p of o.altitude_graph) {
-                if (p.altitude >= minAlt && isTimestampInTimeWindow(p.time, tw.startMin, tw.endMin)) {
+                if (p.altitude >= minHoursAlt && isTimestampInTimeWindow(p.time, tw.startMin, tw.endMin)) {
                     validCount++;
                 }
             }
@@ -374,6 +378,11 @@ const handleObjectClick = async (item) => {
         }
     }
 };
+
+const miniThresholdY = computed(() => {
+    const alt = Math.max(0, Math.min(90, Number(localClientSettings.value.min_hours_altitude ?? localSettings.value.min_altitude ?? 30)));
+    return Math.round((40 - (alt / 90) * 40) * 10) / 10;
+});
 
 const getAltitudePath = (altitudeGraph) => {
     if (!altitudeGraph || altitudeGraph.length < 2) return "";
@@ -598,7 +607,7 @@ onUnmounted(() => {
                         <div class="graph-col">
                             <div class="altitude-chart" v-if="item.altitude_graph && item.altitude_graph.length">
                                 <svg viewBox="0 0 100 40" preserveAspectRatio="none" width="100%" height="40">
-                                    <line x1="0" y1="26" x2="100" y2="26" stroke="#374151" stroke-width="1" stroke-dasharray="2" />
+                                    <line x1="0" :y1="miniThresholdY" x2="100" :y2="miniThresholdY" stroke="#374151" stroke-width="1" stroke-dasharray="2" />
                                     <path :d="getAltitudePath(item.altitude_graph)" fill="rgba(16, 185, 129, 0.25)" stroke="#10b981" stroke-width="1.2" />
                                 </svg>
                             </div>

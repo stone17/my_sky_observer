@@ -16,6 +16,7 @@ const clientSettings = ref({
     max_magnitude: 12.0,
     min_size: 0.0,
     min_hours: 0.0,
+    min_hours_altitude: 30.0,
     selected_types: [],
     filter_active_alt: true,
     filter_na_alt: true,
@@ -325,6 +326,7 @@ const startStream = (mode = 'selected') => {
     if (clientSettings.value.max_magnitude !== undefined) params.append('max_magnitude', clientSettings.value.max_magnitude);
     if (clientSettings.value.min_size !== undefined) params.append('min_size', clientSettings.value.min_size);
     if (clientSettings.value.min_hours !== undefined) params.append('min_hours', clientSettings.value.min_hours);
+    if (clientSettings.value.min_hours_altitude !== undefined) params.append('min_hours_altitude', clientSettings.value.min_hours_altitude);
 
     if (clientSettings.value.filter_active_alt !== undefined) params.append('filter_active_alt', clientSettings.value.filter_active_alt);
     if (clientSettings.value.filter_na_alt !== undefined) params.append('filter_na_alt', clientSettings.value.filter_na_alt);
@@ -548,6 +550,7 @@ const filteredObjectsList = computed(() => {
     const naAlt = clientSettings.value?.filter_na_alt !== false;
 
     const minHrs = clientSettings.value?.min_hours || 0;
+    const minHoursAlt = clientSettings.value?.min_hours_altitude ?? minAlt;
     const activeHrs = clientSettings.value?.filter_active_hours !== false;
     const naHrs = clientSettings.value?.filter_na_hours !== false;
 
@@ -581,7 +584,7 @@ const filteredObjectsList = computed(() => {
             const stepHours = spanHours / (o.altitude_graph.length - 1);
             let validCount = 0;
             for (const p of o.altitude_graph) {
-                if (p.altitude >= minAlt && isTimestampInTimeWindow(p.time, tw.startMin, tw.endMin)) {
+                if (p.altitude >= minHoursAlt && isTimestampInTimeWindow(p.time, tw.startMin, tw.endMin)) {
                     validCount++;
                 }
             }
@@ -652,6 +655,7 @@ const streamParams = computed(() => ({
     cats: (settings.value.catalogs || []).join(','),
     min_alt: settings.value.min_altitude,
     min_hrs: clientSettings.value.min_hours,
+    min_hrs_alt: clientSettings.value.min_hours_altitude,
     sort: settings.value.sort_key,
     max_mag: clientSettings.value.max_magnitude,
     min_sz: clientSettings.value.min_size,
@@ -790,7 +794,7 @@ watch(clientSettings, () => {
                     </button>
                 </header>
                 <div class="graph-panel">
-                    <AltitudeGraph :object="selectedObject" :location="settings.location" :nightTimes="nightTimes" :clientSettings="clientSettings" />
+                    <AltitudeGraph :object="selectedObject" :location="settings.location" :nightTimes="nightTimes" :settings="settings" :clientSettings="clientSettings" />
                 </div>
                 <div class="list-panel">
                     <ObjectList

@@ -5,13 +5,23 @@ import {
     isTimestampInTimeWindow
 } from '../utils/timeWindow.js';
 
-const props = defineProps(['object', 'location', 'nightTimes', 'clientSettings']);
+const props = defineProps(['object', 'location', 'nightTimes', 'settings', 'clientSettings']);
 
 const showMoon = ref(true);
 
 const width = 300;
 const height = 150; // Increased height
 const maxAlt = 90;
+
+const visibleMinAlt = computed(() => {
+    const raw = props.clientSettings?.min_hours_altitude ?? props.settings?.min_altitude ?? 30;
+    const val = Number(raw);
+    return Number.isFinite(val) ? Math.max(0, Math.min(90, val)) : 30;
+});
+
+const visibleMinAltY = computed(() => {
+    return height - (visibleMinAlt.value / maxAlt) * height;
+});
 
 // Interactive State
 const hoverX = ref(null);
@@ -300,6 +310,17 @@ const handleMouseLeave = () => {
                     <!-- Grid Lines -->
                     <line x1="0" :y1="height*0.33" :x2="width" :y2="height*0.33" stroke="#444" stroke-dasharray="4" />
                     <line x1="0" :y1="height*0.66" :x2="width" :y2="height*0.66" stroke="#444" stroke-dasharray="4" />
+                    <line
+                        v-if="visibleMinAlt > 0 && visibleMinAlt < 90"
+                        x1="0"
+                        :y1="visibleMinAltY"
+                        :x2="width"
+                        :y2="visibleMinAltY"
+                        stroke="#10b981"
+                        stroke-opacity="0.55"
+                        stroke-width="1"
+                        stroke-dasharray="3,3"
+                    />
 
                     <!-- Horizon -->
                     <line x1="0" :y1="height" :x2="width" :y2="height" stroke="#666" stroke-width="2" />

@@ -590,4 +590,80 @@ def test_cache_status_setup_hash_and_download_progress(tmp_path):
     assert info_b["setup_count"] == 1
 
 
+def test_min_hours_altitude_limit():
+    """
+    Tests that min_hours_altitude controls the lower altitude limit for visible hours
+    independently of min_altitude (peak altitude threshold).
+    """
+    from types import SimpleNamespace
+    from backend.models import Camera, Location, Telescope
+    from backend.stream_service import (
+        _extract_min_hours_altitude,
+        apply_stream_query_overrides,
+        get_sorted_objects,
+    )
+
+    # 1. Query override parsing
+    settings = {"min_altitude": 45.0, "client_settings": {}}
+    dummy_req = SimpleNamespace(
+        query_params={
+            "min_altitude": "45.0",
+            "min_hours": "2.0",
+            "min_hours_altitude": "20.0",
+        }
+    )
+    apply_stream_query_overrides(
+        settings,
+        dummy_req,
+        400.0,
+        23.5,
+        15.6,
+        40.7,
+        -74.0,
+        "messier",
+        "hours_above",
+    )
+    assert settings["min_altitude"] == 45.0
+    assert settings["min_hours"] == 2.0
+    assert settings["min_hours_altitude"] == 20.0
+    assert settings["client_settings"]["min_hours_altitude"] == 20.0
+    assert _extract_min_hours_altitude(settings) == 20.0
+
+    # 2. Fallback to min_altitude when min_hours_altitude is absent
+    assert _extract_min_hours_altitude({"min_altitude": 35.0, "client_settings": {}}) == 35.0
+
+    # 3. Verify get_sorted_objects computes more (or equal) visible hours at 15° than at 65°
+    loc = Location(latitude=40.7128, longitude=-74.0060)
+    tel = Telescope(focal_length=400.0)
+    cam = Camera(sensor_width=23.5, sensor_height=15.6)
+
+    low_limit_objs = get_sorted_objects(
+        {
+            "catalogs": ["messier"],
+            "min_altitude": 40.0,
+            "min_hours_altitude": 15.0,
+            "client_settings": {"min_hours_altitude": 15.0},
+        },
+        loc,
+        tel,
+        cam,
+    )
+    high_limit_objs = get_sorted_objects(
+        {
+            "catalogs": ["messier"],
+            "min_altitude": 40.0,
+            "min_hours_altitude": 65.0,
+            "client_settings": {"min_hours_altitude": 65.0},
+        },
+        loc,
+        tel,
+        cam,
+    )
+
+    low_map = {o["id"]: o["hours_visible"] for o in low_limit_objs}
+    high_map = {o["id"]: o["hours_visible"] for o in high_limit_objs}
+    assert any(low_map[k] > high_map[k] for k in low_map)
+
+
+
 
