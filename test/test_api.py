@@ -229,7 +229,7 @@ def test_fetch_custom_image_failure_html():
 
 def test_nina_framing_endpoint_mock():
     """Tests the NINA endpoint with mocked httpx for success."""
-    from unittest.mock import patch, AsyncMock
+    from unittest.mock import patch, AsyncMock, Mock
 
     payload = {
         "ra": "05h 34m 31.9s",
@@ -237,11 +237,14 @@ def test_nina_framing_endpoint_mock():
         "rotation": 45.0
     }
 
-    # Ensure we patch where it is used, or httpx.AsyncClient directly if used as context manager
-    # The backend code does: async with httpx.AsyncClient() as client:
-    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = {"Success": True}
+    mock_resp = Mock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {"Success": True}
+    mock_resp.raise_for_status = Mock()
+
+    # The backend code does: async with httpx.AsyncClient() as client: await client.get(...)
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = mock_resp
 
         # Use the global client defined at the top level
         response = client.post("/api/nina/framing", json=payload)
@@ -437,6 +440,27 @@ def test_smart_catalog_collation_and_aliases():
     # Separate Messier objects M 42 and M 43 must remain distinct primary targets
     assert len(df[df["id"] == "M 42"]) == 1
     assert len(df[df["id"] == "M 43"]) == 1
+
+    # Verify newly added catalogs (caldwell, lbn, ldn, vdb) and enriched named targets
+    full_df = catalogs.get_all_objects(
+        ["messier", "caldwell", "ngc", "ic", "sharpless", "barnard", "lbn", "ldn", "vdb", "others"]
+    )
+    cave = full_df[full_df["id"] == "C 9"]
+    assert len(cave) == 1
+    assert "Cave" in cave.iloc[0]["name"]
+    assert "Sh2-155" in cave.iloc[0]["aliases"]
+
+    tulip = full_df[full_df["id"] == "Sh2-101"]
+    assert len(tulip) == 1
+    assert "Tulip" in tulip.iloc[0]["name"]
+
+    horsehead = full_df[full_df["id"] == "B 33"]
+    assert len(horsehead) == 1
+    assert "Horsehead" in horsehead.iloc[0]["name"]
+
+    shark = full_df[full_df["id"] == "LDN 1235"]
+    assert len(shark) == 1
+    assert "Shark" in shark.iloc[0]["name"]
 
 
 def test_time_window_hour_range_filter():

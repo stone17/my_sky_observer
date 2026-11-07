@@ -108,6 +108,12 @@ export const CATALOG_META = {
         subtitle: '110 Classic Deep-Sky Showcase Targets',
         category: 'Core'
     },
+    caldwell: {
+        label: 'Caldwell',
+        code: 'C',
+        subtitle: '109 Showcase Deep-Sky Objects by Patrick Moore',
+        category: 'Core'
+    },
     ngc: {
         label: 'NGC',
         code: 'NGC',
@@ -123,13 +129,31 @@ export const CATALOG_META = {
     sharpless: {
         label: 'Sharpless',
         code: 'Sh2',
-        subtitle: 'H II Emission Nebulae Catalog',
+        subtitle: '313 H II Emission Nebulae Catalog',
+        category: 'Nebulae'
+    },
+    lbn: {
+        label: 'Lynds Bright (LBN)',
+        code: 'LBN',
+        subtitle: 'Lynds Catalogue of Bright Emission & Reflection Nebulae',
+        category: 'Nebulae'
+    },
+    ldn: {
+        label: 'Lynds Dark (LDN)',
+        code: 'LDN',
+        subtitle: 'Lynds Catalogue of Dark Molecular Dust Nebulae',
         category: 'Nebulae'
     },
     barnard: {
         label: 'Barnard',
         code: 'B',
-        subtitle: 'Dark Markings & Absorption Nebulae',
+        subtitle: '349 Dark Markings & Absorption Nebulae',
+        category: 'Nebulae'
+    },
+    vdb: {
+        label: 'van den Bergh (vdB)',
+        code: 'vdB',
+        subtitle: 'Reflection Nebulae Catalogue',
         category: 'Nebulae'
     },
     pk: {
@@ -177,7 +201,7 @@ export const CATALOG_META = {
     others: {
         label: 'Other Catalogs',
         code: 'Misc',
-        subtitle: 'Melotte, Stock, Trumpler, van den Bergh & more',
+        subtitle: 'Arp, Hickson, RCW, Gum, Melotte, Trumpler, Ou & more',
         category: 'Mixed'
     }
 };

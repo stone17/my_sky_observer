@@ -9,16 +9,20 @@ CATALOG_PRIORITY = {
     'MESSIER': 1,
     'NGC': 2,
     'IC': 3,
-    'SHARPLESS': 4,
-    'COLLINDER': 5,
+    'CALDWELL': 4,
+    'SHARPLESS': 5,
     'BARNARD': 6,
-    'ABELL': 7,
-    'UGC': 8,
-    'BERKELEY': 9,
-    'PK': 10,
-    'RUPRECHT': 11,
-    'CHANDRA_SNR': 12,
-    'OTHERS': 13,
+    'LBN': 7,
+    'LDN': 8,
+    'VDB': 9,
+    'COLLINDER': 10,
+    'ABELL': 11,
+    'UGC': 12,
+    'BERKELEY': 13,
+    'PK': 14,
+    'RUPRECHT': 15,
+    'CHANDRA_SNR': 16,
+    'OTHERS': 17,
 }
 
 
@@ -46,6 +50,8 @@ class CatalogManager:
         s = re.sub(r'^BERKELEY\s+', 'BERK ', s)
         s = re.sub(r'^RUPRECHT\s+', 'RU ', s)
         s = re.sub(r'^SH\s*2[\-\s]+', 'SH2-', s)
+        s = re.sub(r'^CALDWELL\s+', 'C ', s)
+        s = re.sub(r'^BARNARD\s+', 'B ', s)
         return s
 
     @staticmethod
@@ -140,21 +146,29 @@ class CatalogManager:
         u = alias_str.upper()
         if re.match(r'^M\s+\d+', u):
             return (1, u)
-        if re.match(r'^NGC\s+\d+', u):
+        if re.match(r'^C\s+\d+', u):
             return (2, u)
-        if re.match(r'^IC\s+\d+', u):
+        if re.match(r'^NGC\s+\d+', u):
             return (3, u)
-        if re.match(r'^SH2[\-\s]\d+', u):
+        if re.match(r'^IC\s+\d+', u):
             return (4, u)
-        if re.match(r'^(CR|COLLINDER)\s+\d+', u):
+        if re.match(r'^SH2[\-\s]\d+', u):
             return (5, u)
-        if re.match(r'^B\s*\d+', u):
+        if re.match(r'^LBN\s+\d+', u):
             return (6, u)
-        if re.match(r'^ABELL\s+\d+', u):
+        if re.match(r'^LDN\s+\d+', u):
             return (7, u)
-        if re.match(r'^UGC\s+\d+', u):
+        if re.match(r'^VDB\s+\d+', u):
             return (8, u)
-        return (9, u)
+        if re.match(r'^(CR|COLLINDER)\s+\d+', u):
+            return (9, u)
+        if re.match(r'^B\s*\d+', u):
+            return (10, u)
+        if re.match(r'^ABELL\s+\d+', u):
+            return (11, u)
+        if re.match(r'^UGC\s+\d+', u):
+            return (12, u)
+        return (13, u)
 
     @classmethod
     def get_all_objects(cls, catalog_names: List[str]) -> pd.DataFrame:

@@ -1,0 +1,110 @@
+designation,name,other_id,type,constellation,magnitude,surface_brightness,size,ra_string,dec_string,ra_deg,dec_deg,class
+C 1,Polarissima Cluster,NGC 188,Opn CL,CEP,8.1,-,14',00 48.4,+85 15,12.10833333,85.255,II 2 r
+C 2,Bow-Tie Nebula,NGC 40;PK 120+9.1;Scarab Nebula,Pln Neb,CEP,10.7,7.3,1',00 13.0,+72 31,3.25423761,72.52195358,3b(3)
+C 3,N/A,NGC 4236;UGC 7306,Galaxy,DRA,9.6,15,22.6',12 16.7,+69 28,184.17549167,69.46256944,SBd
+C 4,Iris Nebula,NGC 7023;LBN 487,CL+Neb,CEP,7.1,-,5',21 01.6,+68 10,315.40375,68.16333333,E+*
+C 5,Hidden Galaxy,IC 342;UGC 2847;Maffei 1 Group,Galaxy,CAM,12,14.9,20.9',03 46.8,+68 06,56.70214167,68.09610556,SBc
+C 6,Cat's Eye Nebula,NGC 6543;PK 96+29.1;Sunflower Nebula;Snail Nebula;Cat Eye Nebula,Pln Neb,DRA,8.3,5,0.37',17 58.6,+66 38,269.63918438,66.63298582,3a(2)
+C 7,Caldwell 7 Galaxy,NGC 2403;UGC 3918,Galaxy,CAM,8.5,14.4,23.4',07 36.9,+65 36,114.21415,65.60254722,SBc
+C 8,Ghost's Goblet,NGC 559,Opn CL,CAS,9.5,-,4.4',01 29.5,+63 18,22.38,63.302,II 2 m
+C 9,Cave Nebula,Sh2-155;LBN 529,Brt Neb,CEP,-,-,15',22 57.1,+62 38,344.27461618,62.63591586,E
+C 10,Horseshoe Cluster,NGC 663;Lawnmower Cluster;Letter S Cluster,Opn CL,CAS,7.1,-,16',01 46.2,+61 14,26.5375,61.235,III 2 m
+C 11,Bubble Nebula,NGC 7635;LBN 548;Sh2-162,Brt Neb,CAS,11,-,15',23 20.8,+61 12,350.20125,61.20166667,E
+C 12,Fireworks Galaxy,NGC 6946;UGC 11597;Arp 29,Galaxy,CEP,8.8,13.8,11.2',20 34.9,+60 09,308.71805,60.15367778,SBc
+C 13,Dragonfly Cluster,NGC 457;Owl Cluster;E.T. Cluster;φ Cas Cluster;ET Cluster,Opn CL,CAS,6.4,-,13',01 19.6,+58 17,19.89583333,58.28666667,I 3 r
+C 14,Double Cluster (h Persei),NGC 869;Double Cluster;h Persei;Sword Handle;h & chi Persei;h Persei Cluster;h Per Cluster,Opn CL,PER,5.3,-,30',02 19.0,+57 08,34.75,57.12833333,I 3 r
+C 15,Blinking Planetary Nebula,NGC 6826;PK 83+12.1;Blinking Planetary,Pln Neb,CYG,8.8,6.9,0.45',19 44.8,+50 32,296.20062535,50.5250697,3a(2)
+C 16,N/A,NGC 7243,Opn CL,LAC,6.4,-,21',22 15.1,+49 54,333.78333333,49.89833333,IV 2 p
+C 17,N/A,NGC 147;UGC 326;DDO 3,Galaxy,CAS,9.5,14.5,13.5',00 33.2,+48 31,8.3005,48.50873889,dE4
+C 18,N/A,NGC 185;UGC 396,Galaxy,CAS,9.2,14.3,12.5',00 39.0,+48 20,9.74154167,48.33737778,dE0
+C 19,Cocoon Nebula,IC 5146;Cocoon Cluster,CL+Neb,CYG,10,-,20',21 53.4,+47 16,328.35,47.26666667,IV 2 p n
+C 20,North America Nebula,NGC 7000;LBN 373;Sh2-117;America Nebula,Brt Neb,CYG,4,-,120',20 58.8,+44 20,314.69583333,44.33,E
+C 21,The Box Galaxy,NGC 4449;UGC 7592,Galaxy,CVN,9.6,13,6.2',12 28.2,+44 06,187.046325,44.09355833,Ir
+C 22,Light Blue Snowball,NGC 7662;PK 106-17.1;Blue Snowball;Copeland's Blue Snowball;Snowball Nebula,Pln Neb,AND,8.6,5.6,0.28',23 25.9,+42 32,351.47333333,42.535,4(3)
+C 23,Silver Sliver Galaxy,NGC 891;UGC 1831;The Silver Sliver Galaxy;Outer Limits Galaxy,Galaxy,AND,9.9,13.6,13.1',02 22.5,+42 21,35.6371125,42.34831944,Sb
+C 24,Perseus A,NGC 1275;3C 84;UGC 2669;Per A,Galaxy,PER,11.9,13.1,2.3',03 19.8,+41 31,49.95066567,41.51169838,SO
+C 25,Intergalactic Wanderer,NGC 2419;Intergalactic Tramp,Glob CL,LYN,10.4,-,6.2',07 38.1,+38 53,114.53545833,38.88191667,II
+C 26,Silver Needle Galaxy,NGC 4244;UGC 7322,Galaxy,CVN,10.4,14,15.9',12 17.5,+37 48,184.37357917,37.80711111,Sc
+C 27,Crescent Nebula,NGC 6888;LBN 203;Ear Nebula,Brt Neb,CYG,10,-,20',20 12.1,+38 21,303.02916667,38.355,E
+C 28,N/A,NGC 752,Opn CL,AND,5.7,-,50',01 57.7,+37 47,29.42083333,37.785,III 1 m
+C 29,N/A,NGC 5005;UGC 8256,Galaxy,CVN,9.8,12.7,5.8',13 10.9,+37 04,197.73463333,37.05894167,SBbc
+C 30,Deer Lick Group Galaxy,NGC 7331;UGC 12113;Deer Lick Group,Galaxy,PEG,9.5,13.3,10.2',22 37.1,+34 25,339.26709167,34.41591944,SBc
+C 31,Flaming Star Nebula,IC 405;LBN 795;Schaeberle's Flaming Star,Brt Neb,AUR,10,-,50',05 17.4,+34 23,79.35,34.38333333,E
+C 32,Whale Galaxy,NGC 4631;UGC 7865;Arp 281;Herring Galaxy;Herring Galaxy (Nebula),Galaxy,CVN,9.2,13.1,15.2',12 42.1,+32 32,190.53337083,32.54151111,SBcd
+C 33,Eastern Veil Nebula,NGC 6992;Ced 182B;East Veil Nebula;Veil Nebula;Eastern Veil;Network Nebula,SN Rem,CYG,7,-,60',20 56.3,+31 45,314.07916667,31.74333333,R
+C 34,Western Veil Nebula (Witch's Broom),NGC 6960;LBN 191;Filamentary Nebula;West Veil Nebula;Cirrus Nebula;Witch's Broom Nebula;Veil Nebula;Network Nebula;Cygnus Loop;Western Veil,SN Rem,CYG,7,-,210',20 45.6,+30 42,311.40833333,30.70833333,N/A
+C 35,Coma B,NGC 4889;NGC 4884,Galaxy,COM,11.5,13.3,2.8',13 00.1,+27 59,195.0337375,27.977025,Elliptical
+C 36,Koi Fish Galaxy,NGC 4559;UGC 7766,Galaxy,COM,10,14,11',12 36.0,+27 58,188.99016643,27.95996101,SBc
+C 37,20 Vulpeculae Cluster,NGC 6885,Opn CL,VUL,8.1,-,7',20 12.0,+26 29,303.00416667,26.47833333,III 2 p
+C 38,Needle Galaxy,NGC 4565;UGC 7772;Berenice's Hair Clip;Flying Saucer Galaxy,Galaxy,COM,9.6,13.3,14.9',12 36.3,+25 59,189.08668333,25.98739167,Sb
+C 39,Eskimo Nebula,"NGC 2392;PK 197+17.1;Clown Face Nebula;Clown Nebula;Eskimo;Clown Face;Clown Nebula, Clown Face N.",Pln Neb,GEM,8.6,6.8,0.78',07 29.2,+20 55,112.29486213,20.91179959,3b(3b)
+C 40,N/A,NGC 3626;NGC 3632,Galaxy,LEO,11,12.6,3.2',11 20.1,+18 21,170.01580833,18.35679167,Sa
+C 41,Hyades,Mel 25;Hyades Cluster,Opn CL,TAU,0.5,-,330',04 26.9,+15 52,66.725,15.86667,II 3 m
+C 42,N/A,NGC 7006,Glob CL,DEL,10.6,-,2.8',21 01.5,+16 11,315.37277083,16.18791389,I
+C 43,The Little Sombrero Galaxy,NGC 7814;UGC 8;Electric Arc Galaxy,Galaxy,PEG,10.6,13.2,4.7',00 03.2,+16 09,0.81227917,16.14522778,Sab
+C 44,Propeller Galaxy,NGC 7479;UGC 12343;Superman Galaxy,Galaxy,PEG,10.9,13.4,4',23 04.9,+12 19,346.23611667,12.32287778,SBbc
+C 45,N/A,NGC 5248;UGC 8616,Galaxy,BOO,10.3,13.8,5.9',13 37.5,+08 53,204.38362083,8.88506111,SBbc
+C 46,Hubble's Variable Nebula,NGC 2261;LBN 920;Hubble's Nebula;HUBBLE'S VAR NEB,Brt Neb,MON,-,-,2',06 39.2,+08 44,99.79147446,8.73598872,E+R
+C 47,N/A,NGC 6934,Glob CL,DEL,8.9,-,7',20 34.2,+07 24,308.547375,7.40447222,VIII
+C 48,N/A,NGC 2775;UGC 4820,Galaxy,CNC,10.1,12.9,4.5',09 10.3,+07 02,137.5838,7.037925,Sab
+C 49,Rosette Nebula,NGC 2237;Rosette A,CL+Neb,MON,5.5,-,80',06 30.6,+04 59,97.65041667,4.98072222,E
+C 50,Rosette Nebula,NGC 2244;NGC 2239;Harp Cluster,CL+Neb,MON,4.8,-,24',06 31.9,+04 57,97.97916667,4.94166667,II 3 r n:b
+C 51,Scarecrow Galaxy,IC 1613;UGC 668;Cetus System,Galaxy,CET,9.2,15,16.6',01 04.9,+02 08,16.22583333,2.13333333,Ir
+C 52,N/A,NGC 4697;MCG - 1-33- 10,Galaxy,VIR,9.2,13.1,6.2',12 48.6,-05 48,192.14958033,-5.8006938,Elliptical
+C 53,Spindle Galaxy,NGC 3115;MCG - 1-26- 18;Spindle Nebula,Galaxy,SEX,8.9,11.9,7.3',10 05.2,-07 43,151.30824167,-7.71858056,E6
+C 54,N/A,NGC 2506,Opn CL,MON,7.6,-,7',08 00.0,-10 46,120.00416667,-10.77,I 2 r
+C 55,Saturn Nebula,NGC 7009;PK 37-34.1,Pln Neb,AQR,8.3,6.2,0.47',21 04.2,-11 22,316.0450639,-11.36349495,4(6)
+C 56,Skull Nebula,NGC 246;PK 118-74.1;Soap Bubble Nebula;Voodoo Mask Nebula;Pac-Man Nebula,Pln Neb,CET,10.4,13.5,4',00 47.1,-11 52,11.76390909,-11.8719284,3b
+C 57,Barnard's Galaxy,NGC 6822;IC 4895;Hubble X,Galaxy,SGR,8.8,14.5,15.4',19 44.9,-14 48,296.2341625,-14.79758056,Ir+
+C 58,Caroline's Cluster,NGC 2360,Opn CL,CMA,7.2,-,13',07 17.7,-15 39,109.42916667,-15.64166667,II 2 m
+C 59,Ghost of Jupiter,NGC 3242;PK 261+32.1;Ghost of Jupiter Nebula;Eye Nebula;Diamond Nebula;Jupiter's Ghost Nebula;CBS Eye,Pln Neb,HYA,8.6,5.4,0.67',10 24.8,-18 39,156.192223,-18.64230401,4(3b)
+C 60,Antennae Galaxies,NGC 4038;ESO 572-47;Arp 244;Antennae;Ring-Tail Galaxy;Snorter;Mosquito larvae,Galaxy,CRV,10.3,13.1,3.4',12 01.9,-18 52,180.47084167,-18.86758889,Sp
+C 61,Antennae,NGC 4039;ESO 572-48;Ring-Tail Galaxy;Snorter;Mosquito larvae;Antennae Galaxies,Galaxy,CRV,10.6,12.1,3.3',12 01.9,-18 53,180.47416667,-18.885,SB
+C 62,Needle's Eye Galaxy,NGC 247;ESO 540-22;Claw Galaxy;Milkweed Seed Galaxy,Galaxy,CET,9.1,14.4,21',00 47.1,-20 46,11.78564167,-20.7604,SBcd
+C 63,Helix Nebula,NGC 7293;PK 36-57.1;Helical Nebula;Sunflower Nebula;HELICAL NEB,Pln Neb,AQR,6.3,13.6,16',22 29.6,-20 50,337.41060545,-20.83715169,4(3)
+C 64,τ CMa Cluster,NGC 2362;Mexican Jumping Star;Pirate's Jewels Cluster;Mexican Jumping Bean Cluster;Tau CMa,Opn CL,CMA,4.1,-,8',07 18.7,-24 57,109.67083333,-24.955,I 3 p n
+C 65,Sculptor Galaxy,NGC 253;ESO 474-29;Silver Coin Galaxy;Silver Dollar Galaxy;Sculptor Filament;Silver Coin;Scl Filament,Galaxy,SCL,7.2,12.7,26.4',00 47.6,-25 17,11.88805833,-25.2888,SBc
+C 66,N/A,NGC 5694,Glob CL,HYA,10.2,-,3.6',14 39.6,-26 32,219.90216667,-26.53833333,VII
+C 67,N/A,NGC 1097;ESO 416-20;Arp 77,Galaxy,FOR,9.5,13.8,9.4',02 46.3,-30 16,41.5794125,-30.27491111,SBb
+C 68,R CrA Nebula,NGC 6729;ESO 396-N*15,Brt Neb,CRA,-,-,25',19 01.8,-36 58,285.44333333,-36.96111111,E+R
+C 69,Bug Nebula,NGC 6302;PK 349+1.1;Sh2-6;Gum 60;RCW 124;Butterfly Nebula,Pln Neb,SCO,12.8,9,1.2',17 13.7,-37 06,258.43474583,-37.10304167,6
+C 70,Sculptor Pinwheel Galaxy,NGC 300;ESO 295-20;Southern Pinwheel Galaxy,Galaxy,SCL,8.1,14.3,19.3',00 54.9,-37 41,13.72269169,-37.68421749,Scd
+C 71,Electric Guitar Cluster,NGC 2477;Termite Hole Cluster,Opn CL,PUP,5.8,-,27',07 52.2,-38 32,118.04166667,-38.53,I 2 r :b
+C 72,String of Pearls,NGC 55;Dunlop 507,Galaxy,SCL,7.9,13.4,31.2',00 14.9,-39 12,3.72334167,-39.19662778,SBp
+C 73,N/A,NGC 1851;Dunlop 508,Glob CL,COL,7.1,-,11',05 14.1,-40 03,78.52816667,-40.04655556,II
+C 74,Eight-Burst Planetary Nebula,NGC 3132;PK 272+12.1;Eight-Burst Nebula;Southern Ring Nebula,Pln Neb,VEL,8.2,8.2,1.4',10 07.0,-40 26,151.75735659,-40.43642749,4(2)
+C 75,N/A,NGC 6124;Dunlop 514,Opn CL,SCO,5.8,-,29',16 25.3,-40 39,246.33333333,-40.65333333,II 3 m
+C 76,False Comet Nebula,NGC 6231;Dunlop 520;Northern Jewel Box Cluster;Table of Scorpius Cluster;Crocodile Cluster;False Comet Cluster;Table of Scorpius,Opn CL,SCO,2.6,-,15',16 54.1,-41 50,253.53545833,-41.82666667,I 3 r n
+C 77,Centaurus A,NGC 5128;Dunlop 482;Arp 153;The Hamburger Galaxy;Cen-A;Cen A,Galaxy,CEN,6.8,13.5,27.6',13 25.5,-43 01,201.36506279,-43.01911258,SO
+C 78,Cacciatore Cluster,NGC 6541;Dunlop 473,Glob CL,CRA,6.3,-,13.1',18 08.0,-43 43,272.00983333,-43.71488889,III
+C 79,N/A,NGC 3201;Dunlop 445,Glob CL,VEL,6.8,-,18.2',10 17.6,-46 25,154.40341667,-46.41247222,X
+C 80,Omega Centauri,NGC 5139;ω Cen Cluster;ome Cen Cluster,Glob CL,CEN,3.9,-,36.3',13 26.8,-47 29,201.697,-47.47947222,VIII
+C 81,N/A,NGC 6352;Dunlop 417,Glob CL,ARA,7.8,-,7.1',17 25.5,-48 25,261.37129167,-48.42216667,XI
+C 82,N/A,NGC 6193,Opn CL,ARA,5.2,-,15',16 41.3,-48 46,250.33333333,-48.76333333,II 3 p n
+C 83,The Tweezers Galaxy,NGC 4945;Dunlop 411;Cigar Galaxy,Galaxy,CEN,8.6,13.1,19.8',13 05.5,-49 28,196.3636625,-49.4679,SBc
+C 84,N/A,NGC 5286;Dunlop 388,Glob CL,CEN,7.4,-,9.1',13 46.4,-51 22,206.61170833,-51.37425,V
+C 85,ο Vel Cluster,IC 2391;Cr 191;omi Vel Cluster;Omicron Velorum Cluster,Opn CL,VEL,2.5,-,60',08 40.5,-53 02,130.13333333,-53.03333333,II 3 p
+C 86,Ara Globular Cluster,NGC 6397;Lac III-11;Blue Straggler Cluster,Glob CL,ARA,5.3,-,25.7',17 40.7,-53 40,265.175375,-53.67433333,IX
+C 87,N/A,NGC 1261,Glob CL,HOR,8.4,-,6.9',03 12.3,-55 13,48.06754167,-55.21622222,II
+C 88,N/A,NGC 5823,Opn CL,CIR,7.9,-,10',15 05.5,-55 36,226.38,-55.595,III 2 m
+C 89,S Nor Cluster,NGC 6087;S NORMA CL,Opn CL,NOR,5.4,-,12',16 18.8,-57 56,244.70833333,-57.935,I 2 p
+C 90,N/A,NGC 2867;PK 278-5.1,Pln Neb,CAR,9.7,6.5,0.2',09 21.4,-58 19,140.35576399,-58.31128241,4
+C 91,Wishing Well Cluster,NGC 3532;Firefly Party Cluster;Pincushion Cluster;The Pin Cushion Cluster;Black Arrow Cluster,Opn CL,CAR,3,-,50',11 05.6,-58 45,166.4125,-58.75333333,II 1 m
+C 92,Carina Nebula,NGC 3372;Dunlop 309;η Car Nebula;Homunculus Nebula;Keyhole Nebula;The Great Nebula in Carina;South Pillars;eta Car Nebula;Car Nebula;Keyhole;Eta Carina;Eta Carinae Nebula,Brt Neb,CAR,3,-,120',10 44.3,-59 53,161.07916667,-59.88916667,E
+C 93,Pavo Globular Cluster,NGC 6752;Dunlop 295;The Starfish;Starfish Cluster;The Windmill;Pavo Globular,Glob CL,PAV,5.4,-,20.4',19 10.9,-59 59,287.717125,-59.98455556,VI
+C 94,Jewel Box,NGC 4755;Herschel's Jewel Box;κ Cru Cluster;Jewel Box Cluster;kappa Crucis Cluster;kap Cru Cluster,Opn CL,CRU,4.2,-,10',12 53.7,-60 22,193.4125,-60.36166667,I 3 r
+C 95,N/A,NGC 6025,Opn CL,TRA,5.1,-,12',16 03.3,-60 26,240.82083333,-60.43166667,II 2 p
+C 96,Southern Beehive,NGC 2516;Sprinter Cluster;Diamond Cluster,Opn CL,CAR,3.8,-,21',07 58.1,-60 45,119.51666667,-60.75333333,I 3 r
+C 97,Pearl Cluster,NGC 3766;Rich Man's Jewel Box,Opn CL,CEN,5.3,-,12',11 36.3,-61 37,174.075,-61.615,I 1 p
+C 98,Coalsack Cluster,NGC 4609,Opn CL,CRU,6.9,-,5',12 42.3,-63 00,190.575,-62.995,II 1 p
+C 99,Coalsack Nebula,Coal Sack;Coalsack;Southern Coalsack,Drk Neb,CRU,-,-,400',12 31.3,-63 45,187.82916667,-63.74333333,3? Ir
+C 100,Running Chicken Nebula,IC 2944;Cr 249;λ Cen Cluster;λ Cen Nebula;lam Cen Nebula,CL+Neb,CEN,4.5,-,60',11 38.3,-63 22,174.58333,-63.37278,III 3 mn
+C 101,N/A,NGC 6744;ESO 104-42,Galaxy,PAV,8.3,14.2,20.2',19 09.8,-63 51,287.44207917,-63.85753889,SBbc
+C 102,Southern Pleiades,IC 2602;Cr 229;θ Car Cluster;tet Car Cluster;THETA CAR Cluster,Opn CL,CAR,1.9,-,100',10 43.0,-64 24,160.74166667,-64.4,II 3 m
+C 103,Tarantula Nebula,NGC 2070;ESO 57-EN6;Great Looped Nebula;True Lovers' Knot;30 Dor Cluster;30 Doradus Cluster;30 Dor Nebula;Tarantula;30 Dor Association,CL+Neb,DOR,8.3,-,20',05 38.7,-69 06,84.675,-69.1,E
+C 104,75 Tucanae,NGC 362;Dunlop 62,Glob CL,TUC,6.8,-,12.9',01 03.2,-70 51,15.80941667,-70.84877778,III
+C 105,The Southern Butterfly,NGC 4833;Lac I-4,Glob CL,MUS,8.4,-,13.5',12 59.6,-70 53,194.89133333,-70.8765,VIII
+C 106,47 Tuc,NGC 104;47 Tucanae;47 Tuc Cluster,Glob CL,TUC,4,-,30',00 24.1,-72 05,6.02232917,-72.08144444,III
+C 107,N/A,NGC 6101,Glob CL,APS,9.3,-,10.7',16 25.8,-72 12,246.4505,-72.20219444,X
+C 108,N/A,NGC 4372,Glob CL,MUS,7.2,-,18.6',12 25.8,-72 40,186.43929167,-72.65908333,XII
+C 109,N/A,NGC 3195;PK 296-20.1,Pln Neb,CHA,11.5,10.8,0.67',10 09.3,-80 52,152.337125,-80.85853611,3

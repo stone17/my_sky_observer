@@ -18,9 +18,12 @@ catalogs:
 - abell
 - barnard
 - berkeley
+- caldwell
 - chandra_snr
 - collinder
 - ic
+- lbn
+- ldn
 - messier
 - ngc
 - others
@@ -28,6 +31,7 @@ catalogs:
 - ruprecht
 - sharpless
 - ugc
+- vdb
 
 min_altitude: 30.0
 sort_key: "time"
