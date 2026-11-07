@@ -2,6 +2,7 @@ import io
 import math
 import re
 import warnings
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 import astropy.units as u
@@ -73,6 +74,88 @@ class AstroCalculator:
             print(f"Error in batch_get_max_altitude: {e}")
             return np.zeros_like(dec_array)
 
+    def parse_hhmm_to_minutes(self, time_str: Optional[str]) -> Optional[int]:
+        """Parses a 'HH:MM' string into minutes since midnight [0, 1440)."""
+        if not time_str or not isinstance(time_str, str):
+            return None
+        parts = time_str.strip().split(":")
+        if len(parts) < 2:
+            return None
+        try:
+            hours = int(parts[0])
+            minutes = int(parts[1])
+            if not (0 <= hours <= 24 and 0 <= minutes < 60):
+                return None
+            if hours == 24 and minutes == 0:
+                return 0
+            if hours >= 24:
+                return None
+            return hours * 60 + minutes
+        except ValueError:
+            return None
+
+    def format_iso_to_hhmm(
+        self, iso_str: str, tz_offset_minutes: Optional[float] = None
+    ) -> Optional[str]:
+        """Formats an ISO UTC timestamp string into local 'HH:MM'."""
+        if not iso_str:
+            return None
+        try:
+            dt_utc = Time(iso_str).to_datetime(timezone=timezone.utc)
+            if tz_offset_minutes is not None:
+                local_dt = dt_utc - timedelta(minutes=float(tz_offset_minutes))
+            else:
+                local_dt = dt_utc.astimezone()
+            return f"{local_dt.hour:02d}:{local_dt.minute:02d}"
+        except Exception:
+            return None
+
+    def build_time_window_mask(
+        self,
+        times: Time,
+        start_str: Optional[str] = None,
+        end_str: Optional[str] = None,
+        tz_offset_minutes: Optional[float] = None,
+        twilight_periods: Optional[Dict[str, List[str]]] = None,
+    ) -> np.ndarray:
+        """
+        Builds a boolean mask for an astropy Time array matching a local 'HH:MM' time window.
+        Falls back to astronomical night start/end from twilight_periods if start_str or end_str is empty.
+        """
+        n = len(times) if hasattr(times, "__len__") else 1
+        if (not start_str or not start_str.strip()) and twilight_periods and "night" in twilight_periods:
+            start_str = self.format_iso_to_hhmm(
+                twilight_periods["night"][0], tz_offset_minutes
+            )
+        if (not end_str or not end_str.strip()) and twilight_periods and "night" in twilight_periods:
+            end_str = self.format_iso_to_hhmm(
+                twilight_periods["night"][1], tz_offset_minutes
+            )
+
+        start_min = self.parse_hhmm_to_minutes(start_str)
+        end_min = self.parse_hhmm_to_minutes(end_str)
+        if start_min is None or end_min is None:
+            return np.ones(n, dtype=bool)
+
+        try:
+            dts = times.to_datetime(timezone=timezone.utc)
+            if not isinstance(dts, (list, tuple, np.ndarray)):
+                dts = [dts]
+            if tz_offset_minutes is not None:
+                offset_td = timedelta(minutes=float(tz_offset_minutes))
+                local_dts = [dt - offset_td for dt in dts]
+            else:
+                local_dts = [dt.astimezone() for dt in dts]
+
+            mins = np.array([dt.hour * 60 + dt.minute for dt in local_dts])
+            if start_min <= end_min:
+                return (mins >= start_min) & (mins <= end_min)
+            else:
+                return (mins >= start_min) | (mins <= end_min)
+        except Exception as e:
+            print(f"Error building time window mask: {e}")
+            return np.ones(n, dtype=bool)
+
     def prepare_session_ephemeris(
         self,
         location: Location,
@@ -80,6 +163,10 @@ class AstroCalculator:
         end_time: Optional[Time] = None,
         num_points: int = 60,
         twilight_periods: Optional[Dict[str, List[str]]] = None,
+        time_window_active: bool = False,
+        time_window_start: Optional[str] = None,
+        time_window_end: Optional[str] = None,
+        tz_offset_minutes: Optional[float] = None,
     ) -> dict:
         """
         Precomputes the session AltAz time grid, Moon curve, Sun curve, and night mask once
@@ -143,6 +230,16 @@ class AstroCalculator:
                 night_mask = (times >= night_start) & (times <= night_end)
             except Exception:
                 pass
+
+        if time_window_active:
+            window_mask = self.build_time_window_mask(
+                times=times,
+                start_str=time_window_start,
+                end_str=time_window_end,
+                tz_offset_minutes=tz_offset_minutes,
+                twilight_periods=twilight_periods,
+            )
+            night_mask = night_mask & window_mask
 
         time_step_hours = duration / (num_points - 1) if num_points > 1 else 0.0
 
@@ -271,6 +368,7 @@ class AstroCalculator:
         altaz_frame: AltAz,
         duration: float,
         min_altitude: float,
+        time_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Vectorized calculation of nightly hours visible.
@@ -281,7 +379,11 @@ class AstroCalculator:
             target_altaz = targets.transform_to(altaz_frame)
             altitudes = target_altaz.alt.deg
 
-            count_above = np.sum(altitudes >= min_altitude, axis=1)
+            above_mask = altitudes >= min_altitude
+            if time_mask is not None and len(time_mask) == altitudes.shape[1]:
+                above_mask = above_mask & time_mask[np.newaxis, :]
+
+            count_above = np.sum(above_mask, axis=1)
             num_times = altitudes.shape[1]
             if num_times == 0:
                 return np.zeros_like(ra_array)
@@ -298,11 +400,18 @@ class AstroCalculator:
         altitude_points: List[AltitudePoint],
         min_altitude: float,
         twilight_periods: Optional[Dict[str, List[str]]] = None,
+        time_window_active: bool = False,
+        time_window_start: Optional[str] = None,
+        time_window_end: Optional[str] = None,
+        tz_offset_minutes: Optional[float] = None,
     ) -> float:
         """
         Estimates the total hours an object is above a minimum altitude based on the graph points.
         If twilight_periods is provided (and contains 'night'), only counts hours during the night.
         """
+        if not altitude_points:
+            return 0.0
+
         valid_points = []
         night_start = None
         night_end = None
@@ -314,8 +423,24 @@ class AstroCalculator:
             except Exception:
                 pass
 
-        for p in altitude_points:
+        window_mask = None
+        if time_window_active:
+            try:
+                pt_times = Time([p.time for p in altitude_points])
+                window_mask = self.build_time_window_mask(
+                    times=pt_times,
+                    start_str=time_window_start,
+                    end_str=time_window_end,
+                    tz_offset_minutes=tz_offset_minutes,
+                    twilight_periods=twilight_periods,
+                )
+            except Exception:
+                window_mask = None
+
+        for idx, p in enumerate(altitude_points):
             if p.altitude >= min_altitude:
+                if window_mask is not None and not window_mask[idx]:
+                    continue
                 if night_start and night_end:
                     pt = Time(p.time)
                     if night_start <= pt <= night_end:

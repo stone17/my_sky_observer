@@ -6,6 +6,10 @@ import {
     getObjectTypeDescription,
     formatMagnitude
 } from '../utils/catalogMeta.js';
+import {
+    resolveEffectiveTimeWindow,
+    isTimestampInTimeWindow
+} from '../utils/timeWindow.js';
 
 const props = defineProps([
     'objects',
@@ -130,6 +134,8 @@ const filteredAndSortedObjects = computed(() => {
     const activeHrs = localClientSettings.value.filter_active_hours !== false;
     const naHrs = localClientSettings.value.filter_na_hours !== false;
 
+    const tw = resolveEffectiveTimeWindow(localClientSettings.value, props.nightTimes);
+
     const maxMag = localClientSettings.value.max_magnitude ?? 12;
     const activeMag = localClientSettings.value.filter_active_mag !== false;
     const naMag = localClientSettings.value.filter_na_mag !== false;
@@ -158,14 +164,29 @@ const filteredAndSortedObjects = computed(() => {
             }
         }
 
+        let effectiveHrs = o.hours_visible;
+        if (tw.active && o.altitude_graph && o.altitude_graph.length > 1) {
+            const t0 = new Date(o.altitude_graph[0].time).getTime();
+            const t1 = new Date(o.altitude_graph[o.altitude_graph.length - 1].time).getTime();
+            const spanHours = t1 > t0 ? (t1 - t0) / 3600000 : 24.0;
+            const stepHours = spanHours / (o.altitude_graph.length - 1);
+            let validCount = 0;
+            for (const p of o.altitude_graph) {
+                if (p.altitude >= minAlt && isTimestampInTimeWindow(p.time, tw.startMin, tw.endMin)) {
+                    validCount++;
+                }
+            }
+            effectiveHrs = Math.round(validCount * stepHours * 10) / 10;
+        }
+
         // If it's not a search match, apply normal filters.
         if (!isMatch) {
             if (activeHrs) {
-                const isNaHrs = o.hours_visible === undefined || o.hours_visible === null;
+                const isNaHrs = effectiveHrs === undefined || effectiveHrs === null;
                 if (isNaHrs) {
                     if (!naHrs) continue;
                 } else {
-                    if (minHrs > 0 && o.hours_visible < minHrs) continue;
+                    if (minHrs > 0 && effectiveHrs < minHrs) continue;
                 }
             }
 
@@ -201,7 +222,7 @@ const filteredAndSortedObjects = computed(() => {
             if (selectedTypes.length > 0 && !selectedTypes.includes(o.type)) continue;
         }
 
-        o._dynamicHours = o.hours_visible || 0;
+        o._dynamicHours = effectiveHrs || 0;
         o._isSearchMatch = isMatch;
         result.push(o);
     }

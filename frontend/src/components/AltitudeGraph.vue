@@ -1,7 +1,11 @@
 <script setup>
 import { computed, ref, watch } from 'vue';
+import {
+    resolveEffectiveTimeWindow,
+    isTimestampInTimeWindow
+} from '../utils/timeWindow.js';
 
-const props = defineProps(['object', 'location', 'nightTimes']);
+const props = defineProps(['object', 'location', 'nightTimes', 'clientSettings']);
 
 const showMoon = ref(true);
 
@@ -134,6 +138,48 @@ const nightZones = computed(() => {
     return zones;
 });
 
+const timeWindowInfo = computed(() => {
+    return resolveEffectiveTimeWindow(props.clientSettings, props.nightTimes);
+});
+
+const timeWindowOverlay = computed(() => {
+    const tw = timeWindowInfo.value;
+    const pts = props.object?.altitude_graph;
+    if (!tw.active || !pts || pts.length < 2) {
+        return { excludedRects: [], boundaryLines: [] };
+    }
+
+    const n = pts.length;
+    const stepX = width / (n - 1);
+    const inFlags = pts.map(p => isTimestampInTimeWindow(p.time, tw.startMin, tw.endMin));
+
+    const excludedRects = [];
+    const boundaryLines = [];
+
+    let currentExcludedStart = null;
+    for (let i = 0; i < n; i++) {
+        const x = i * stepX;
+        if (!inFlags[i]) {
+            if (currentExcludedStart === null) {
+                currentExcludedStart = i === 0 ? 0 : (i - 0.5) * stepX;
+            }
+        } else if (currentExcludedStart !== null) {
+            const endX = (i - 0.5) * stepX;
+            excludedRects.push({ x: currentExcludedStart, width: Math.max(0, endX - currentExcludedStart) });
+            currentExcludedStart = null;
+        }
+
+        if (i > 0 && inFlags[i] !== inFlags[i - 1]) {
+            boundaryLines.push((i - 0.5) * stepX);
+        }
+    }
+    if (currentExcludedStart !== null) {
+        excludedRects.push({ x: currentExcludedStart, width: Math.max(0, width - currentExcludedStart) });
+    }
+
+    return { excludedRects, boundaryLines };
+});
+
 const updateHoverFromClientX = (clientX, targetEl) => {
     if (!props.object || !props.object.altitude_graph || props.object.altitude_graph.length === 0) return;
 
@@ -214,6 +260,13 @@ const handleMouseLeave = () => {
                  <span class="target-label">■ {{ object.name }}</span>
                  <span v-if="showMoon" class="moon-label">■ Moon</span>
                  <span class="night-label" title="Civil, Nautical, Astro, Night">■ Twilights/Night</span>
+                 <span
+                     v-if="timeWindowInfo.active"
+                     class="window-label"
+                     :title="`Active Hour Range: ${timeWindowInfo.start} – ${timeWindowInfo.end}`"
+                 >
+                     ⏱ {{ timeWindowInfo.start }}–{{ timeWindowInfo.end }}
+                 </span>
             </div>
             <div class="controls">
                 <input type="checkbox" id="chkMoon" v-model="showMoon">
@@ -256,6 +309,28 @@ const handleMouseLeave = () => {
 
                     <!-- Moon Graph -->
                     <path v-if="moonPath" :d="moonPath" fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,2" />
+
+                    <!-- Excluded Time Window Shading & Boundaries -->
+                    <rect
+                        v-for="(ex, idx) in timeWindowOverlay.excludedRects"
+                        :key="`ex-${idx}`"
+                        :x="ex.x"
+                        y="0"
+                        :width="ex.width"
+                        :height="height"
+                        fill="rgba(0, 0, 0, 0.52)"
+                    />
+                    <line
+                        v-for="(bx, idx) in timeWindowOverlay.boundaryLines"
+                        :key="`bx-${idx}`"
+                        :x1="bx"
+                        y1="0"
+                        :x2="bx"
+                        :y2="height"
+                        stroke="#38bdf8"
+                        stroke-width="1.2"
+                        stroke-dasharray="3,2"
+                    />
                     
                     <!-- Now Line -->
                     <line v-if="nowX > 0 && nowX < width" :x1="nowX" y1="0" :x2="nowX" :y2="height" stroke="#ef4444" stroke-width="1" stroke-dasharray="2" />
@@ -346,6 +421,7 @@ const handleMouseLeave = () => {
 .target-label { color: #10b981; }
 .moon-label { color: #fbbf24; }
 .night-label { color: #1e3a8a; font-weight: bold; cursor: help; }
+.window-label { color: #38bdf8; font-weight: 600; cursor: help; }
 
 @media (max-width: 768px) {
     .altitude-wrapper {

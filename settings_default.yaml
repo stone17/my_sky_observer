@@ -56,5 +56,8 @@ client_settings:
   filter_na_mag: true
   filter_active_size: true
   filter_na_size: true
+  filter_active_time_window: false
+  time_window_start: ""
+  time_window_end: ""
   show_object_overlays: true
 

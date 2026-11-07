@@ -5,6 +5,7 @@ import ObjectList from './components/ObjectList.vue';
 import Framing from './components/Framing.vue';
 import AltitudeGraph from './components/AltitudeGraph.vue';
 import { computeDefaultImageFov, normalizeImageFov } from './utils/fov.js';
+import { getAstroNightDefaults } from './utils/timeWindow.js';
 
 const settings = ref({});
 const clientSettings = ref({
@@ -20,6 +21,9 @@ const clientSettings = ref({
     filter_na_mag: true,
     filter_active_size: true,
     filter_na_size: true,
+    filter_active_time_window: false,
+    time_window_start: '',
+    time_window_end: '',
     show_object_overlays: true
 });
 const objects = ref([]);
@@ -323,6 +327,16 @@ const startStream = (mode = 'selected') => {
     if (clientSettings.value.filter_na_mag !== undefined) params.append('filter_na_mag', clientSettings.value.filter_na_mag);
     if (clientSettings.value.filter_active_size !== undefined) params.append('filter_active_size', clientSettings.value.filter_active_size);
     if (clientSettings.value.filter_na_size !== undefined) params.append('filter_na_size', clientSettings.value.filter_na_size);
+    if (clientSettings.value.filter_active_time_window !== undefined) {
+        params.append('filter_active_time_window', clientSettings.value.filter_active_time_window);
+    }
+    if (clientSettings.value.time_window_start) {
+        params.append('time_window_start', clientSettings.value.time_window_start);
+    }
+    if (clientSettings.value.time_window_end) {
+        params.append('time_window_end', clientSettings.value.time_window_end);
+    }
+    params.append('tz_offset', String(new Date().getTimezoneOffset()));
 
     params.append('selected_types', (clientSettings.value.selected_types || []).join(','));
 
@@ -335,7 +349,19 @@ const startStream = (mode = 'selected') => {
             if (p.current !== undefined) downloadProgress.value = `Downloading ${p.current} of ${p.total}`;
         } catch (err) { }
     });
-    eventSource.addEventListener('night_times', (e) => { try { nightTimes.value = JSON.parse(e.data); } catch (e) { } });
+    eventSource.addEventListener('night_times', (e) => {
+        try {
+            const nt = JSON.parse(e.data);
+            nightTimes.value = nt;
+            const defaults = getAstroNightDefaults(nt);
+            if (!clientSettings.value.time_window_start) {
+                clientSettings.value.time_window_start = defaults.start;
+            }
+            if (!clientSettings.value.time_window_end) {
+                clientSettings.value.time_window_end = defaults.end;
+            }
+        } catch (e) { }
+    });
 
     eventSource.addEventListener('catalog_metadata', (e) => {
         try {
@@ -500,6 +526,9 @@ const streamParams = computed(() => ({
     fn_mag: clientSettings.value.filter_na_mag,
     fa_sz: clientSettings.value.filter_active_size,
     fn_sz: clientSettings.value.filter_na_size,
+    fa_tw: clientSettings.value.filter_active_time_window,
+    tw_s: clientSettings.value.filter_active_time_window ? clientSettings.value.time_window_start : '',
+    tw_e: clientSettings.value.filter_active_time_window ? clientSettings.value.time_window_end : '',
     types: (clientSettings.value.selected_types || []).join(','),
     pad: settings.value.image_padding,
     img_srv: settings.value.image_server,
@@ -539,6 +568,7 @@ watch(clientSettings, () => {
             <LeftPanel
                 :settings="settings"
                 :client-settings="clientSettings"
+                :night-times="nightTimes"
                 :available-types="availableTypes"
                 :type-counts="typeCounts"
                 :stream-status="streamStatus"
@@ -618,7 +648,7 @@ watch(clientSettings, () => {
                     </button>
                 </header>
                 <div class="graph-panel">
-                    <AltitudeGraph :object="selectedObject" :location="settings.location" :nightTimes="nightTimes" />
+                    <AltitudeGraph :object="selectedObject" :location="settings.location" :nightTimes="nightTimes" :clientSettings="clientSettings" />
                 </div>
                 <div class="list-panel">
                     <ObjectList

@@ -89,6 +89,36 @@ def compute_fov_and_setup(
     }
 
 
+def _extract_time_window_settings(settings: dict) -> dict:
+    """Extract time window filter configuration from settings and client_settings."""
+    client_cfg = settings.get("client_settings", {}) or {}
+    active = bool(
+        settings.get(
+            "filter_active_time_window",
+            client_cfg.get("filter_active_time_window", False),
+        )
+    )
+    start_str = settings.get(
+        "time_window_start", client_cfg.get("time_window_start", "")
+    )
+    end_str = settings.get(
+        "time_window_end", client_cfg.get("time_window_end", "")
+    )
+    tz_offset = settings.get("tz_offset", client_cfg.get("tz_offset", None))
+    parsed_tz = None
+    if tz_offset is not None and tz_offset != "":
+        try:
+            parsed_tz = float(tz_offset)
+        except (TypeError, ValueError):
+            parsed_tz = None
+    return {
+        "active": active,
+        "start": str(start_str).strip() if start_str is not None else "",
+        "end": str(end_str).strip() if end_str is not None else "",
+        "tz_offset": parsed_tz,
+    }
+
+
 async def compute_object_detail_payload(
     obj: dict,
     location: Location,
@@ -99,6 +129,10 @@ async def compute_object_detail_payload(
     fov_info: dict,
     download_ids: Optional[set] = None,
     include_aliases: bool = False,
+    time_window_active: bool = False,
+    time_window_start: Optional[str] = None,
+    time_window_end: Optional[str] = None,
+    tz_offset_minutes: Optional[float] = None,
 ) -> dict:
     """Shared async builder for an object's altitude graphs, FOV info, and cache status."""
     obj_id = obj["id"]
@@ -116,7 +150,13 @@ async def compute_object_detail_payload(
         session_end,
     )
     hours = calculator.calculate_time_above_altitude(
-        alt_data["target"], min_altitude, twilight
+        alt_data["target"],
+        min_altitude,
+        twilight,
+        time_window_active=time_window_active,
+        time_window_start=time_window_start,
+        time_window_end=time_window_end,
+        tz_offset_minutes=tz_offset_minutes,
     )
 
     if is_cached:
@@ -179,8 +219,28 @@ def get_sorted_objects(
     if altaz_frame is not None:
         all_ras = pd.to_numeric(df["ra"], errors="coerce").fillna(0).values
         min_alt = settings.get("min_altitude", 30.0)
+        tw_cfg = _extract_time_window_settings(settings)
+        time_mask = None
+        if tw_cfg["active"]:
+            twilight = (
+                calculator.get_twilight_periods(location, session_start)
+                if not tw_cfg["start"] or not tw_cfg["end"]
+                else None
+            )
+            time_mask = calculator.build_time_window_mask(
+                times=altaz_frame.obstime,
+                start_str=tw_cfg["start"],
+                end_str=tw_cfg["end"],
+                tz_offset_minutes=tw_cfg["tz_offset"],
+                twilight_periods=twilight,
+            )
         df["hours_visible"] = calculator.batch_calculate_nightly_hours(
-            all_ras, all_decs, altaz_frame, night_duration, min_alt
+            all_ras,
+            all_decs,
+            altaz_frame,
+            night_duration,
+            min_alt,
+            time_mask=time_mask,
         )
     else:
         df["hours_visible"] = 0.0
@@ -284,11 +344,28 @@ def apply_stream_query_overrides(
         "filter_na_mag",
         "filter_active_size",
         "filter_na_size",
+        "filter_active_time_window",
     ):
         if flag_key in qp:
             bool_val = qp[flag_key].lower() == "true"
             settings[flag_key] = bool_val
             client_cfg[flag_key] = bool_val
+
+    if "time_window_start" in qp:
+        val = qp["time_window_start"].strip()
+        settings["time_window_start"] = val
+        client_cfg["time_window_start"] = val
+    if "time_window_end" in qp:
+        val = qp["time_window_end"].strip()
+        settings["time_window_end"] = val
+        client_cfg["time_window_end"] = val
+    if "tz_offset" in qp and qp["tz_offset"].strip():
+        try:
+            val = float(qp["tz_offset"])
+            settings["tz_offset"] = val
+            client_cfg["tz_offset"] = val
+        except ValueError:
+            pass
 
     if "selected_types" in qp:
         raw_types = qp["selected_types"].strip()
@@ -341,6 +418,7 @@ async def build_single_object_details(
     )
     session_start, session_end = calculator.get_observing_session(observer, Time.now())
     twilight = calculator.get_twilight_periods(location, session_start)
+    tw_cfg = _extract_time_window_settings(settings)
 
     return await compute_object_detail_payload(
         obj=obj,
@@ -351,6 +429,10 @@ async def build_single_object_details(
         min_altitude=settings.get("min_altitude", 30.0),
         fov_info=fov_info,
         include_aliases=True,
+        time_window_active=tw_cfg["active"],
+        time_window_start=tw_cfg["start"],
+        time_window_end=tw_cfg["end"],
+        tz_offset_minutes=tw_cfg["tz_offset"],
     )
 
 
@@ -595,12 +677,17 @@ class StreamSession:
         if not self.top_objects:
             return []
 
+        tw_cfg = _extract_time_window_settings(self.settings)
         ephemeris = calculator.prepare_session_ephemeris(
             location=self.location,
             start_time=self.session_start,
             end_time=self.session_end,
             num_points=60,
             twilight_periods=self.twilight,
+            time_window_active=tw_cfg["active"],
+            time_window_start=tw_cfg["start"],
+            time_window_end=tw_cfg["end"],
+            tz_offset_minutes=tw_cfg["tz_offset"],
         )
 
         ra_array = np.array(

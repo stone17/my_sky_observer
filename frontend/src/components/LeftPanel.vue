@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, watch, computed } from 'vue';
 import { computeSensorFov, computeDefaultImageFov } from '../utils/fov.js';
+import { getAstroNightDefaults } from '../utils/timeWindow.js';
 import {
     getObjectTypeLabel,
     getObjectTypeIcon,
@@ -11,6 +12,10 @@ import {
 const props = defineProps({
     settings: Object,
     clientSettings: Object,
+    nightTimes: {
+        type: Object,
+        default: () => ({})
+    },
     availableTypes: Array,
     typeCounts: {
         type: Object,
@@ -136,9 +141,24 @@ watch(() => props.clientSettings, (newVal) => {
         if (localClientSettings.value.filter_na_mag === undefined) localClientSettings.value.filter_na_mag = true;
         if (localClientSettings.value.filter_active_size === undefined) localClientSettings.value.filter_active_size = true;
         if (localClientSettings.value.filter_na_size === undefined) localClientSettings.value.filter_na_size = true;
+        if (localClientSettings.value.filter_active_time_window === undefined) localClientSettings.value.filter_active_time_window = false;
+        const defaults = getAstroNightDefaults(props.nightTimes);
+        if (!localClientSettings.value.time_window_start) localClientSettings.value.time_window_start = defaults.start;
+        if (!localClientSettings.value.time_window_end) localClientSettings.value.time_window_end = defaults.end;
         if (!localClientSettings.value.selected_types) localClientSettings.value.selected_types = [];
     }
 }, { immediate: true, deep: true });
+
+watch(() => props.nightTimes, (nt) => {
+    if (!nt) return;
+    const defaults = getAstroNightDefaults(nt);
+    if (!localClientSettings.value.time_window_start) {
+        localClientSettings.value.time_window_start = defaults.start;
+    }
+    if (!localClientSettings.value.time_window_end) {
+        localClientSettings.value.time_window_end = defaults.end;
+    }
+}, { deep: true });
 
 onMounted(() => {
     fetchProfiles();
@@ -408,10 +428,29 @@ const locationDisplay = computed(() => {
     return "Not set";
 });
 
+const onToggleTimeWindow = () => {
+    const defaults = getAstroNightDefaults(props.nightTimes);
+    if (!localClientSettings.value.time_window_start) {
+        localClientSettings.value.time_window_start = defaults.start;
+    }
+    if (!localClientSettings.value.time_window_end) {
+        localClientSettings.value.time_window_end = defaults.end;
+    }
+    emitClientSettings();
+};
+
+const resetTimeWindowToAstroNight = () => {
+    const defaults = getAstroNightDefaults(props.nightTimes);
+    localClientSettings.value.time_window_start = defaults.start;
+    localClientSettings.value.time_window_end = defaults.end;
+    emitClientSettings();
+};
+
 const activeFiltersCount = computed(() => {
     let count = 0;
     if (localClientSettings.value.filter_active_alt) count++;
     if (localClientSettings.value.filter_active_hours && localClientSettings.value.min_hours > 0) count++;
+    if (localClientSettings.value.filter_active_time_window) count++;
     if (localClientSettings.value.filter_active_mag) count++;
     if (localClientSettings.value.filter_active_size && localClientSettings.value.min_size > 0) count++;
     if (localClientSettings.value.selected_types?.length > 0) count++;
@@ -596,6 +635,49 @@ const activeFiltersCount = computed(() => {
                                 />
                                 <span>Include objects with unknown hours</span>
                             </label>
+                        </div>
+
+                        <!-- Hour Range (Time Window) -->
+                        <div class="threshold-item">
+                            <div class="threshold-top">
+                                <label class="toggle-label" title="Restrict visible hours calculation to a custom time range (defaults to Astronomical Night)">
+                                    <input
+                                        type="checkbox"
+                                        v-model="localClientSettings.filter_active_time_window"
+                                        @change="onToggleTimeWindow"
+                                    />
+                                    <span>Hour Range (Time Window)</span>
+                                </label>
+                                <button
+                                    type="button"
+                                    class="text-btn"
+                                    @click="resetTimeWindowToAstroNight"
+                                    title="Reset to Astronomical Night start and end"
+                                >
+                                    Astro Night
+                                </button>
+                            </div>
+                            <div class="time-window-row">
+                                <input
+                                    type="time"
+                                    v-model="localClientSettings.time_window_start"
+                                    :disabled="!localClientSettings.filter_active_time_window"
+                                    @change="emitClientSettings"
+                                    class="time-input"
+                                    aria-label="Start time"
+                                    title="Window start time (local)"
+                                />
+                                <span class="time-window-sep">to</span>
+                                <input
+                                    type="time"
+                                    v-model="localClientSettings.time_window_end"
+                                    :disabled="!localClientSettings.filter_active_time_window"
+                                    @change="emitClientSettings"
+                                    class="time-input"
+                                    aria-label="End time"
+                                    title="Window end time (local)"
+                                />
+                            </div>
                         </div>
 
                         <!-- Max Magnitude -->
@@ -1305,6 +1387,37 @@ const activeFiltersCount = computed(() => {
 .num-input:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+}
+
+.time-window-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 6px 0 2px 20px;
+}
+
+.time-input {
+    flex: 1;
+    min-width: 0;
+    background: #111827;
+    border: 1px solid #4b5563;
+    color: #fff;
+    border-radius: 4px;
+    padding: 3px 6px;
+    font-size: 0.8rem;
+    text-align: center;
+    height: 28px;
+    color-scheme: dark;
+}
+
+.time-input:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.time-window-sep {
+    font-size: 0.75rem;
+    color: #9ca3af;
 }
 
 /* Object Types & Catalogs */

@@ -438,3 +438,132 @@ def test_smart_catalog_collation_and_aliases():
     assert len(df[df["id"] == "M 42"]) == 1
     assert len(df[df["id"] == "M 43"]) == 1
 
+
+def test_time_window_hour_range_filter():
+    """
+    Tests the Hour Range (Time Window) filter in AstroCalculator and stream query overrides:
+    - 6pm to midnight (18:00 to 00:00) window restricts visible hours
+    - Fallback to astronomical night start/end when window strings are empty
+    - Query param overrides for filter_active_time_window, time_window_start, time_window_end, tz_offset
+    """
+    from types import SimpleNamespace
+    from astropy.time import Time
+    from backend.astro_utils import AstroCalculator
+    from backend.models import AltitudePoint
+    from backend.stream_service import apply_stream_query_overrides
+
+    calc = AstroCalculator()
+    assert calc.parse_hhmm_to_minutes("18:00") == 1080
+    assert calc.parse_hhmm_to_minutes("00:00") == 0
+    assert calc.parse_hhmm_to_minutes("24:00") == 0
+    assert calc.parse_hhmm_to_minutes("invalid") is None
+
+    # Create a 13-point hourly grid from 16:00 UTC to 04:00 UTC next day (tz_offset=0)
+    times = Time(
+        [
+            "2026-11-07T16:00:00Z",
+            "2026-11-07T17:00:00Z",
+            "2026-11-07T18:00:00Z",
+            "2026-11-07T19:00:00Z",
+            "2026-11-07T20:00:00Z",
+            "2026-11-07T21:00:00Z",
+            "2026-11-07T22:00:00Z",
+            "2026-11-07T23:00:00Z",
+            "2026-11-08T00:00:00Z",
+            "2026-11-08T01:00:00Z",
+            "2026-11-08T02:00:00Z",
+            "2026-11-08T03:00:00Z",
+            "2026-11-08T04:00:00Z",
+        ]
+    )
+
+    # 18:00 to 00:00 (6pm till midnight) -> indices 2..8 (7 points: 18, 19, 20, 21, 22, 23, 00)
+    mask_6pm_midnight = calc.build_time_window_mask(
+        times=times,
+        start_str="18:00",
+        end_str="00:00",
+        tz_offset_minutes=0,
+    )
+    assert list(mask_6pm_midnight) == [
+        False,
+        False,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+    ]
+
+    # Fallback to astronomical night when start_str and end_str are empty
+    twilight = {"night": ["2026-11-07T19:00:00Z", "2026-11-08T02:00:00Z"]}
+    mask_astro_default = calc.build_time_window_mask(
+        times=times,
+        start_str="",
+        end_str="",
+        tz_offset_minutes=0,
+        twilight_periods=twilight,
+    )
+    assert list(mask_astro_default) == [
+        False,
+        False,
+        False,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        False,
+        False,
+    ]
+
+    # Check calculate_time_above_altitude with and without time window
+    points = [AltitudePoint(time=t.isot + "Z", altitude=45.0) for t in times]
+    full_hours = calc.calculate_time_above_altitude(points, min_altitude=30.0)
+    window_hours = calc.calculate_time_above_altitude(
+        points,
+        min_altitude=30.0,
+        time_window_active=True,
+        time_window_start="18:00",
+        time_window_end="00:00",
+        tz_offset_minutes=0,
+    )
+    assert full_hours == 13.0
+    assert window_hours == 7.0
+
+    # Check query param overrides
+    settings = {"client_settings": {}}
+    dummy_req = SimpleNamespace(
+        query_params={
+            "filter_active_time_window": "true",
+            "time_window_start": "18:00",
+            "time_window_end": "00:00",
+            "tz_offset": "-60",
+        }
+    )
+    apply_stream_query_overrides(
+        settings,
+        dummy_req,
+        400.0,
+        23.5,
+        15.6,
+        52.5,
+        13.4,
+        "messier",
+        "time",
+    )
+    assert settings["filter_active_time_window"] is True
+    assert settings["client_settings"]["filter_active_time_window"] is True
+    assert settings["time_window_start"] == "18:00"
+    assert settings["time_window_end"] == "00:00"
+    assert settings["tz_offset"] == -60.0
+
+
