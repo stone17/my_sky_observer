@@ -5,8 +5,7 @@ import { getAstroNightDefaults } from '../utils/timeWindow.js';
 import {
     getObjectTypeLabel,
     getObjectTypeIcon,
-    getObjectTypeDescription,
-    getCatalogMeta
+    getObjectTypeDescription
 } from '../utils/catalogMeta.js';
 
 const props = defineProps({
@@ -101,7 +100,6 @@ const presets = ref({ cameras: {} });
 const cacheStatus = ref({ size_mb: 0, count: 0, setup_count: 0, setup_size_mb: 0 });
 const selectedProfileName = ref(null);
 const newProfileName = ref("");
-const availableCatalogs = ref([]);
 
 // Data Fetching
 const fetchProfiles = async () => {
@@ -133,20 +131,12 @@ watch(() => props.setupHash, () => {
     fetchCacheStatus();
 });
 
-const fetchCatalogs = async () => {
-    try {
-        const res = await fetch('/api/catalogs');
-        if (res.ok) availableCatalogs.value = await res.json();
-    } catch (e) { console.error(e); }
-};
-
 // Sync settings
 watch(() => props.settings, (newVal) => {
     if (newVal) {
         localSettings.value = JSON.parse(JSON.stringify(newVal));
         if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
         if (localSettings.value.nina_host === undefined) localSettings.value.nina_host = "";
-        if (!localSettings.value.catalogs) localSettings.value.catalogs = ['messier'];
         if (localSettings.value.image_padding === undefined) localSettings.value.image_padding = 1.15;
         if (!localSettings.value.image_server) {
             localSettings.value.image_server = { resolution: 1024, timeout: 120, source: 'dss2r' };
@@ -202,7 +192,6 @@ onMounted(() => {
     fetchProfiles();
     fetchPresets();
     fetchCacheStatus();
-    fetchCatalogs();
     // Collapse by default on narrow screens
     if (window.innerWidth <= 1024) {
         activeTab.value = null;
@@ -219,16 +208,7 @@ const emitClientSettings = () => {
     emit('update-client-settings', localClientSettings.value);
 };
 
-// Catalog & Type Helpers
-const selectAllCatalogs = () => {
-    localSettings.value.catalogs = [...availableCatalogs.value];
-    emitSettings();
-};
-
-const clearCatalogs = () => {
-    localSettings.value.catalogs = [];
-    emitSettings();
-};
+// Object Type Helpers
 
 const isAllTypesSelected = computed(() => {
     const sel = localClientSettings.value.selected_types || [];
@@ -597,7 +577,7 @@ const activeFiltersCount = computed(() => {
         <div class="drawer-panel" v-if="activeTab">
             <header class="drawer-header">
                 <h3>
-                    <template v-if="activeTab === 'filters'">Filters & Catalogs</template>
+                    <template v-if="activeTab === 'filters'">Target Filters</template>
                     <template v-else-if="activeTab === 'equipment'">Equipment & Profiles</template>
                     <template v-else-if="activeTab === 'location'">Observer Location</template>
                     <template v-else-if="activeTab === 'images'">Images & Cache</template>
@@ -849,44 +829,6 @@ const activeFiltersCount = computed(() => {
                             </button>
                         </div>
                         <div v-else class="empty-hint">No object types loaded yet.</div>
-                    </div>
-
-                    <!-- Catalogs -->
-                    <div class="section-card">
-                        <div class="section-title-row">
-                            <div class="title-with-sub">
-                                <h4>Active Catalogs</h4>
-                                <span class="sub-badge">
-                                    {{ localSettings.catalogs?.length || 0 }} / {{ availableCatalogs.length }}
-                                </span>
-                            </div>
-                            <div class="inline-actions">
-                                <button type="button" class="text-btn" @click="selectAllCatalogs">All</button>
-                                <button type="button" class="text-btn" @click="clearCatalogs">None</button>
-                            </div>
-                        </div>
-                        <div class="catalog-grid">
-                            <label
-                                v-for="cat in availableCatalogs"
-                                :key="cat"
-                                class="cat-chip"
-                                :class="{ active: localSettings.catalogs?.includes(cat) }"
-                                :title="`${getCatalogMeta(cat).label} (${getCatalogMeta(cat).code}) — ${getCatalogMeta(cat).subtitle}`"
-                            >
-                                <input
-                                    type="checkbox"
-                                    :value="cat"
-                                    v-model="localSettings.catalogs"
-                                    @change="emitSettings"
-                                    hidden
-                                />
-                                <div class="cat-chip-main">
-                                    <span class="cat-chip-title">{{ getCatalogMeta(cat).label }}</span>
-                                    <span class="cat-chip-code">{{ getCatalogMeta(cat).code }}</span>
-                                </div>
-                                <span class="cat-chip-sub">{{ getCatalogMeta(cat).subtitle }}</span>
-                            </label>
-                        </div>
                     </div>
                 </div>
 

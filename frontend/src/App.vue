@@ -241,7 +241,6 @@ const fetchSettings = async () => {
                 const profileData = JSON.parse(JSON.stringify(data.profiles[data.active_profile]));
                 const savedLocation = data.location;
                 const savedNina = data.nina_host;
-                const savedCatalogs = data.catalogs;
                 const savedProfiles = data.profiles;
                 const activeProf = data.active_profile;
 
@@ -251,8 +250,8 @@ const fetchSettings = async () => {
                 });
                 if (savedLocation) data.location = savedLocation;
                 if (savedNina !== undefined) data.nina_host = savedNina;
-                if (savedCatalogs) data.catalogs = savedCatalogs;
             }
+            delete data.catalogs;
             settings.value = data;
             if (data.client_settings) {
                 updateClientSettings(data.client_settings);
@@ -307,7 +306,6 @@ const startStream = (mode = 'selected') => {
         params.append('latitude', settings.value.location.latitude);
         params.append('longitude', settings.value.location.longitude);
     }
-    if (settings.value.catalogs) params.append('catalogs', settings.value.catalogs.join(','));
     params.append('sort_key', settings.value.sort_key || 'time');
     params.append('min_altitude', settings.value.min_altitude ?? 30.0);
     params.append('image_padding', settings.value.image_padding || 1.15);
@@ -652,7 +650,6 @@ const streamParams = computed(() => ({
     loc: settings.value.location,
     tel: settings.value.telescope,
     cam: settings.value.camera,
-    cats: (settings.value.catalogs || []).join(','),
     min_alt: settings.value.min_altitude,
     min_hrs: clientSettings.value.min_hours,
     min_hrs_alt: clientSettings.value.min_hours_altitude,

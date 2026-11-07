@@ -2,7 +2,7 @@ import pandas as pd
 import os
 import re
 import sys
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 CATALOG_PRIORITY = {
@@ -171,12 +171,14 @@ class CatalogManager:
         return (13, u)
 
     @classmethod
-    def get_all_objects(cls, catalog_names: List[str]) -> pd.DataFrame:
+    def get_all_objects(cls, catalog_names: Optional[List[str]] = None) -> pd.DataFrame:
         """
         Merges multiple catalogs into a single DataFrame and collates objects that
         represent the same astronomical target or tightly grouped sub-components.
+        Defaults to all available catalogs when catalog_names is None or empty.
         """
-        cache_key = tuple(sorted(str(c).strip().lower() for c in catalog_names if str(c).strip()))
+        effective_names = catalog_names if catalog_names else cls.get_available_catalogs()
+        cache_key = tuple(sorted(str(c).strip().lower() for c in effective_names if str(c).strip()))
         if not cache_key:
             return pd.DataFrame()
         if cache_key in cls._merged_cache:
@@ -184,7 +186,7 @@ class CatalogManager:
 
         print("\n--- Merging all requested catalogs ---")
         all_dfs = []
-        for name in catalog_names:
+        for name in effective_names:
             print(f"-> Processing catalog: '{name}'")
             try:
                 df = cls.get_catalog(name).copy()

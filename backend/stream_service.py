@@ -206,7 +206,9 @@ def get_sorted_objects(
     catalog_manager: CatalogManager = catalogs,
 ) -> List[dict]:
     """Fetch, enrich with visibility/altitude metrics, and sort catalog objects."""
-    raw_objects = catalog_manager.get_all_objects(settings.get("catalogs", []))
+    raw_objects = catalog_manager.get_all_objects(
+        settings.get("catalogs") or CatalogManager.get_available_catalogs()
+    )
     if raw_objects.empty:
         return []
 
@@ -291,16 +293,21 @@ def apply_stream_query_overrides(
     sensor_height: float,
     latitude: float,
     longitude: float,
-    catalogs_str: str,
-    sort_key: str,
+    catalogs_str: str = "",
+    sort_key: str = "time",
 ) -> dict:
     """Apply query parameter overrides onto loaded settings for a stream session."""
+    effective_catalogs = (
+        [c.strip() for c in catalogs_str.split(",") if c.strip()]
+        if catalogs_str and catalogs_str.strip()
+        else CatalogManager.get_available_catalogs()
+    )
     settings.update(
         {
             "telescope": {"focal_length": focal_length},
             "camera": {"sensor_width": sensor_width, "sensor_height": sensor_height},
             "location": {"latitude": latitude, "longitude": longitude},
-            "catalogs": catalogs_str.split(",") if catalogs_str else [],
+            "catalogs": effective_catalogs,
             "sort_key": sort_key,
         }
     )

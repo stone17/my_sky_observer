@@ -183,8 +183,8 @@ async def stream_objects_endpoint(
     sensor_height: float,
     latitude: float,
     longitude: float,
-    catalogs: str,
-    sort_key: str,
+    sort_key: str = "time",
+    catalogs: str = "",
 ):
     settings = apply_stream_query_overrides(
         load_settings(),
@@ -204,6 +204,7 @@ async def stream_objects_endpoint(
 @app.get("/api/object-details/{obj_id}")
 async def get_object_details(obj_id: str):
     settings = load_settings()
+    settings.pop("catalogs", None)
     return await build_single_object_details(
         obj_id, settings, catalog_manager=catalogs
     )
