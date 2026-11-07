@@ -171,8 +171,18 @@ watch(() => props.clientSettings, (newVal) => {
         if (!localClientSettings.value.time_window_start) localClientSettings.value.time_window_start = defaults.start;
         if (!localClientSettings.value.time_window_end) localClientSettings.value.time_window_end = defaults.end;
         if (!localClientSettings.value.selected_types) localClientSettings.value.selected_types = [];
+        if (!Array.isArray(localClientSettings.value.favorites)) localClientSettings.value.favorites = [];
+        if (localClientSettings.value.filter_favorites_only === undefined) localClientSettings.value.filter_favorites_only = false;
     }
 }, { immediate: true, deep: true });
+
+const clearAllFavorites = () => {
+    if (!localClientSettings.value.favorites?.length) return;
+    if (!confirm(`Clear all ${localClientSettings.value.favorites.length} saved favorites?`)) return;
+    localClientSettings.value.favorites = [];
+    localClientSettings.value.filter_favorites_only = false;
+    emitClientSettings();
+};
 
 watch(() => props.nightTimes, (nt) => {
     if (!nt) return;
@@ -600,6 +610,29 @@ const activeFiltersCount = computed(() => {
                     <div class="section-card">
                         <div class="section-title-row">
                             <h4>Visibility & Target Thresholds</h4>
+                        </div>
+
+                        <!-- Favorites Filter -->
+                        <div class="threshold-item">
+                            <div class="threshold-top">
+                                <label class="toggle-label">
+                                    <input
+                                        type="checkbox"
+                                        v-model="localClientSettings.filter_favorites_only"
+                                        @change="emitClientSettings"
+                                    />
+                                    <span>★ Favorites Only ({{ (localClientSettings.favorites || []).length }})</span>
+                                </label>
+                                <button
+                                    v-if="(localClientSettings.favorites || []).length > 0"
+                                    type="button"
+                                    class="text-btn"
+                                    @click="clearAllFavorites"
+                                    title="Remove all saved targets from Favorites"
+                                >
+                                    Clear
+                                </button>
+                            </div>
                         </div>
 
                         <!-- Max Altitude -->

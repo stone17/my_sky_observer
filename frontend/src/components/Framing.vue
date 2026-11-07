@@ -46,6 +46,28 @@ const isObjectDownloading = computed(() => {
     return props.object && props.object.status === 'downloading';
 });
 
+// --- FAVORITES BOOKMARKING ---
+const isCurrentFavorite = computed(() => {
+    if (!props.object?.name) return false;
+    const favs = props.clientSettings?.favorites;
+    return Array.isArray(favs) && favs.includes(props.object.name);
+});
+
+const toggleCurrentFavorite = () => {
+    const name = props.object?.name;
+    if (!name) return;
+    const current = new Set(Array.isArray(props.clientSettings?.favorites) ? props.clientSettings.favorites : []);
+    if (current.has(name)) {
+        current.delete(name);
+    } else {
+        current.add(name);
+    }
+    emit('update-client-settings', {
+        ...(props.clientSettings || {}),
+        favorites: Array.from(current)
+    });
+};
+
 // --- OBJECT OVERLAY TOGGLE & FOV PROJECTION ---
 const showOverlays = computed(() => {
     return props.clientSettings?.show_object_overlays !== false;
@@ -57,6 +79,79 @@ const toggleOverlays = () => {
         ...(props.clientSettings || {}),
         show_object_overlays: next
     });
+};
+
+// --- MULTI-PROFILE COMPARISON FOV OVERLAYS ---
+const COMPARISON_COLORS = [
+    { border: '#f59e0b', glow: 'rgba(245, 158, 11, 0.45)', bg: 'rgba(245, 158, 11, 0.2)' }, // Amber
+    { border: '#06b6d4', glow: 'rgba(6, 182, 212, 0.45)', bg: 'rgba(6, 182, 212, 0.2)' },   // Cyan
+    { border: '#a855f7', glow: 'rgba(168, 85, 247, 0.45)', bg: 'rgba(168, 85, 247, 0.2)' },  // Purple
+    { border: '#84cc16', glow: 'rgba(132, 204, 22, 0.45)', bg: 'rgba(132, 204, 22, 0.2)' },  // Lime
+    { border: '#ec4899', glow: 'rgba(236, 72, 153, 0.45)', bg: 'rgba(236, 72, 153, 0.2)' },  // Pink
+    { border: '#3b82f6', glow: 'rgba(59, 130, 246, 0.45)', bg: 'rgba(59, 130, 246, 0.2)' }   // Blue
+];
+
+const showSetupsMenu = ref(false);
+const setupsMenuRef = ref(null);
+
+const selectedComparisonProfileNames = computed(() => {
+    const list = props.clientSettings?.comparison_profiles;
+    return Array.isArray(list) ? list : [];
+});
+
+const availableComparisonProfiles = computed(() => {
+    const profilesObj = props.settings?.profiles || {};
+    const activeName = props.settings?.active_profile || null;
+    const enabledSet = new Set(selectedComparisonProfileNames.value);
+
+    const names = Object.keys(profilesObj).sort((a, b) => a.localeCompare(b));
+    const list = [];
+
+    names.forEach((name, idx) => {
+        if (name === activeName) return;
+        const prof = profilesObj[name];
+        if (!prof) return;
+        const sFov = computeSensorFov(prof.telescope, prof.camera);
+        if (sFov.w <= 0 || sFov.h <= 0) return;
+
+        const color = COMPARISON_COLORS[idx % COMPARISON_COLORS.length];
+        list.push({
+            name,
+            sensorFov: sFov,
+            focalLength: prof.telescope?.focal_length,
+            color,
+            enabled: enabledSet.has(name)
+        });
+    });
+
+    return list;
+});
+
+const toggleComparisonProfile = (name) => {
+    const current = new Set(selectedComparisonProfileNames.value);
+    if (current.has(name)) {
+        current.delete(name);
+    } else {
+        current.add(name);
+    }
+    emit('update-client-settings', {
+        ...(props.clientSettings || {}),
+        comparison_profiles: Array.from(current)
+    });
+};
+
+const setAllComparisonProfiles = (enableAll) => {
+    const next = enableAll ? availableComparisonProfiles.value.map((p) => p.name) : [];
+    emit('update-client-settings', {
+        ...(props.clientSettings || {}),
+        comparison_profiles: next
+    });
+};
+
+const handleDocumentClick = (e) => {
+    if (showSetupsMenu.value && setupsMenuRef.value && !setupsMenuRef.value.contains(e.target)) {
+        showSetupsMenu.value = false;
+    }
 };
 
 const parseSizeArcmin = (obj) => {
@@ -288,8 +383,36 @@ const sensorStyle = computed(() => {
         border: '2px solid #ef4444',
         boxShadow: '0 0 12px rgba(239, 68, 68, 0.5)',
         cursor: 'move',
-        touchAction: 'none'
+        touchAction: 'none',
+        zIndex: 15
     };
+});
+
+const activeComparisonRectangles = computed(() => {
+    const baseFov = localFov.value || props.object?.image_fov || defaultImageFov.value;
+    if (baseFov <= 0.001) return [];
+
+    return availableComparisonProfiles.value
+        .filter((p) => p.enabled)
+        .map((p) => {
+            const wPct = (p.sensorFov.w / baseFov) * 100;
+            const hPct = (p.sensorFov.h / baseFov) * 100;
+            return {
+                ...p,
+                style: {
+                    width: `${wPct}%`,
+                    height: `${hPct}%`,
+                    position: 'absolute',
+                    top: `calc(50% + ${offsetY.value}px)`,
+                    left: `calc(50% + ${offsetX.value}px)`,
+                    transform: `translate(-50%, -50%) rotate(${rotation.value}deg)`,
+                    border: `2px dashed ${p.color.border}`,
+                    boxShadow: `0 0 10px ${p.color.glow}`,
+                    pointerEvents: 'none',
+                    zIndex: 14
+                }
+            };
+        });
 });
 
 // --- ROTATION & DRAG LOGIC ---
@@ -562,9 +685,11 @@ onMounted(() => {
         });
         resizeObserver.observe(viewportRef.value);
     }
+    document.addEventListener('click', handleDocumentClick);
 });
 onUnmounted(() => {
     if (resizeObserver) resizeObserver.disconnect();
+    document.removeEventListener('click', handleDocumentClick);
     stopRotate();
 });
 </script>
@@ -575,6 +700,16 @@ onUnmounted(() => {
         <header class="framing-header">
             <div class="target-identity">
                 <div class="title-line">
+                    <button
+                        type="button"
+                        class="fav-star-btn"
+                        :class="{ 'is-fav': isCurrentFavorite }"
+                        @click="toggleCurrentFavorite"
+                        :title="isCurrentFavorite ? 'Remove from Favorites' : 'Save target to Favorites'"
+                        :aria-label="isCurrentFavorite ? 'Remove from Favorites' : 'Save target to Favorites'"
+                    >
+                        {{ isCurrentFavorite ? '★' : '☆' }}
+                    </button>
                     <h2>{{ object.name }}</h2>
                     <span
                         v-if="object.type"
@@ -700,6 +835,26 @@ onUnmounted(() => {
                     <span>Downloading sky survey...</span>
                 </div>
 
+                <!-- Comparison Sensor Rectangles for Other Saved Setups -->
+                <template v-if="object && settings && !isObjectDownloading">
+                    <div
+                        v-for="comp in activeComparisonRectangles"
+                        :key="`comp-rect-${comp.name}`"
+                        :style="comp.style"
+                    >
+                        <div
+                            class="comparison-sensor-label"
+                            :style="{
+                                borderColor: comp.color.border,
+                                color: comp.color.border
+                            }"
+                        >
+                            <span>{{ comp.name }}</span>
+                            <span class="comp-fov-dim">{{ comp.sensorFov.w.toFixed(2) }}°×{{ comp.sensorFov.h.toFixed(2) }}°</span>
+                        </div>
+                    </div>
+                </template>
+
                 <div
                     v-if="object && settings && !isObjectDownloading"
                     :style="sensorStyle"
@@ -717,10 +872,28 @@ onUnmounted(() => {
                     <span class="osd-title-lbl">Profile:</span>
                     <strong class="osd-title-val">{{ settings?.active_profile || 'Custom' }}</strong>
                 </div>
-                <div class="osd-row" title="Field of View of your selected Telescope + Camera sensor (green frame)">
+                <div class="osd-row" title="Field of View of your selected Telescope + Camera sensor (red frame)">
                     <span class="osd-dot optics"></span>
                     <span class="osd-lbl">Selected Optics:</span>
                     <strong class="optics-val">{{ systemSensorFov.w.toFixed(2) }}° × {{ systemSensorFov.h.toFixed(2) }}°</strong>
+                </div>
+                <div
+                    v-for="comp in activeComparisonRectangles"
+                    :key="`osd-comp-${comp.name}`"
+                    class="osd-row"
+                    :title="`Comparison FOV for saved profile '${comp.name}'`"
+                >
+                    <span
+                        class="osd-dot"
+                        :style="{
+                            border: `2px dashed ${comp.color.border}`,
+                            background: comp.color.bg
+                        }"
+                    ></span>
+                    <span class="osd-lbl">{{ comp.name }}:</span>
+                    <strong :style="{ color: comp.color.border }">
+                        {{ comp.sensorFov.w.toFixed(2) }}° × {{ comp.sensorFov.h.toFixed(2) }}°
+                    </strong>
                 </div>
                 <div class="osd-row" title="Field of View of the currently displayed sky survey image">
                     <span class="osd-dot view"></span>
@@ -818,6 +991,75 @@ onUnmounted(() => {
 
                 <!-- Quick Canvas Actions -->
                 <div class="hud-actions">
+                    <!-- Compare Saved Setups Popover -->
+                    <div
+                        v-if="availableComparisonProfiles.length > 0"
+                        class="setups-popover-wrapper"
+                        ref="setupsMenuRef"
+                    >
+                        <button
+                            type="button"
+                            class="hud-btn"
+                            :class="{ 'toggle-active': activeComparisonRectangles.length > 0 || showSetupsMenu }"
+                            @click.stop="showSetupsMenu = !showSetupsMenu"
+                            title="Overlay differently colored FOV rectangles for other saved equipment setups"
+                        >
+                            ⧉ Setups<span v-if="activeComparisonRectangles.length > 0"> ({{ activeComparisonRectangles.length }})</span>
+                        </button>
+
+                        <div v-if="showSetupsMenu" class="setups-popover" @click.stop>
+                            <div class="setups-popover-header">
+                                <span class="setups-popover-title">Compare Saved Setups</span>
+                                <div class="setups-popover-bulk">
+                                    <button
+                                        type="button"
+                                        class="popover-link-btn"
+                                        @click="setAllComparisonProfiles(true)"
+                                    >
+                                        All
+                                    </button>
+                                    <span class="meta-sep">·</span>
+                                    <button
+                                        type="button"
+                                        class="popover-link-btn"
+                                        @click="setAllComparisonProfiles(false)"
+                                    >
+                                        None
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="setups-popover-list">
+                                <label
+                                    v-for="prof in availableComparisonProfiles"
+                                    :key="`menu-prof-${prof.name}`"
+                                    class="setups-popover-item"
+                                    :class="{ 'is-enabled': prof.enabled }"
+                                >
+                                    <input
+                                        type="checkbox"
+                                        :checked="prof.enabled"
+                                        @change="toggleComparisonProfile(prof.name)"
+                                    />
+                                    <span
+                                        class="setup-color-swatch"
+                                        :style="{
+                                            borderColor: prof.color.border,
+                                            background: prof.color.bg
+                                        }"
+                                    ></span>
+                                    <span class="setup-item-name" :title="prof.name">{{ prof.name }}</span>
+                                    <span
+                                        class="setup-item-fov"
+                                        :style="{ color: prof.color.border }"
+                                    >
+                                        {{ prof.sensorFov.w.toFixed(2) }}° × {{ prof.sensorFov.h.toFixed(2) }}°
+                                    </span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
                     <button
                         type="button"
                         class="hud-btn"
@@ -908,6 +1150,37 @@ onUnmounted(() => {
     font-size: 1.25rem;
     font-weight: 700;
     color: #f9fafb;
+}
+
+.fav-star-btn {
+    background: rgba(31, 41, 55, 0.8);
+    border: 1px solid #4b5563;
+    color: #9ca3af;
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.05rem;
+    line-height: 1;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.fav-star-btn:hover {
+    border-color: #f59e0b;
+    color: #fbbf24;
+    background: rgba(245, 158, 11, 0.12);
+}
+
+.fav-star-btn.is-fav {
+    border-color: rgba(245, 158, 11, 0.65);
+    color: #fbbf24;
+    background: rgba(245, 158, 11, 0.18);
+    text-shadow: 0 0 8px rgba(245, 158, 11, 0.45);
 }
 
 .meta-badge {
@@ -1041,6 +1314,159 @@ onUnmounted(() => {
     color: #ef4444;
     pointer-events: none;
     font-size: 20px;
+}
+
+.comparison-sensor-label {
+    position: absolute;
+    top: 4px;
+    left: 4px;
+    background: rgba(15, 23, 42, 0.86);
+    backdrop-filter: blur(4px);
+    border: 1px solid;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 0.66rem;
+    font-weight: 700;
+    line-height: 1.25;
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    pointer-events: none;
+    user-select: none;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.65);
+}
+
+.comp-fov-dim {
+    font-weight: 500;
+    opacity: 0.9;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Compare Setups Popover */
+.setups-popover-wrapper {
+    position: relative;
+    display: inline-flex;
+}
+
+.setups-popover {
+    position: absolute;
+    bottom: calc(100% + 10px);
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 245px;
+    max-width: 320px;
+    background: rgba(15, 23, 42, 0.96);
+    backdrop-filter: blur(10px);
+    border: 1px solid #475569;
+    border-radius: 8px;
+    padding: 8px 10px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.75);
+    z-index: 150;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.setups-popover-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid rgba(71, 85, 105, 0.6);
+}
+
+.setups-popover-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #e2e8f0;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.setups-popover-bulk {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.popover-link-btn {
+    background: transparent;
+    border: none;
+    color: #38bdf8;
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0 2px;
+    margin: 0;
+    cursor: pointer;
+}
+
+.popover-link-btn:hover {
+    text-decoration: underline;
+    color: #7dd3fc;
+}
+
+.setups-popover-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.setups-popover-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 6px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 0.75rem;
+    color: #cbd5e1;
+    margin: 0;
+    user-select: none;
+    transition: background 0.12s;
+}
+
+.setups-popover-item:hover {
+    background: rgba(51, 65, 85, 0.55);
+}
+
+.setups-popover-item.is-enabled {
+    background: rgba(30, 41, 59, 0.85);
+    color: #f8fafc;
+}
+
+.setups-popover-item input[type="checkbox"] {
+    margin: 0;
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+    accent-color: #38bdf8;
+}
+
+.setup-color-swatch {
+    width: 10px;
+    height: 10px;
+    border: 2px dashed;
+    border-radius: 2px;
+    flex-shrink: 0;
+}
+
+.setup-item-name {
+    flex: 1;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.setup-item-fov {
+    font-size: 0.7rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
 }
 
 /* FOV Object Circles & Labels Overlay */

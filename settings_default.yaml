@@ -60,4 +60,7 @@ client_settings:
   time_window_start: ""
   time_window_end: ""
   show_object_overlays: true
+  comparison_profiles: []
+  favorites: []
+  filter_favorites_only: false
 

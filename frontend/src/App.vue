@@ -28,7 +28,10 @@ const clientSettings = ref({
     filter_active_time_window: false,
     time_window_start: '',
     time_window_end: '',
-    show_object_overlays: true
+    show_object_overlays: true,
+    comparison_profiles: [],
+    favorites: [],
+    filter_favorites_only: false
 });
 const objects = ref([]);
 const selectedObject = ref(null);
@@ -343,6 +346,12 @@ const startStream = (mode = 'selected') => {
     params.append('tz_offset', String(new Date().getTimezoneOffset()));
 
     params.append('selected_types', (clientSettings.value.selected_types || []).join(','));
+    if (clientSettings.value.filter_favorites_only !== undefined) {
+        params.append('filter_favorites_only', Boolean(clientSettings.value.filter_favorites_only));
+    }
+    if (Array.isArray(clientSettings.value.favorites) && clientSettings.value.favorites.length > 0) {
+        params.append('favorites', clientSettings.value.favorites.join(','));
+    }
 
     eventSource = new EventSource(`/api/stream-objects?${params.toString()}`);
 
@@ -556,8 +565,12 @@ const filteredObjectsList = computed(() => {
     if (selectedTypes.includes('__NONE__')) return [];
     const activeSet = selectedTypes.length > 0 ? new Set(selectedTypes) : null;
 
+    const onlyFavs = Boolean(clientSettings.value?.filter_favorites_only);
+    const favSet = onlyFavs ? new Set(clientSettings.value?.favorites || []) : null;
+
     const result = [];
     for (const o of objects.value) {
+        if (favSet && !favSet.has(o.name)) continue;
         if (activeSet && !activeSet.has(o.type)) continue;
 
         let effectiveHrs = o.hours_visible;

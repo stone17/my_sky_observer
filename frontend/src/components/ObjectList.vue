@@ -70,6 +70,46 @@ watch(() => props.clientSettings, (newVal) => {
 
 const updateSettings = () => emit('update-settings', localSettings.value);
 
+const favoritesSet = computed(() => {
+    const list = localClientSettings.value?.favorites;
+    return new Set(Array.isArray(list) ? list : []);
+});
+
+const favoritesCount = computed(() => favoritesSet.value.size);
+
+const isFavoritesFilterActive = computed(() => {
+    return Boolean(localClientSettings.value?.filter_favorites_only);
+});
+
+const isFavorite = (name) => {
+    return Boolean(name && favoritesSet.value.has(name));
+};
+
+const toggleFavorite = (name) => {
+    if (!name) return;
+    const next = new Set(favoritesSet.value);
+    if (next.has(name)) {
+        next.delete(name);
+    } else {
+        next.add(name);
+    }
+    const updated = {
+        ...localClientSettings.value,
+        favorites: Array.from(next)
+    };
+    localClientSettings.value = updated;
+    emit('update-client-settings', updated);
+};
+
+const toggleFavoritesFilter = () => {
+    const updated = {
+        ...localClientSettings.value,
+        filter_favorites_only: !localClientSettings.value.filter_favorites_only
+    };
+    localClientSettings.value = updated;
+    emit('update-client-settings', updated);
+};
+
 watch(() => props.selectedId, (newId) => {
     if (newId) {
         nextTick(() => {
@@ -149,9 +189,14 @@ const filteredAndSortedObjects = computed(() => {
     const q = (props.searchQuery || '').trim().toLowerCase();
     const normQ = q.replace(/\s+/g, '');
 
+    const onlyFavs = Boolean(localClientSettings.value.filter_favorites_only);
+    const favSet = favoritesSet.value;
+
     let result = [];
 
     for (const o of props.objects) {
+        if (onlyFavs && !favSet.has(o.name)) continue;
+
         if (o._normId === undefined) o._normId = (o.name || '').toLowerCase().replace(/\s+/g, '');
         if (o._normCommon === undefined) o._normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
         if (o._normOther === undefined) o._normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
@@ -426,6 +471,21 @@ onUnmounted(() => {
                     </div>
 
                     <div class="toolbar-right">
+                        <button
+                            type="button"
+                            class="toolbar-fav-btn"
+                            :class="{ active: isFavoritesFilterActive }"
+                            @click="toggleFavoritesFilter"
+                            :title="
+                                isFavoritesFilterActive
+                                    ? 'Showing Favorites only — Click to show all matching targets'
+                                    : `Filter list to saved Favorites (${favoritesCount})`
+                            "
+                        >
+                            <span>{{ isFavoritesFilterActive ? '★' : '☆' }}</span>
+                            <span>{{ favoritesCount }}</span>
+                        </button>
+
                         <div class="list-stats" title="Matching targets / Total targets in selected object types">
                             <strong>{{ filteredAndSortedObjects.length }}</strong> / {{ typePoolCount }}
                         </div>
@@ -485,6 +545,16 @@ onUnmounted(() => {
 
                         <div class="info-col">
                             <div class="title-row">
+                                <button
+                                    type="button"
+                                    class="card-fav-btn"
+                                    :class="{ 'is-fav': isFavorite(item.name) }"
+                                    @click.stop="toggleFavorite(item.name)"
+                                    :title="isFavorite(item.name) ? 'Remove from Favorites' : 'Save to Favorites'"
+                                    :aria-label="isFavorite(item.name) ? 'Remove from Favorites' : 'Save to Favorites'"
+                                >
+                                    {{ isFavorite(item.name) ? '★' : '☆' }}
+                                </button>
                                 <h4 :title="item.name">{{ item.name }}</h4>
                                 <span
                                     v-if="item.type"
@@ -540,7 +610,13 @@ onUnmounted(() => {
                 </div>
 
                 <div v-if="filteredAndSortedObjects.length === 0" class="empty-list">
-                    <p>No targets match your current filters.</p>
+                    <p v-if="isFavoritesFilterActive && favoritesCount === 0">
+                        No favorites saved yet. Click ☆ on any target to bookmark it for later.
+                    </p>
+                    <p v-else-if="isFavoritesFilterActive">
+                        None of your {{ favoritesCount }} saved favorites match the current filters.
+                    </p>
+                    <p v-else>No targets match your current filters.</p>
                 </div>
             </div>
         </div>
@@ -737,6 +813,58 @@ onUnmounted(() => {
 
 .list-stats strong {
     color: #10b981;
+}
+
+.toolbar-fav-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: #111827;
+    color: #9ca3af;
+    border: 1px solid #4b5563;
+    border-radius: 5px;
+    padding: 2px 7px;
+    font-size: 0.74rem;
+    font-weight: 600;
+    height: 26px;
+    margin: 0;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s;
+}
+
+.toolbar-fav-btn:hover {
+    border-color: #f59e0b;
+    color: #fbbf24;
+}
+
+.toolbar-fav-btn.active {
+    background: rgba(245, 158, 11, 0.18);
+    border-color: rgba(245, 158, 11, 0.65);
+    color: #fbbf24;
+}
+
+.card-fav-btn {
+    background: transparent;
+    border: none;
+    color: #6b7280;
+    font-size: 0.92rem;
+    line-height: 1;
+    padding: 0 2px 0 0;
+    margin: 0;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: color 0.15s, transform 0.12s;
+}
+
+.card-fav-btn:hover {
+    color: #fbbf24;
+    transform: scale(1.12);
+}
+
+.card-fav-btn.is-fav {
+    color: #fbbf24;
+    text-shadow: 0 0 6px rgba(245, 158, 11, 0.4);
 }
 
 .toolbar-dl-btn {

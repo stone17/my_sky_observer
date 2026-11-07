@@ -345,11 +345,18 @@ def apply_stream_query_overrides(
         "filter_active_size",
         "filter_na_size",
         "filter_active_time_window",
+        "filter_favorites_only",
     ):
         if flag_key in qp:
             bool_val = qp[flag_key].lower() == "true"
             settings[flag_key] = bool_val
             client_cfg[flag_key] = bool_val
+
+    if "favorites" in qp:
+        raw_favs = qp["favorites"].strip()
+        fav_list = [f.strip() for f in raw_favs.split(",") if f.strip()] if raw_favs else []
+        settings["favorites"] = fav_list
+        client_cfg["favorites"] = fav_list
 
     if "time_window_start" in qp:
         val = qp["time_window_start"].strip()
@@ -665,12 +672,34 @@ class StreamSession:
             return True
 
         filtered_candidates = [o for o in self.all_objects if check_obj(o)]
-        self.top_objects = filtered_candidates[:500]
+
+        filter_favs_only = bool(
+            self.settings.get(
+                "filter_favorites_only",
+                client_settings.get("filter_favorites_only", False),
+            )
+        )
+        fav_names = set(
+            self.settings.get("favorites", client_settings.get("favorites", [])) or []
+        )
+
+        # Ensure any bookmarked objects are included in top_objects so their altitude graphs are precomputed
+        if fav_names:
+            fav_objs = [o for o in filtered_candidates if o.get("name") in fav_names]
+            non_fav_objs = [o for o in filtered_candidates if o.get("name") not in fav_names]
+            self.top_objects = (fav_objs + non_fav_objs)[:500]
+        else:
+            self.top_objects = filtered_candidates[:500]
 
         if mode == "all":
             self.download_list = self.all_objects
         elif mode == "filtered":
-            self.download_list = filtered_candidates
+            if filter_favs_only:
+                self.download_list = [
+                    o for o in filtered_candidates if o.get("name") in fav_names
+                ]
+            else:
+                self.download_list = filtered_candidates
         else:
             self.download_list = []
 
