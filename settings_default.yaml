@@ -68,4 +68,8 @@ client_settings:
   comparison_profiles: []
   favorites: []
   filter_favorites_only: false
+  selected_object: ""
+  search_query: ""
+  object_settings: {}
+
 

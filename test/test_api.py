@@ -689,5 +689,107 @@ def test_min_hours_altitude_limit():
     assert any(low_map[k] > high_map[k] for k in low_map)
 
 
+def test_filter_and_object_settings_persistence():
+    """
+    Tests that filter settings, selected object, search query, and per-object framing
+    settings persist across /api/settings saves and reloads, and that active equipment
+    profiles do not clobber filter or object settings.
+    """
+    payload = {
+        "min_altitude": 42.0,
+        "sort_key": "mag",
+        "active_profile": "TestRig",
+        "profiles": {
+            "TestRig": {
+                "telescope": {"focal_length": 600},
+                "camera": {"sensor_width": 23.5, "sensor_height": 15.6},
+                # Simulate legacy polluted profile containing stale filter/client_settings
+                "min_altitude": 10.0,
+                "sort_key": "size",
+                "client_settings": {"max_magnitude": 5.0, "selected_object": "M1"},
+            }
+        },
+        "client_settings": {
+            "max_magnitude": 10.5,
+            "min_size": 12.0,
+            "min_hours": 3.5,
+            "min_hours_altitude": 25.0,
+            "selected_types": ["Gal", "Neb"],
+            "filter_active_alt": True,
+            "filter_na_alt": False,
+            "filter_active_hours": True,
+            "filter_na_hours": False,
+            "filter_active_mag": True,
+            "filter_na_mag": False,
+            "filter_active_size": True,
+            "filter_na_size": False,
+            "filter_active_time_window": True,
+            "time_window_start": "22:30",
+            "time_window_end": "03:15",
+            "favorites": ["M31", "M42"],
+            "filter_favorites_only": True,
+            "selected_object": "M42",
+            "search_query": "Orion",
+            "object_settings": {
+                "M42": {
+                    "rotation": 135,
+                    "fov": 2.75,
+                    "is_manual_fov": True,
+                    "custom_framed": True,
+                    "center_ra": "05h35m17.3s",
+                    "center_dec": "-05d23m28.0s",
+                    "offset_x_pct": 12.5,
+                    "offset_y_pct": -8.0,
+                    "equipment_sig": "600_23.5_15.6_1.15",
+                }
+            },
+        },
+    }
+
+    res = client.post("/api/settings", json=payload)
+    assert res.status_code == 200
+
+    get_res = client.get("/api/settings")
+    assert get_res.status_code == 200
+    saved = get_res.json()
+
+    assert saved["min_altitude"] == 42.0
+    assert saved["sort_key"] == "mag"
+
+    # Profile should only retain equipment keys, not stale filter/client_settings keys
+    prof = saved["profiles"]["TestRig"]
+    assert "client_settings" not in prof
+    assert "min_altitude" not in prof
+    assert "sort_key" not in prof
+    assert prof["telescope"]["focal_length"] == 600
+
+    cs = saved["client_settings"]
+    assert cs["max_magnitude"] == 10.5
+    assert cs["min_size"] == 12.0
+    assert cs["min_hours"] == 3.5
+    assert cs["min_hours_altitude"] == 25.0
+    assert cs["selected_types"] == ["Gal", "Neb"]
+    assert cs["filter_na_alt"] is False
+    assert cs["filter_active_time_window"] is True
+    assert cs["time_window_start"] == "22:30"
+    assert cs["time_window_end"] == "03:15"
+    assert cs["favorites"] == ["M31", "M42"]
+    assert cs["filter_favorites_only"] is True
+    assert cs["selected_object"] == "M42"
+    assert cs["search_query"] == "Orion"
+    assert cs["object_settings"]["M42"]["rotation"] == 135
+    assert cs["object_settings"]["M42"]["fov"] == 2.75
+    assert cs["object_settings"]["M42"]["is_manual_fov"] is True
+    assert cs["object_settings"]["M42"]["custom_framed"] is True
+    assert cs["object_settings"]["M42"]["center_ra"] == "05h35m17.3s"
+    assert cs["object_settings"]["M42"]["center_dec"] == "-05d23m28.0s"
+    assert cs["object_settings"]["M42"]["offset_x_pct"] == 12.5
+    assert cs["object_settings"]["M42"]["offset_y_pct"] == -8.0
+
+    # Restore original test settings
+    save_settings(TEST_SETTINGS)
+
+
+
 
 

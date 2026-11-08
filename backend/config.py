@@ -148,6 +148,21 @@ def load_settings(
         if legacy_key in settings:
             settings["client_settings"][legacy_key] = settings.pop(legacy_key)
 
+    if "profiles" in settings and isinstance(settings["profiles"], dict):
+        for p in settings["profiles"].values():
+            if isinstance(p, dict):
+                for non_prof_key in (
+                    "catalogs",
+                    "min_altitude",
+                    "sort_key",
+                    "client_settings",
+                    "location",
+                    "nina_host",
+                    "active_profile",
+                    "profiles",
+                ):
+                    p.pop(non_prof_key, None)
+
     if migrated_from_legacy:
         save_settings(settings, user_file=user_file)
         current_mtime = _get_file_mtime(user_file)
@@ -195,8 +210,18 @@ def merge_settings_update(current_settings: dict, data: dict) -> dict:
 
     if "profiles" in current_settings and isinstance(current_settings["profiles"], dict):
         for p in current_settings["profiles"].values():
-            if isinstance(p, dict) and "catalogs" in p:
-                del p["catalogs"]
+            if isinstance(p, dict):
+                for non_prof_key in (
+                    "catalogs",
+                    "min_altitude",
+                    "sort_key",
+                    "client_settings",
+                    "location",
+                    "nina_host",
+                    "active_profile",
+                    "profiles",
+                ):
+                    p.pop(non_prof_key, None)
 
     return current_settings
 

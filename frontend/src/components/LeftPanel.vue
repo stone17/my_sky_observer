@@ -160,9 +160,11 @@ watch(() => props.clientSettings, (newVal) => {
         if (localClientSettings.value.filter_active_size === undefined) localClientSettings.value.filter_active_size = true;
         if (localClientSettings.value.filter_na_size === undefined) localClientSettings.value.filter_na_size = true;
         if (localClientSettings.value.filter_active_time_window === undefined) localClientSettings.value.filter_active_time_window = false;
-        const defaults = getAstroNightDefaults(props.nightTimes);
-        if (!localClientSettings.value.time_window_start) localClientSettings.value.time_window_start = defaults.start;
-        if (!localClientSettings.value.time_window_end) localClientSettings.value.time_window_end = defaults.end;
+        if (props.nightTimes?.twilight_periods) {
+            const defaults = getAstroNightDefaults(props.nightTimes);
+            if (!localClientSettings.value.time_window_start) localClientSettings.value.time_window_start = defaults.start;
+            if (!localClientSettings.value.time_window_end) localClientSettings.value.time_window_end = defaults.end;
+        }
         if (!localClientSettings.value.selected_types) localClientSettings.value.selected_types = [];
         if (!Array.isArray(localClientSettings.value.favorites)) localClientSettings.value.favorites = [];
         if (localClientSettings.value.filter_favorites_only === undefined) localClientSettings.value.filter_favorites_only = false;
@@ -178,7 +180,7 @@ const clearAllFavorites = () => {
 };
 
 watch(() => props.nightTimes, (nt) => {
-    if (!nt) return;
+    if (!nt?.twilight_periods) return;
     const defaults = getAstroNightDefaults(nt);
     if (!localClientSettings.value.time_window_start) {
         localClientSettings.value.time_window_start = defaults.start;
@@ -275,20 +277,24 @@ const sortedAvailableTypes = computed(() => {
 });
 
 // Profile Actions
+const extractEquipmentProfileData = (src) => {
+    const out = {};
+    if (src?.telescope) out.telescope = JSON.parse(JSON.stringify(src.telescope));
+    if (src?.camera) out.camera = JSON.parse(JSON.stringify(src.camera));
+    if (src?.image_padding !== undefined) out.image_padding = src.image_padding;
+    if (src?.image_server) out.image_server = JSON.parse(JSON.stringify(src.image_server));
+    return out;
+};
+
 const loadProfile = (name) => {
     if (profiles.value[name]) {
-        const profileData = JSON.parse(JSON.stringify(profiles.value[name]));
-        const savedLocation = localSettings.value.location;
-        const savedNina = localSettings.value.nina_host;
+        const profileData = extractEquipmentProfileData(profiles.value[name]);
 
         localSettings.value = {
             ...localSettings.value,
             ...profileData,
             active_profile: name
         };
-
-        if (savedLocation) localSettings.value.location = savedLocation;
-        if (savedNina !== undefined) localSettings.value.nina_host = savedNina;
 
         selectedProfileName.value = name;
         emitSettings();
@@ -299,12 +305,7 @@ const updateCurrentProfile = async () => {
     if (!selectedProfileName.value) return;
     const name = selectedProfileName.value;
 
-    const profileData = JSON.parse(JSON.stringify(localSettings.value));
-    delete profileData.location;
-    delete profileData.nina_host;
-    delete profileData.active_profile;
-    delete profileData.profiles;
-    delete profileData.client_settings;
+    const profileData = extractEquipmentProfileData(localSettings.value);
 
     try {
         await fetch(`/api/profiles/${name}`, {
@@ -322,12 +323,7 @@ const createProfile = async () => {
     if (!newProfileName.value.trim()) return;
     const name = newProfileName.value.trim();
 
-    const profileData = JSON.parse(JSON.stringify(localSettings.value));
-    delete profileData.location;
-    delete profileData.nina_host;
-    delete profileData.active_profile;
-    delete profileData.profiles;
-    delete profileData.client_settings;
+    const profileData = extractEquipmentProfileData(localSettings.value);
 
     try {
         await fetch(`/api/profiles/${name}`, {
@@ -664,6 +660,7 @@ const activeFiltersCount = computed(() => {
                                     min="0"
                                     v-model.number="localClientSettings.min_hours"
                                     :disabled="!localClientSettings.filter_active_hours"
+                                    @input="emitClientSettings"
                                     @change="emitClientSettings"
                                     class="num-input"
                                 />
@@ -678,6 +675,7 @@ const activeFiltersCount = computed(() => {
                                     min="0"
                                     max="90"
                                     v-model.number="localClientSettings.min_hours_altitude"
+                                    @input="emitClientSettings"
                                     @change="emitClientSettings"
                                     class="num-input"
                                     title="Minimum altitude in degrees required for an object to count as visible"
@@ -718,6 +716,7 @@ const activeFiltersCount = computed(() => {
                                     type="time"
                                     v-model="localClientSettings.time_window_start"
                                     :disabled="!localClientSettings.filter_active_time_window"
+                                    @input="emitClientSettings"
                                     @change="emitClientSettings"
                                     class="time-input"
                                     aria-label="Start time"
@@ -728,6 +727,7 @@ const activeFiltersCount = computed(() => {
                                     type="time"
                                     v-model="localClientSettings.time_window_end"
                                     :disabled="!localClientSettings.filter_active_time_window"
+                                    @input="emitClientSettings"
                                     @change="emitClientSettings"
                                     class="time-input"
                                     aria-label="End time"
@@ -752,6 +752,7 @@ const activeFiltersCount = computed(() => {
                                     step="0.5"
                                     v-model.number="localClientSettings.max_magnitude"
                                     :disabled="!localClientSettings.filter_active_mag"
+                                    @input="emitClientSettings"
                                     @change="emitClientSettings"
                                     class="num-input"
                                 />
@@ -783,6 +784,7 @@ const activeFiltersCount = computed(() => {
                                     min="0"
                                     v-model.number="localClientSettings.min_size"
                                     :disabled="!localClientSettings.filter_active_size"
+                                    @input="emitClientSettings"
                                     @change="emitClientSettings"
                                     class="num-input"
                                 />

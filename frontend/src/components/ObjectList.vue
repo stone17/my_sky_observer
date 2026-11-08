@@ -115,6 +115,10 @@ const toggleFavoritesFilter = () => {
 
 watch(() => props.selectedId, (newId) => {
     if (newId) {
+        const idx = filteredAndSortedObjects.value.findIndex(o => o.name === newId);
+        if (idx >= renderedLimit.value) {
+            renderedLimit.value = idx + 20;
+        }
         nextTick(() => {
             const el = document.getElementById(`obj-card-${newId}`);
             if (el) el.scrollIntoView({ block: 'nearest' });
@@ -347,9 +351,16 @@ const uncachedFilteredCount = computed(() => {
 });
 
 watch(filteredAndSortedObjects, (newList) => {
-    renderedLimit.value = 50;
+    const savedId = props.selectedId || localClientSettings.value?.selected_object;
+    const savedIdx = savedId ? newList.findIndex(o => o.name === savedId) : -1;
+    renderedLimit.value = savedIdx >= 50 ? savedIdx + 20 : 50;
     if (!props.selectedId && newList.length > 0) {
-        handleObjectClick(newList[0]);
+        if (savedIdx !== -1) {
+            handleObjectClick(newList[savedIdx]);
+        } else {
+            const savedInAll = savedId ? (props.objects || []).find(o => o.name === savedId) : null;
+            handleObjectClick(savedInAll || newList[0]);
+        }
     }
 }, { immediate: true });
 

@@ -13,7 +13,7 @@ import {
 } from '../utils/catalogMeta.js';
 
 const props = defineProps(['object', 'objects', 'settings', 'clientSettings', 'searchQuery', 'activeFov']);
-const emit = defineEmits(['update-settings', 'update-client-settings', 'update-search', 'select-object', 'update-fov', 'open-mobile-list']);
+const emit = defineEmits(['update-settings', 'update-client-settings', 'update-search', 'select-object', 'update-fov', 'open-mobile-list', 'update-object-settings']);
 
 // --- PHYSICAL SENSOR & DEFAULT IMAGE FOV CALCULATION (Single Source of Truth) ---
 const systemSensorFov = computed(() => {
@@ -419,6 +419,15 @@ const activeComparisonRectangles = computed(() => {
 const rotation = ref(0);
 let rotInterval = null;
 let rotTimeout = null;
+let isRestoringObjectState = false;
+
+const emitObjectPatch = (patch) => {
+    if (!props.object?.name || isRestoringObjectState) return;
+    emit('update-object-settings', {
+        name: props.object.name,
+        patch
+    });
+};
 
 const startRotate = (dir) => {
     stopRotate();
@@ -438,6 +447,13 @@ const stopRotate = () => {
     rotInterval = null;
 };
 
+watch(rotation, (newRot) => {
+    if (!props.object || isRestoringObjectState) return;
+    const cleanRot = Number.isFinite(Number(newRot)) ? Number(newRot) : 0;
+    props.object.rotation = cleanRot;
+    emitObjectPatch({ rotation: cleanRot });
+});
+
 const offsetX = ref(0);
 const offsetY = ref(0);
 const isDragging = ref(false);
@@ -451,13 +467,28 @@ let resizeObserver = null;
 
 const zoomLevel = ref(1.0);
 
-watch(() => props.object?.name, (newName, oldName) => {
-    if (newName !== oldName) {
+const applySavedObjectState = (objName) => {
+    if (!objName) return;
+    isRestoringObjectState = true;
+    const saved = props.clientSettings?.object_settings?.[objName] || {};
+    const savedRot = saved.rotation !== undefined ? Number(saved.rotation) : Number(props.object?.rotation || 0);
+    rotation.value = Number.isFinite(savedRot) ? savedRot : 0;
+    if (wrapperSize.value > 0 && (saved.offset_x_pct || saved.offset_y_pct)) {
+        offsetX.value = ((saved.offset_x_pct || 0) / 100) * wrapperSize.value;
+        offsetY.value = ((saved.offset_y_pct || 0) / 100) * wrapperSize.value;
+    } else {
         offsetX.value = 0;
         offsetY.value = 0;
-        zoomLevel.value = 1.0;
     }
-});
+    zoomLevel.value = 1.0;
+    isRestoringObjectState = false;
+};
+
+watch(() => props.object?.name, (newName, oldName) => {
+    if (newName !== oldName) {
+        applySavedObjectState(newName);
+    }
+}, { immediate: true });
 
 const stepFov = (multiplier) => {
     const next = Math.max(localFov.value * multiplier, MIN_IMAGE_FOV_DEG);
@@ -511,8 +542,15 @@ const startDrag = (e) => {
     e.preventDefault();
 };
 const stopDrag = () => {
+    const wasDragging = isDragging.value;
     isDragging.value = false;
     pinchStartDist.value = 0;
+    if (wasDragging && props.object?.name && wrapperSize.value > 0) {
+        emitObjectPatch({
+            offset_x_pct: Math.round((offsetX.value / wrapperSize.value) * 10000) / 100,
+            offset_y_pct: Math.round((offsetY.value / wrapperSize.value) * 10000) / 100
+        });
+    }
 };
 
 const getTouchDistance = (t1, t2) => {
@@ -642,6 +680,18 @@ const updateImage = async () => {
             offsetX.value = 0;
             offsetY.value = 0;
             zoomLevel.value = 1.0;
+
+            emitObjectPatch({
+                fov: props.object.image_fov,
+                is_manual_fov: true,
+                custom_framed: true,
+                center_ra: coords.ra,
+                center_dec: coords.dec,
+                image_url: data.url,
+                offset_x_pct: 0,
+                offset_y_pct: 0,
+                rotation: rotation.value
+            });
         } else {
             props.object.status = 'error';
         }
@@ -680,7 +730,15 @@ onMounted(() => {
     if (viewportRef.value) {
         resizeObserver = new ResizeObserver(entries => {
             for (let entry of entries) {
+                const prevSize = wrapperSize.value;
                 wrapperSize.value = Math.min(entry.contentRect.width, entry.contentRect.height);
+                if (prevSize === 0 && wrapperSize.value > 0 && props.object?.name) {
+                    const saved = props.clientSettings?.object_settings?.[props.object.name];
+                    if (saved && (saved.offset_x_pct || saved.offset_y_pct)) {
+                        offsetX.value = ((saved.offset_x_pct || 0) / 100) * wrapperSize.value;
+                        offsetY.value = ((saved.offset_y_pct || 0) / 100) * wrapperSize.value;
+                    }
+                }
             }
         });
         resizeObserver.observe(viewportRef.value);

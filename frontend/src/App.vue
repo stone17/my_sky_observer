@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, watch, computed } from 'vue';
+import { ref, onMounted, onUnmounted, watch, computed } from 'vue';
 import LeftPanel from './components/LeftPanel.vue';
 import ObjectList from './components/ObjectList.vue';
 import Framing from './components/Framing.vue';
@@ -10,6 +10,8 @@ import {
     resolveEffectiveTimeWindow,
     isTimestampInTimeWindow
 } from './utils/timeWindow.js';
+
+const LOCAL_STORAGE_BACKUP_KEY = 'my_sky_observer_settings_backup';
 
 const settings = ref({});
 const clientSettings = ref({
@@ -32,7 +34,10 @@ const clientSettings = ref({
     show_object_overlays: true,
     comparison_profiles: [],
     favorites: [],
-    filter_favorites_only: false
+    filter_favorites_only: false,
+    selected_object: '',
+    search_query: '',
+    object_settings: {}
 });
 const objects = ref([]);
 const selectedObject = ref(null);
@@ -142,6 +147,66 @@ const downloadImage = async (obj, explicitFov = null) => {
             ) {
                 applyResult(selectedObject.value);
             }
+            if (isManualFov.value && selectedObject.value?.name === targetName) {
+                updateObjectSettingsEntry(targetName, {
+                    fov: effectiveFov,
+                    is_manual_fov: true,
+                    image_url: data.url
+                });
+            }
+        } else {
+            obj.status = 'error';
+        }
+    } catch (e) {
+        console.error(e);
+        obj.status = 'error';
+    }
+};
+
+const fetchCustomFramedImageForObject = async (obj, centerRa, centerDec, fov) => {
+    if (!obj) return;
+    const targetName = obj.name;
+    const requestedFov = normalizeImageFov(fov, systemFov.value);
+    obj.status = 'downloading';
+    try {
+        const res = await fetch('/api/fetch-custom-image', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                ra: centerRa,
+                dec: centerDec,
+                fov: requestedFov,
+                resolution: settings.value.image_server?.resolution || 1024,
+                source: settings.value.image_server?.source || 'dss2r',
+                timeout: settings.value.image_server?.timeout || 120
+            })
+        });
+        if (res.ok) {
+            const data = await res.json();
+            const effectiveFov = data.image_fov || requestedFov;
+            const applyCustom = (targetObj) => {
+                if (!targetObj) return;
+                targetObj.image_url = data.url;
+                targetObj.center_ra = centerRa;
+                targetObj.center_dec = centerDec;
+                targetObj.custom_framed = true;
+                targetObj.image_fov = effectiveFov;
+                targetObj.status = 'cached';
+            };
+            applyCustom(obj);
+            const liveObj = objects.value.find(o => o.name === targetName);
+            if (liveObj && liveObj !== obj) applyCustom(liveObj);
+            if (selectedObject.value?.name === targetName && selectedObject.value !== obj) {
+                applyCustom(selectedObject.value);
+            }
+            updateObjectSettingsEntry(targetName, {
+                fov: effectiveFov,
+                is_manual_fov: Math.abs(effectiveFov - systemFov.value) >= 0.01,
+                custom_framed: true,
+                center_ra: centerRa,
+                center_dec: centerDec,
+                image_url: data.url
+            });
         } else {
             obj.status = 'error';
         }
@@ -154,36 +219,78 @@ const downloadImage = async (obj, explicitFov = null) => {
 // Watcher 1: Equipment / Profile / Padding Changes
 watch(equipmentSignature, (newSig, oldSig) => {
     if (!newSig) return;
-    isManualFov.value = false;
-    activeFov.value = systemFov.value;
-    if (oldSig && newSig !== oldSig && selectedObject.value) {
-        selectedObject.value.custom_framed = false;
-        delete selectedObject.value.center_ra;
-        delete selectedObject.value.center_dec;
-        downloadImage(selectedObject.value, systemFov.value);
+    if (oldSig && newSig !== oldSig) {
+        isManualFov.value = false;
+        activeFov.value = systemFov.value;
+        if (selectedObject.value) {
+            selectedObject.value.custom_framed = false;
+            delete selectedObject.value.center_ra;
+            delete selectedObject.value.center_dec;
+            downloadImage(selectedObject.value, systemFov.value);
+        }
+    } else if (!isManualFov.value) {
+        activeFov.value = systemFov.value;
     }
 });
 
 // Watcher 2: Object Selection
 watch(selectedObject, (newVal, oldVal) => {
     if (!newVal) return;
-    if (!isManualFov.value) {
+    const isSameObject = newVal?.name === oldVal?.name;
+
+    if (clientSettings.value.selected_object !== newVal.name) {
+        clientSettings.value.selected_object = newVal.name;
+        if (!isInitializing) {
+            saveSettings({});
+        }
+    }
+
+    const savedObj = getValidSavedObjectState(newVal.name);
+    if (!isSameObject) {
+        if (savedObj?.is_manual_fov && savedObj.fov) {
+            const normSavedFov = normalizeImageFov(savedObj.fov, systemFov.value);
+            isManualFov.value = Math.abs(normSavedFov - systemFov.value) >= 0.01;
+            activeFov.value = normSavedFov;
+        } else {
+            isManualFov.value = false;
+            activeFov.value = systemFov.value;
+        }
+    } else if (!isManualFov.value) {
         activeFov.value = systemFov.value;
     }
-    const isSameObject = newVal?.name === oldVal?.name;
-    const targetFov = isManualFov.value ? activeFov.value : systemFov.value;
-    const hasMatchingImage =
-        Boolean(newVal.image_url) &&
-        newVal.status === 'cached' &&
-        Math.abs((newVal.image_fov || 0) - targetFov) < 0.01;
 
-    if (
-        !hasMatchingImage &&
-        newVal.status !== 'downloading' &&
-        (!isSameObject || newVal.status !== 'error')
-    ) {
-        downloadImage(newVal, targetFov);
+    if (savedObj?.rotation !== undefined) {
+        newVal.rotation = savedObj.rotation;
     }
+
+    const targetFov = isManualFov.value ? activeFov.value : systemFov.value;
+
+    if (savedObj?.custom_framed && savedObj.center_ra !== undefined && savedObj.center_dec !== undefined) {
+        newVal.custom_framed = true;
+        newVal.center_ra = savedObj.center_ra;
+        newVal.center_dec = savedObj.center_dec;
+        const hasCustomImg =
+            Boolean(newVal.image_url) &&
+            newVal.status === 'cached' &&
+            Math.abs((newVal.image_fov || 0) - targetFov) < 0.01;
+        if (!hasCustomImg && newVal.status !== 'downloading') {
+            fetchCustomFramedImageForObject(newVal, savedObj.center_ra, savedObj.center_dec, targetFov);
+        }
+    } else {
+        const hasMatchingImage =
+            Boolean(newVal.image_url) &&
+            newVal.status === 'cached' &&
+            Math.abs((newVal.image_fov || 0) - targetFov) < 0.01;
+
+        if (
+            !hasMatchingImage &&
+            newVal.status !== 'downloading' &&
+            (!isSameObject || newVal.status !== 'error')
+        ) {
+            downloadImage(newVal, targetFov);
+        }
+    }
+
     if (!isSameObject && window.innerWidth <= 1024) {
         showMobileList.value = false;
     }
@@ -200,9 +307,20 @@ const handleFovUpdate = (payload) => {
         isManualFov.value = false;
         activeFov.value = systemFov.value;
         if (selectedObject.value) {
+            const objName = selectedObject.value.name;
             selectedObject.value.custom_framed = false;
             delete selectedObject.value.center_ra;
             delete selectedObject.value.center_dec;
+            updateObjectSettingsEntry(objName, {
+                fov: null,
+                is_manual_fov: false,
+                custom_framed: false,
+                center_ra: null,
+                center_dec: null,
+                image_url: null,
+                offset_x_pct: 0,
+                offset_y_pct: 0
+            });
             if (!skipDownload) {
                 downloadImage(selectedObject.value, systemFov.value);
             }
@@ -214,66 +332,233 @@ const handleFovUpdate = (payload) => {
     isManualFov.value = Math.abs(normalized - systemFov.value) >= 0.01;
     activeFov.value = normalized;
 
-    if (!skipDownload && selectedObject.value) {
-        downloadImage(selectedObject.value, normalized);
+    if (selectedObject.value) {
+        updateObjectSettingsEntry(selectedObject.value.name, {
+            fov: normalized,
+            is_manual_fov: isManualFov.value
+        });
+        if (!skipDownload) {
+            downloadImage(selectedObject.value, normalized);
+        }
     }
 };
 
-// --- STREAMING LOGIC ---
+// --- STREAMING & PERSISTENCE LOGIC ---
 let eventSource = null;
 let restartTimer = null;
 let isInitializing = true;
 let lastStreamLocationKey = '';
 let objectMap = new Map();
+let saveTimeout = null;
+let pendingSavePayload = null;
 
-const updateClientSettings = (newClientSettings) => {
+const getValidSavedObjectState = (objName) => {
+    if (!objName) return null;
+    const saved = clientSettings.value?.object_settings?.[objName];
+    if (!saved || typeof saved !== 'object') return null;
+    if (saved.equipment_sig && equipmentSignature.value && saved.equipment_sig !== equipmentSignature.value) {
+        return {
+            rotation: saved.rotation ?? 0
+        };
+    }
+    return saved;
+};
+
+const applySavedStateToObject = (item) => {
+    if (!item?.name) return;
+    const saved = getValidSavedObjectState(item.name);
+    if (!saved) return;
+    if (saved.rotation !== undefined) {
+        item.rotation = saved.rotation;
+    }
+    if (saved.custom_framed && saved.center_ra !== undefined && saved.center_ra !== null && saved.center_dec !== undefined && saved.center_dec !== null) {
+        item.center_ra = saved.center_ra;
+        item.center_dec = saved.center_dec;
+        item.custom_framed = true;
+    }
+    if (saved.is_manual_fov && saved.fov) {
+        item.image_fov = normalizeImageFov(saved.fov, systemFov.value);
+    }
+    if (saved.image_url && (saved.custom_framed || saved.is_manual_fov)) {
+        item.image_url = saved.image_url;
+        item.status = 'cached';
+    }
+};
+
+const updateObjectSettingsEntry = (objName, patch) => {
+    if (!objName) return;
+    if (!clientSettings.value.object_settings || typeof clientSettings.value.object_settings !== 'object') {
+        clientSettings.value.object_settings = {};
+    }
+    const prev = clientSettings.value.object_settings[objName] || {};
+    const next = {
+        ...prev,
+        ...patch,
+        equipment_sig: equipmentSignature.value
+    };
+    Object.keys(next).forEach((k) => {
+        if (next[k] === null || next[k] === undefined) {
+            delete next[k];
+        }
+    });
+    clientSettings.value.object_settings = {
+        ...clientSettings.value.object_settings,
+        [objName]: next
+    };
+    if (!isInitializing) {
+        saveSettings({});
+    }
+};
+
+const handleObjectSettingsUpdate = ({ name, patch }) => {
+    if (!name || !patch) return;
+    updateObjectSettingsEntry(name, patch);
+};
+
+const handleSearchUpdate = (val) => {
+    const clean = val ?? '';
+    searchQuery.value = clean;
+    if (clientSettings.value.search_query !== clean) {
+        clientSettings.value.search_query = clean;
+        if (!isInitializing) {
+            saveSettings({});
+        }
+    }
+};
+
+const updateClientSettings = (newClientSettings, shouldSave = true) => {
     if (!newClientSettings) return;
     const cloned = JSON.parse(JSON.stringify(newClientSettings));
     Object.assign(clientSettings.value, cloned);
+    if (cloned.search_query !== undefined && searchQuery.value !== cloned.search_query) {
+        searchQuery.value = cloned.search_query || '';
+    }
+    if (shouldSave && !isInitializing) {
+        saveSettings({});
+    }
+};
+
+const extractEquipmentProfileData = (prof) => {
+    const out = {};
+    if (prof?.telescope) out.telescope = JSON.parse(JSON.stringify(prof.telescope));
+    if (prof?.camera) out.camera = JSON.parse(JSON.stringify(prof.camera));
+    if (prof?.image_padding !== undefined) out.image_padding = prof.image_padding;
+    if (prof?.image_server) out.image_server = JSON.parse(JSON.stringify(prof.image_server));
+    return out;
+};
+
+const writeBackupToLocalStorage = (payload, pending = false) => {
+    try {
+        window.localStorage.setItem(
+            LOCAL_STORAGE_BACKUP_KEY,
+            JSON.stringify({ ts: Date.now(), pending, payload })
+        );
+    } catch (e) { }
+};
+
+const readPendingBackupFromLocalStorage = () => {
+    try {
+        const raw = window.localStorage.getItem(LOCAL_STORAGE_BACKUP_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (parsed?.pending && parsed?.payload && Date.now() - (parsed.ts || 0) < 30000) {
+            return parsed.payload;
+        }
+    } catch (e) { }
+    return null;
+};
+
+const flushPendingSave = () => {
+    if (!pendingSavePayload) return;
+    const payloadToSend = pendingSavePayload;
+    pendingSavePayload = null;
+    if (saveTimeout) {
+        clearTimeout(saveTimeout);
+        saveTimeout = null;
+    }
+    try {
+        fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payloadToSend),
+            keepalive: true
+        }).then(() => {
+            writeBackupToLocalStorage(payloadToSend, false);
+        }).catch(() => {});
+    } catch (e) { }
 };
 
 const fetchSettings = async () => {
     try {
+        const pendingBackup = readPendingBackupFromLocalStorage();
+        if (pendingBackup) {
+            try {
+                await fetch('/api/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(pendingBackup),
+                    keepalive: true
+                });
+                writeBackupToLocalStorage(pendingBackup, false);
+            } catch (e) { }
+        }
+
         const res = await fetch('/api/settings');
         if (res.ok) {
             const data = await res.json();
             if (data.active_profile && data.profiles && data.profiles[data.active_profile]) {
-                const profileData = JSON.parse(JSON.stringify(data.profiles[data.active_profile]));
-                const savedLocation = data.location;
-                const savedNina = data.nina_host;
-                const savedProfiles = data.profiles;
-                const activeProf = data.active_profile;
-
-                Object.assign(data, profileData, {
-                    active_profile: activeProf,
-                    profiles: savedProfiles
-                });
-                if (savedLocation) data.location = savedLocation;
-                if (savedNina !== undefined) data.nina_host = savedNina;
+                const profileEquipment = extractEquipmentProfileData(data.profiles[data.active_profile]);
+                Object.assign(data, profileEquipment);
             }
             delete data.catalogs;
             settings.value = data;
             if (data.client_settings) {
-                updateClientSettings(data.client_settings);
+                updateClientSettings(data.client_settings, false);
             }
+            searchQuery.value = clientSettings.value.search_query || '';
         }
     } catch (e) { console.error(e); }
 };
 
-let saveTimeout = null;
-const saveSettings = (newSettings) => {
-    const payload = { ...settings.value, ...newSettings, client_settings: JSON.parse(JSON.stringify(clientSettings.value)) };
+const saveSettings = (newSettings = {}, immediate = false) => {
+    const cleanNew = newSettings ? JSON.parse(JSON.stringify(newSettings)) : {};
+    delete cleanNew.client_settings;
+    const payload = {
+        ...settings.value,
+        ...cleanNew,
+        client_settings: JSON.parse(JSON.stringify(clientSettings.value))
+    };
     settings.value = payload;
-    if (saveTimeout) clearTimeout(saveTimeout);
-    saveTimeout = setTimeout(async () => {
+    pendingSavePayload = payload;
+    writeBackupToLocalStorage(payload, true);
+
+    if (saveTimeout) {
+        clearTimeout(saveTimeout);
+        saveTimeout = null;
+    }
+
+    const doPost = async () => {
+        const toSend = pendingSavePayload || payload;
+        pendingSavePayload = null;
+        saveTimeout = null;
         try {
-            await fetch('/api/settings', {
+            const res = await fetch('/api/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
+                body: JSON.stringify(toSend),
+                keepalive: true
             });
+            if (res.ok) {
+                writeBackupToLocalStorage(toSend, false);
+            }
         } catch (e) { console.error(e); }
-    }, 500);
+    };
+
+    if (immediate) {
+        doPost();
+    } else {
+        saveTimeout = setTimeout(doPost, 150);
+    }
 };
 
 const startStream = (mode = 'selected') => {
@@ -386,7 +671,7 @@ const startStream = (mode = 'selected') => {
         try {
             const newObjects = JSON.parse(e.data);
             const prevSelected = selectedObject.value;
-            const currentId = prevSelected?.name;
+            const currentId = prevSelected?.name || clientSettings.value?.selected_object || '';
             const sameLocation = locKey && locKey === lastStreamLocationKey;
             lastStreamLocationKey = locKey;
 
@@ -394,6 +679,7 @@ const startStream = (mode = 'selected') => {
             const streamTargetFov = systemFov.value;
 
             for (const item of newObjects) {
+                applySavedStateToObject(item);
                 const prevObj = objectMap.get(item.name);
                 if (prevObj) {
                     if (sameLocation && prevObj.altitude_graph) {
@@ -439,7 +725,7 @@ const startStream = (mode = 'selected') => {
                         found.sun_graph = prevSelected.sun_graph;
                     }
                     selectedObject.value = found;
-                } else {
+                } else if (prevSelected) {
                     selectedObject.value = null;
                 }
             }
@@ -469,6 +755,7 @@ const startStream = (mode = 'selected') => {
                 const savedCustomFramed = o.custom_framed;
 
                 Object.assign(o, d);
+                applySavedStateToObject(o);
 
                 if (keepCurrentImage) {
                     o.image_url = savedUrl;
@@ -685,6 +972,8 @@ watch(streamParams, (newVal, oldVal) => {
 }, { deep: true });
 
 onMounted(async () => {
+    window.addEventListener('beforeunload', flushPendingSave);
+    window.addEventListener('pagehide', flushPendingSave);
     if (window.innerWidth <= 1024) {
         activeLeftTab.value = null;
     }
@@ -692,6 +981,13 @@ onMounted(async () => {
     await fetchSettings();
     startStream('selected');
     isInitializing = false;
+});
+
+onUnmounted(() => {
+    window.removeEventListener('beforeunload', flushPendingSave);
+    window.removeEventListener('pagehide', flushPendingSave);
+    flushPendingSave();
+    stopStream();
 });
 
 watch(clientSettings, () => {
@@ -745,10 +1041,11 @@ watch(clientSettings, () => {
                         :searchQuery="searchQuery"
                         :activeFov="activeFov"
                         @update-fov="handleFovUpdate"
-                        @update-search="searchQuery = $event"
+                        @update-search="handleSearchUpdate"
                         @select-object="selectedObject = $event"
                         @update-settings="saveSettings"
                         @update-client-settings="updateClientSettings"
+                        @update-object-settings="handleObjectSettingsUpdate"
                         @open-mobile-list="toggleMobileList"
                     />
                 </div>
@@ -804,7 +1101,7 @@ watch(clientSettings, () => {
                         :isDownloading="isDownloading"
                         :downloadProgress="downloadProgress"
                         @select="selectedObject = $event"
-                        @update-search="searchQuery = $event"
+                        @update-search="handleSearchUpdate"
                         @update-settings="saveSettings"
                         @update-client-settings="updateClientSettings"
                         @fetch-all="startStream('all')"
