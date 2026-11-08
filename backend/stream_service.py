@@ -33,13 +33,13 @@ def compute_fov_and_setup(
     override_fov: Optional[float] = None,
 ) -> dict:
     """Compute FOV geometry, download FOV, FOV rectangle, and image setup hash."""
-    img_srv = settings.get("image_server", {})
-    img_res = int(settings.get("image_resolution", img_srv.get("resolution", 1024)))
+    img_srv = settings.get("image_server") if isinstance(settings.get("image_server"), dict) else {}
+    img_res = int(img_srv.get("resolution", settings.get("image_resolution", 1024)))
     img_source = validate_image_source(
-        settings.get("image_source", img_srv.get("source", "dss2r"))
+        img_srv.get("source", settings.get("image_source", "dss2r"))
     )
     img_padding = float(settings.get("image_padding", 1.15))
-    img_timeout = int(settings.get("image_timeout", img_srv.get("timeout", 120)))
+    img_timeout = int(img_srv.get("timeout", settings.get("image_timeout", 120)))
 
     fov_w_min, fov_h_min = calculator.calculate_fov(telescope, camera)
     fov_w_deg = fov_w_min / 60.0

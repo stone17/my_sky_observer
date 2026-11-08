@@ -48,7 +48,7 @@ const sortOptions = [
 
 watch(() => props.settings, (newVal) => {
     if (newVal && JSON.stringify(newVal) !== JSON.stringify(localSettings.value)) {
-        localSettings.value = { ...newVal };
+        localSettings.value = JSON.parse(JSON.stringify(newVal));
         if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
         if (!localSettings.value.sort_key) localSettings.value.sort_key = 'time';
     }
@@ -71,7 +71,7 @@ watch(() => props.clientSettings, (newVal) => {
     }
 }, { immediate: true, deep: true });
 
-const updateSettings = () => emit('update-settings', localSettings.value);
+const updateSettings = () => emit('update-settings', { sort_key: localSettings.value.sort_key });
 
 const favoritesSet = computed(() => {
     const list = localClientSettings.value?.favorites;

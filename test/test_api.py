@@ -914,6 +914,59 @@ def test_background_downloads_continue_without_client_and_stop():
     assert stop_res.json()["active"] is False
 
 
+def test_image_resolution_persistence_with_active_profile_and_legacy_keys():
+    """Verify image_server.resolution persists across restarts and is never overwritten by profiles or legacy keys."""
+    from backend.config import invalidate_settings_cache
+    from backend.models import Camera, Telescope
+    from backend.stream_service import compute_fov_and_setup
+
+    # 1. Create a profile that attempts to include a stale image_server
+    prof_payload = {
+        "telescope": {"focal_length": 600},
+        "camera": {"sensor_width": 23.5, "sensor_height": 15.6},
+        "image_padding": 1.15,
+        "image_server": {"resolution": 512, "source": "dss2b", "timeout": 60},
+    }
+    res_prof = client.post("/api/profiles/MyRig", json=prof_payload)
+    assert res_prof.status_code == 200
+
+    # 2. Update settings with active_profile="MyRig" and image_server.resolution=2048
+    res_post = client.post(
+        "/api/settings",
+        json={
+            "active_profile": "MyRig",
+            "image_server": {"resolution": 2048, "source": "dss2ir", "timeout": 180},
+            "image_resolution": 1024,  # Stale flat legacy key should be ignored when image_server.resolution is present
+        },
+    )
+    assert res_post.status_code == 200
+
+    # 3. Simulate restart by invalidating in-memory settings cache
+    invalidate_settings_cache()
+
+    res_get = client.get("/api/settings")
+    assert res_get.status_code == 200
+    loaded = res_get.json()
+    assert loaded["image_server"]["resolution"] == 2048
+    assert loaded["image_server"]["source"] == "dss2ir"
+    assert loaded["image_server"]["timeout"] == 180
+    assert "image_resolution" not in loaded
+    assert "image_server" not in loaded["profiles"].get("MyRig", {})
+
+    # 4. Verify compute_fov_and_setup uses image_server.resolution (2048)
+    fov_info = compute_fov_and_setup(
+        Telescope(focal_length=600),
+        Camera(sensor_width=23.5, sensor_height=15.6),
+        loaded,
+    )
+    assert fov_info["img_res"] == 2048
+    assert "_r2048_" in fov_info["setup_hash"]
+
+    # Restore original test settings
+    save_settings(TEST_SETTINGS)
+
+
+
 
 
 

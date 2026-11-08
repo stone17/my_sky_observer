@@ -152,6 +152,102 @@ def save_favorites(
     return payload
 
 
+_NON_PROFILE_KEYS = (
+    "catalogs",
+    "min_altitude",
+    "sort_key",
+    "client_settings",
+    "location",
+    "nina_host",
+    "active_profile",
+    "profiles",
+    "image_server",
+    "image_resolution",
+    "image_source",
+    "image_timeout",
+)
+
+
+def _normalize_image_server_settings(
+    settings: dict, explicit_source: dict = None
+) -> None:
+    if not isinstance(settings.get("image_server"), dict):
+        settings["image_server"] = {
+            "resolution": 1024,
+            "timeout": 120,
+            "source": "dss2r",
+        }
+
+    img_srv = settings["image_server"]
+    src_has_nested_res = (
+        isinstance(explicit_source, dict)
+        and isinstance(explicit_source.get("image_server"), dict)
+        and "resolution" in explicit_source["image_server"]
+    )
+    src_has_nested_source = (
+        isinstance(explicit_source, dict)
+        and isinstance(explicit_source.get("image_server"), dict)
+        and "source" in explicit_source["image_server"]
+    )
+    src_has_nested_timeout = (
+        isinstance(explicit_source, dict)
+        and isinstance(explicit_source.get("image_server"), dict)
+        and "timeout" in explicit_source["image_server"]
+    )
+
+    if "image_resolution" in settings:
+        flat_res = settings.pop("image_resolution")
+        if flat_res is not None and (
+            "resolution" not in img_srv
+            or (
+                isinstance(explicit_source, dict)
+                and "image_resolution" in explicit_source
+                and not src_has_nested_res
+            )
+        ):
+            img_srv["resolution"] = flat_res
+    if "image_source" in settings:
+        flat_src = settings.pop("image_source")
+        if flat_src is not None and (
+            "source" not in img_srv
+            or (
+                isinstance(explicit_source, dict)
+                and "image_source" in explicit_source
+                and not src_has_nested_source
+            )
+        ):
+            img_srv["source"] = flat_src
+    if "image_timeout" in settings:
+        flat_to = settings.pop("image_timeout")
+        if flat_to is not None and (
+            "timeout" not in img_srv
+            or (
+                isinstance(explicit_source, dict)
+                and "image_timeout" in explicit_source
+                and not src_has_nested_timeout
+            )
+        ):
+            img_srv["timeout"] = flat_to
+
+    try:
+        img_srv["resolution"] = int(img_srv.get("resolution", 1024))
+    except (TypeError, ValueError):
+        img_srv["resolution"] = 1024
+    try:
+        img_srv["timeout"] = int(img_srv.get("timeout", 120))
+    except (TypeError, ValueError):
+        img_srv["timeout"] = 120
+    img_srv["source"] = str(img_srv.get("source") or "dss2r")
+
+
+def _sanitize_profiles_dict(settings: dict) -> None:
+    if "profiles" in settings and isinstance(settings["profiles"], dict):
+        for p in settings["profiles"].values():
+            if isinstance(p, dict):
+                for non_prof_key in _NON_PROFILE_KEYS:
+                    p.pop(non_prof_key, None)
+
+
 def load_settings(
     user_file: str = SETTINGS_USER_FILE,
     default_file: str = SETTINGS_DEFAULT_FILE,
@@ -183,10 +279,12 @@ def load_settings(
             pass
 
     migrated_from_legacy = False
+    user_override_source = None
     if os.path.exists(user_file):
         try:
             with open(user_file, "r") as f:
                 user = yaml.safe_load(f) or {}
+                user_override_source = user
                 for k, v in user.items():
                     if k == "profiles" and isinstance(v, dict):
                         settings["profiles"] = v
@@ -204,6 +302,7 @@ def load_settings(
         try:
             with open(legacy_file, "r") as f:
                 legacy = json.load(f) or {}
+                user_override_source = legacy
                 for k, v in legacy.items():
                     if k == "profiles" and isinstance(v, dict):
                         settings["profiles"] = v
@@ -224,24 +323,13 @@ def load_settings(
     if "client_settings" not in settings or settings["client_settings"] is None:
         settings["client_settings"] = {}
 
+    _normalize_image_server_settings(settings, explicit_source=user_override_source)
+
     for legacy_key in ("filter_active_alt", "filter_na_alt", "min_hours"):
         if legacy_key in settings:
             settings["client_settings"][legacy_key] = settings.pop(legacy_key)
 
-    if "profiles" in settings and isinstance(settings["profiles"], dict):
-        for p in settings["profiles"].values():
-            if isinstance(p, dict):
-                for non_prof_key in (
-                    "catalogs",
-                    "min_altitude",
-                    "sort_key",
-                    "client_settings",
-                    "location",
-                    "nina_host",
-                    "active_profile",
-                    "profiles",
-                ):
-                    p.pop(non_prof_key, None)
+    _sanitize_profiles_dict(settings)
 
     # Sync favorites from dedicated user-folder file (or migrate from settings if file doesn't exist yet)
     cs = settings["client_settings"]
@@ -308,6 +396,9 @@ def save_settings(
             "filter_favorites_only"
         ]
 
+    _normalize_image_server_settings(settings)
+    _sanitize_profiles_dict(settings)
+
     with open(user_file, "w") as f:
         yaml.dump(settings, f, default_flow_style=False)
     _settings_cache["user_file"] = user_file
@@ -343,20 +434,8 @@ def merge_settings_update(current_settings: dict, data: dict) -> dict:
                 current_settings.pop(legacy_key)
             )
 
-    if "profiles" in current_settings and isinstance(current_settings["profiles"], dict):
-        for p in current_settings["profiles"].values():
-            if isinstance(p, dict):
-                for non_prof_key in (
-                    "catalogs",
-                    "min_altitude",
-                    "sort_key",
-                    "client_settings",
-                    "location",
-                    "nina_host",
-                    "active_profile",
-                    "profiles",
-                ):
-                    p.pop(non_prof_key, None)
+    _normalize_image_server_settings(current_settings, explicit_source=data)
+    _sanitize_profiles_dict(current_settings)
 
     return current_settings
 

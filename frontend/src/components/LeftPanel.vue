@@ -138,8 +138,14 @@ watch(() => props.settings, (newVal) => {
         if (localSettings.value.min_altitude === undefined) localSettings.value.min_altitude = 30.0;
         if (localSettings.value.nina_host === undefined) localSettings.value.nina_host = "";
         if (localSettings.value.image_padding === undefined) localSettings.value.image_padding = 1.15;
-        if (!localSettings.value.image_server) {
+        if (!localSettings.value.image_server || typeof localSettings.value.image_server !== 'object') {
             localSettings.value.image_server = { resolution: 1024, timeout: 120, source: 'dss2r' };
+        } else {
+            localSettings.value.image_server = {
+                resolution: Number(localSettings.value.image_server.resolution) || 1024,
+                timeout: Number(localSettings.value.image_server.timeout) || 120,
+                source: localSettings.value.image_server.source || 'dss2r'
+            };
         }
         selectedProfileName.value = localSettings.value.active_profile || null;
     }
@@ -282,7 +288,6 @@ const extractEquipmentProfileData = (src) => {
     if (src?.telescope) out.telescope = JSON.parse(JSON.stringify(src.telescope));
     if (src?.camera) out.camera = JSON.parse(JSON.stringify(src.camera));
     if (src?.image_padding !== undefined) out.image_padding = src.image_padding;
-    if (src?.image_server) out.image_server = JSON.parse(JSON.stringify(src.image_server));
     return out;
 };
 

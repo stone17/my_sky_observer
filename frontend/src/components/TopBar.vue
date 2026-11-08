@@ -99,10 +99,12 @@ onMounted(() => {
 const loadProfile = (name) => {
     if (profiles.value[name]) {
         const profileData = JSON.parse(JSON.stringify(profiles.value[name]));
+        delete profileData.image_server;
 
         // Preserve current location and nina_host
         const savedLocation = localSettings.value.location;
         const savedNina = localSettings.value.nina_host;
+        const savedImageServer = localSettings.value.image_server;
 
         // Merge into localSettings
         localSettings.value = {
@@ -111,13 +113,17 @@ const loadProfile = (name) => {
             active_profile: name // Persist active profile name
         };
 
-        // Restore location and nina_host
+        // Restore location, nina_host, and image_server
         if (savedLocation) {
             localSettings.value.location = savedLocation;
         }
 
         if (savedNina !== undefined) {
             localSettings.value.nina_host = savedNina;
+        }
+
+        if (savedImageServer) {
+            localSettings.value.image_server = savedImageServer;
         }
 
         selectedProfileName.value = name;
@@ -142,6 +148,7 @@ const updateCurrentProfile = async () => {
     delete profileData.active_profile;
     delete profileData.profiles;
     delete profileData.client_settings;
+    delete profileData.image_server;
 
     try {
         await fetch(`/api/profiles/${name}`, {
@@ -168,6 +175,7 @@ const createProfile = async () => {
     delete profileData.active_profile;
     delete profileData.profiles;
     delete profileData.client_settings;
+    delete profileData.image_server;
 
     try {
         await fetch(`/api/profiles/${name}`, {

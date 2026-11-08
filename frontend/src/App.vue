@@ -348,6 +348,7 @@ let eventSource = null;
 let restartTimer = null;
 let isInitializing = true;
 let lastStreamLocationKey = '';
+let lastStreamEquipmentSig = '';
 let objectMap = new Map();
 let saveTimeout = null;
 let pendingSavePayload = null;
@@ -472,8 +473,16 @@ const extractEquipmentProfileData = (prof) => {
     if (prof?.telescope) out.telescope = JSON.parse(JSON.stringify(prof.telescope));
     if (prof?.camera) out.camera = JSON.parse(JSON.stringify(prof.camera));
     if (prof?.image_padding !== undefined) out.image_padding = prof.image_padding;
-    if (prof?.image_server) out.image_server = JSON.parse(JSON.stringify(prof.image_server));
     return out;
+};
+
+const normalizeImageServerConfig = (srv) => {
+    const base = srv && typeof srv === 'object' ? srv : {};
+    return {
+        resolution: Number(base.resolution) || 1024,
+        timeout: Number(base.timeout) || 120,
+        source: base.source || 'dss2r'
+    };
 };
 
 const writeBackupToLocalStorage = (payload, pending = false) => {
@@ -539,6 +548,7 @@ const fetchSettings = async () => {
                 const profileEquipment = extractEquipmentProfileData(data.profiles[data.active_profile]);
                 Object.assign(data, profileEquipment);
             }
+            data.image_server = normalizeImageServerConfig(data.image_server);
             delete data.catalogs;
             settings.value = data;
             if (data.client_settings) {
@@ -564,11 +574,13 @@ const fetchSettings = async () => {
 const saveSettings = (newSettings = {}, immediate = false) => {
     const cleanNew = newSettings ? JSON.parse(JSON.stringify(newSettings)) : {};
     delete cleanNew.client_settings;
+    const hasExplicitSettingsUpdate = Object.keys(cleanNew).length > 0;
     const payload = {
         ...settings.value,
         ...cleanNew,
         client_settings: JSON.parse(JSON.stringify(clientSettings.value))
     };
+    payload.image_server = normalizeImageServerConfig(payload.image_server);
     settings.value = payload;
     pendingSavePayload = payload;
     writeBackupToLocalStorage(payload, true);
@@ -595,7 +607,7 @@ const saveSettings = (newSettings = {}, immediate = false) => {
         } catch (e) { console.error(e); }
     };
 
-    if (immediate) {
+    if (immediate || hasExplicitSettingsUpdate) {
         doPost();
     } else {
         saveTimeout = setTimeout(doPost, 150);
@@ -787,6 +799,7 @@ const startStream = (mode = 'selected') => {
     const locKey = settings.value.location
         ? `${settings.value.location.latitude}_${settings.value.location.longitude}`
         : '';
+    const equipSig = equipmentSignature.value;
     const params = buildStreamQueryParams('selected');
 
     eventSource = new EventSource(`/api/stream-objects?${params.toString()}`);
@@ -828,7 +841,9 @@ const startStream = (mode = 'selected') => {
             const prevSelected = selectedObject.value;
             const currentId = prevSelected?.name || clientSettings.value?.selected_object || '';
             const sameLocation = locKey && locKey === lastStreamLocationKey;
+            const sameEquipment = equipSig && equipSig === lastStreamEquipmentSig;
             lastStreamLocationKey = locKey;
+            lastStreamEquipmentSig = equipSig;
 
             const nextMap = new Map();
             const streamTargetFov = systemFov.value;
@@ -854,8 +869,10 @@ const startStream = (mode = 'selected') => {
                                 Math.abs((prevObj.image_fov || 0) - activeFov.value) < 0.01));
                     if (
                         prevObj.status === 'downloading' ||
-                        isPrevSelectedManual ||
-                        (prevObj.image_url && Math.abs((prevObj.image_fov || 0) - streamTargetFov) < 0.01)
+                        (sameEquipment && (
+                            isPrevSelectedManual ||
+                            (prevObj.image_url && Math.abs((prevObj.image_fov || 0) - streamTargetFov) < 0.01)
+                        ))
                     ) {
                         item.image_url = prevObj.image_url;
                         item.image_fov = prevObj.image_fov;
