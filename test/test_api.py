@@ -852,6 +852,69 @@ def test_filter_and_object_settings_persistence():
     save_settings(TEST_SETTINGS)
 
 
+def test_background_downloads_continue_without_client_and_stop():
+    """Verify background downloads run independently of HTTP/SSE connections and can be stopped."""
+    import asyncio
+    from unittest.mock import patch
+
+    from backend.stream_service import background_download_manager
+
+    downloaded_ids = []
+
+    async def fake_download_image(
+        ra, dec, fov, name, setup_hash, resolution=1024, source="dss2r", timeout=120
+    ):
+        await asyncio.sleep(0.02)
+        downloaded_ids.append(name)
+        return f"/api/cache/{setup_hash}/{name}.jpg"
+
+    async def run_scenario():
+        with patch(
+            "backend.stream_service.download_image", side_effect=fake_download_image
+        ), patch("backend.stream_service.os.path.exists", return_value=False):
+            fov_info = {
+                "setup_hash": "test_bg_hash",
+                "download_fov": 2.0,
+                "img_res": 1024,
+                "img_source": "dss2r",
+                "img_timeout": 120,
+            }
+            items = [
+                {"id": "M31", "ra": 10.68, "dec": 41.26},
+                {"id": "M42", "ra": 83.82, "dec": -5.39},
+                {"id": "M45", "ra": 56.75, "dec": 24.11},
+            ]
+            status = await background_download_manager.start_job(
+                download_list=items, fov_info=fov_info, mode="filtered"
+            )
+            assert status["active"] is True
+            assert status["total"] == 3
+
+            # Wait for background completion with no connected SSE client
+            for _ in range(50):
+                if not background_download_manager.active:
+                    break
+                await asyncio.sleep(0.02)
+
+            final_status = background_download_manager.get_status()
+            assert final_status["active"] is False
+            assert final_status["current"] == 3
+            assert set(downloaded_ids) == {"M31", "M42", "M45"}
+
+    asyncio.run(run_scenario())
+
+    # Also test REST endpoints /api/downloads/status and /api/downloads/stop
+    status_res = client.get("/api/downloads/status")
+    assert status_res.status_code == 200
+    assert status_res.json()["active"] is False
+
+    stop_res = client.post("/api/downloads/stop")
+    assert stop_res.status_code == 200
+    assert stop_res.json()["status"] == "stopped"
+    assert stop_res.json()["active"] is False
+
+
+
 
 
 

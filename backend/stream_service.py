@@ -468,6 +468,368 @@ async def build_single_object_details(
     )
 
 
+def _filter_objects_by_settings(all_objects: List[dict], settings: dict):
+    client_settings = settings.get("client_settings", {})
+    max_mag = settings.get(
+        "max_magnitude", client_settings.get("max_magnitude", 12)
+    )
+    min_size = settings.get("min_size", client_settings.get("min_size", 0))
+    sel_types = settings.get(
+        "selected_types", client_settings.get("selected_types", [])
+    )
+    min_hrs = settings.get("min_hours", client_settings.get("min_hours", 0))
+    min_alt = settings.get("min_altitude", 30.0)
+
+    filter_active_alt = settings.get(
+        "filter_active_alt", client_settings.get("filter_active_alt", True)
+    )
+    filter_na_alt = settings.get(
+        "filter_na_alt", client_settings.get("filter_na_alt", True)
+    )
+    filter_active_mag = settings.get(
+        "filter_active_mag", client_settings.get("filter_active_mag", True)
+    )
+    filter_na_mag = settings.get(
+        "filter_na_mag", client_settings.get("filter_na_mag", True)
+    )
+    filter_active_size = settings.get(
+        "filter_active_size", client_settings.get("filter_active_size", True)
+    )
+    filter_na_size = settings.get(
+        "filter_na_size", client_settings.get("filter_na_size", True)
+    )
+    filter_active_hours = settings.get(
+        "filter_active_hours", client_settings.get("filter_active_hours", True)
+    )
+    filter_na_hours = settings.get(
+        "filter_na_hours", client_settings.get("filter_na_hours", True)
+    )
+
+    sel_types = [t.lower().strip() for t in sel_types]
+
+    def check_obj(o):
+        if filter_active_mag:
+            mag = o.get("magnitude", 99)
+            is_na = mag >= 99
+            if is_na and not filter_na_mag:
+                return False
+            elif not is_na and mag > max_mag:
+                return False
+
+        if filter_active_hours:
+            hrs = o.get("hours_visible")
+            is_na = hrs is None
+            hrs = hrs or 0
+            if is_na and not filter_na_hours:
+                return False
+            elif not is_na and hrs < min_hrs:
+                return False
+
+        if filter_active_size:
+            size = o.get("maj_ax", 0)
+            is_na = size == 0
+            if is_na and not filter_na_size:
+                return False
+            elif not is_na and size < min_size:
+                return False
+
+        if filter_active_alt:
+            alt = o.get("max_altitude")
+            is_na = alt is None
+            alt = alt or 0
+            if is_na and not filter_na_alt:
+                return False
+            elif not is_na and alt < min_alt:
+                return False
+
+        if sel_types:
+            if "__none__" in sel_types:
+                return False
+            o_type = str(o.get("type", "")).strip().lower()
+            if o_type not in sel_types:
+                return False
+        return True
+
+    filtered_candidates = [o for o in all_objects if check_obj(o)]
+    filter_favs_only = bool(
+        settings.get(
+            "filter_favorites_only",
+            client_settings.get("filter_favorites_only", False),
+        )
+    )
+    fav_names = set(
+        settings.get("favorites", client_settings.get("favorites", [])) or []
+    )
+    return filtered_candidates, fav_names, filter_favs_only
+
+
+def _select_download_list(
+    mode: str,
+    all_objects: List[dict],
+    filtered_candidates: List[dict],
+    fav_names: set,
+    filter_favs_only: bool,
+) -> List[dict]:
+    if mode == "all":
+        return list(all_objects)
+    elif mode == "filtered":
+        if filter_favs_only:
+            return [o for o in filtered_candidates if o.get("name") in fav_names]
+        return list(filtered_candidates)
+    return []
+
+
+class BackgroundDownloadManager:
+    """Manages batch image downloads in background asyncio tasks decoupled from HTTP/SSE connections."""
+
+    def __init__(self):
+        self.active: bool = False
+        self.mode: str = "selected"
+        self.current: int = 0
+        self.total: int = 0
+        self.already_cached: int = 0
+        self.total_candidates: int = 0
+        self.setup_hash: str = ""
+        self.image_fov: float = 1.0
+        self.queued_ids: set = set()
+        self.object_updates: Dict[str, dict] = {}
+        self._subscribers: List[asyncio.Queue] = []
+        self._runner_task: Optional[asyncio.Task] = None
+        self._worker_tasks: List[asyncio.Task] = []
+        self._stop_event: asyncio.Event = asyncio.Event()
+        self._lock: asyncio.Lock = asyncio.Lock()
+
+    def subscribe(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue()
+        self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue):
+        if q in self._subscribers:
+            self._subscribers.remove(q)
+
+    def _broadcast(self, msg: Optional[dict]):
+        for q in list(self._subscribers):
+            try:
+                q.put_nowait(msg)
+            except Exception:
+                pass
+
+    def get_status(self) -> dict:
+        return {
+            "active": self.active,
+            "mode": self.mode,
+            "current": self.current,
+            "total": self.total,
+            "already_cached": self.already_cached,
+            "total_candidates": self.total_candidates,
+            "setup_hash": self.setup_hash,
+            "image_fov": self.image_fov,
+            "object_updates": list(self.object_updates.values()),
+        }
+
+    async def stop(self) -> dict:
+        async with self._lock:
+            await self._stop_unlocked()
+            return self.get_status()
+
+    async def _stop_unlocked(self):
+        self._stop_event.set()
+        for t in list(self._worker_tasks):
+            if not t.done():
+                t.cancel()
+        if self._runner_task and not self._runner_task.done():
+            self._runner_task.cancel()
+            try:
+                await self._runner_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._worker_tasks = []
+        self._runner_task = None
+        for obj_id, info in list(self.object_updates.items()):
+            if info.get("status") in ("queued", "downloading"):
+                updated = {"name": obj_id, "status": "pending"}
+                self.object_updates[obj_id] = updated
+                self._broadcast(updated)
+        self.queued_ids.clear()
+        if self.active:
+            self.active = False
+            self._broadcast(None)
+
+    async def start_from_settings(self, settings: dict) -> dict:
+        mode = settings.get("download_mode", "filtered")
+        if mode not in ("filtered", "all"):
+            mode = "filtered"
+        telescope = Telescope(**settings["telescope"])
+        camera = Camera(**settings["camera"])
+        location = Location(**settings["location"])
+        fov_info = compute_fov_and_setup(telescope, camera, settings)
+        all_objects = await asyncio.to_thread(
+            get_sorted_objects, settings, location, telescope, camera
+        )
+        filtered_candidates, fav_names, filter_favs_only = _filter_objects_by_settings(
+            all_objects, settings
+        )
+        download_list = _select_download_list(
+            mode, all_objects, filtered_candidates, fav_names, filter_favs_only
+        )
+        return await self.start_job(
+            download_list=download_list,
+            fov_info=fov_info,
+            mode=mode,
+        )
+
+    async def start_job(
+        self,
+        download_list: List[dict],
+        fov_info: dict,
+        mode: str = "filtered",
+    ) -> dict:
+        async with self._lock:
+            await self._stop_unlocked()
+
+            setup_hash = fov_info["setup_hash"]
+            download_fov = fov_info["download_fov"]
+            img_res = fov_info["img_res"]
+            img_source = fov_info["img_source"]
+            img_timeout = fov_info["img_timeout"]
+
+            to_download = []
+            for obj in download_list:
+                _, filepath, _ = get_cache_info(obj["id"], setup_hash)
+                if not os.path.exists(filepath):
+                    to_download.append(obj)
+
+            total = len(to_download)
+            total_candidates = len(download_list)
+            already_cached = max(0, total_candidates - total)
+
+            self.mode = mode
+            self.current = 0
+            self.total = total
+            self.already_cached = already_cached
+            self.total_candidates = total_candidates
+            self.setup_hash = setup_hash
+            self.image_fov = download_fov
+            self.object_updates = {}
+            self.queued_ids = set()
+
+            if total == 0:
+                self.active = False
+                return self.get_status()
+
+            self._stop_event = asyncio.Event()
+            self.active = True
+            for obj in to_download:
+                obj_id = obj["id"]
+                self.queued_ids.add(obj_id)
+                self.object_updates[obj_id] = {"name": obj_id, "status": "queued"}
+
+            self._runner_task = asyncio.create_task(
+                self._run_downloads(
+                    to_download=to_download,
+                    download_fov=download_fov,
+                    setup_hash=setup_hash,
+                    img_res=img_res,
+                    img_source=img_source,
+                    img_timeout=img_timeout,
+                    total=total,
+                    already_cached=already_cached,
+                    total_candidates=total_candidates,
+                    stop_event=self._stop_event,
+                )
+            )
+            return self.get_status()
+
+    async def _run_downloads(
+        self,
+        to_download: List[dict],
+        download_fov: float,
+        setup_hash: str,
+        img_res: int,
+        img_source: str,
+        img_timeout: int,
+        total: int,
+        already_cached: int,
+        total_candidates: int,
+        stop_event: asyncio.Event,
+    ):
+        semaphore = asyncio.Semaphore(2)
+        completed = 0
+
+        async def worker(obj: dict):
+            nonlocal completed
+            obj_id = obj["id"]
+            if stop_event.is_set():
+                return
+            async with semaphore:
+                if stop_event.is_set():
+                    return
+                downloading_msg = {"name": obj_id, "status": "downloading"}
+                self.object_updates[obj_id] = downloading_msg
+                self._broadcast(downloading_msg)
+
+                try:
+                    url = await download_image(
+                        obj["ra"],
+                        obj["dec"],
+                        download_fov,
+                        obj_id,
+                        setup_hash,
+                        img_res,
+                        img_source,
+                        img_timeout,
+                    )
+                    cached_msg = {
+                        "name": obj_id,
+                        "status": "cached",
+                        "url": url,
+                        "image_fov": download_fov,
+                    }
+                    self.object_updates[obj_id] = cached_msg
+                    self.queued_ids.discard(obj_id)
+                    self._broadcast(cached_msg)
+                except asyncio.CancelledError:
+                    _, filepath, _ = get_cache_info(obj_id, setup_hash)
+                    if not os.path.exists(filepath):
+                        pending_msg = {"name": obj_id, "status": "pending"}
+                        self.object_updates[obj_id] = pending_msg
+                        self._broadcast(pending_msg)
+                    self.queued_ids.discard(obj_id)
+                    raise
+                except Exception:
+                    err_msg = {"name": obj_id, "status": "error"}
+                    self.object_updates[obj_id] = err_msg
+                    self.queued_ids.discard(obj_id)
+                    self._broadcast(err_msg)
+                finally:
+                    if not stop_event.is_set():
+                        completed += 1
+                        self.current = completed
+                        self._broadcast(
+                            {
+                                "progress": True,
+                                "current": completed,
+                                "total": total,
+                                "already_cached": already_cached,
+                                "total_candidates": total_candidates,
+                            }
+                        )
+
+        self._worker_tasks = [asyncio.create_task(worker(o)) for o in to_download]
+        try:
+            if self._worker_tasks:
+                await asyncio.gather(*self._worker_tasks, return_exceptions=True)
+        finally:
+            if not stop_event.is_set():
+                self.active = False
+                self.queued_ids.clear()
+                self._broadcast(None)
+
+
+background_download_manager = BackgroundDownloadManager()
+
+
 class StreamSession:
     def __init__(self, request: Request, settings: dict):
         self.request = request
@@ -614,98 +976,8 @@ class StreamSession:
 
     def prioritize_top_objects(self):
         mode = self.settings.get("download_mode", "selected")
-
-        client_settings = self.settings.get("client_settings", {})
-        max_mag = self.settings.get(
-            "max_magnitude", client_settings.get("max_magnitude", 12)
-        )
-        min_size = self.settings.get("min_size", client_settings.get("min_size", 0))
-        sel_types = self.settings.get(
-            "selected_types", client_settings.get("selected_types", [])
-        )
-        min_hrs = self.settings.get("min_hours", client_settings.get("min_hours", 0))
-        min_alt = self.settings.get("min_altitude", 30.0)
-
-        filter_active_alt = self.settings.get(
-            "filter_active_alt", client_settings.get("filter_active_alt", True)
-        )
-        filter_na_alt = self.settings.get(
-            "filter_na_alt", client_settings.get("filter_na_alt", True)
-        )
-        filter_active_mag = self.settings.get(
-            "filter_active_mag", client_settings.get("filter_active_mag", True)
-        )
-        filter_na_mag = self.settings.get(
-            "filter_na_mag", client_settings.get("filter_na_mag", True)
-        )
-        filter_active_size = self.settings.get(
-            "filter_active_size", client_settings.get("filter_active_size", True)
-        )
-        filter_na_size = self.settings.get(
-            "filter_na_size", client_settings.get("filter_na_size", True)
-        )
-        filter_active_hours = self.settings.get(
-            "filter_active_hours", client_settings.get("filter_active_hours", True)
-        )
-        filter_na_hours = self.settings.get(
-            "filter_na_hours", client_settings.get("filter_na_hours", True)
-        )
-
-        sel_types = [t.lower().strip() for t in sel_types]
-
-        def check_obj(o):
-            if filter_active_mag:
-                mag = o.get("magnitude", 99)
-                is_na = mag >= 99
-                if is_na and not filter_na_mag:
-                    return False
-                elif not is_na and mag > max_mag:
-                    return False
-
-            if filter_active_hours:
-                hrs = o.get("hours_visible")
-                is_na = hrs is None
-                hrs = hrs or 0
-                if is_na and not filter_na_hours:
-                    return False
-                elif not is_na and hrs < min_hrs:
-                    return False
-
-            if filter_active_size:
-                size = o.get("maj_ax", 0)
-                is_na = size == 0
-                if is_na and not filter_na_size:
-                    return False
-                elif not is_na and size < min_size:
-                    return False
-
-            if filter_active_alt:
-                alt = o.get("max_altitude")
-                is_na = alt is None
-                alt = alt or 0
-                if is_na and not filter_na_alt:
-                    return False
-                elif not is_na and alt < min_alt:
-                    return False
-
-            if sel_types:
-                if "__none__" in sel_types:
-                    return False
-                o_type = str(o.get("type", "")).strip().lower()
-                if o_type not in sel_types:
-                    return False
-            return True
-
-        filtered_candidates = [o for o in self.all_objects if check_obj(o)]
-
-        filter_favs_only = bool(
-            self.settings.get(
-                "filter_favorites_only",
-                client_settings.get("filter_favorites_only", False),
-            )
-        )
-        fav_names = set(
-            self.settings.get("favorites", client_settings.get("favorites", [])) or []
+        filtered_candidates, fav_names, filter_favs_only = _filter_objects_by_settings(
+            self.all_objects, self.settings
         )
 
         # Ensure any bookmarked objects are included in top_objects so their altitude graphs are precomputed
@@ -716,17 +988,9 @@ class StreamSession:
         else:
             self.top_objects = filtered_candidates[:500]
 
-        if mode == "all":
-            self.download_list = self.all_objects
-        elif mode == "filtered":
-            if filter_favs_only:
-                self.download_list = [
-                    o for o in filtered_candidates if o.get("name") in fav_names
-                ]
-            else:
-                self.download_list = filtered_candidates
-        else:
-            self.download_list = []
+        self.download_list = _select_download_list(
+            mode, self.all_objects, filtered_candidates, fav_names, filter_favs_only
+        )
 
     def _build_batch_details_sync(self, download_ids: set, min_alt: float) -> List[dict]:
         if not self.top_objects:
@@ -800,6 +1064,8 @@ class StreamSession:
             return
 
         download_ids = set(o["id"] for o in self.download_list)
+        if background_download_manager.active:
+            download_ids = download_ids | set(background_download_manager.queued_ids)
         min_hours_alt = _extract_min_hours_altitude(self.settings)
 
         details_batch = await asyncio.to_thread(
@@ -812,79 +1078,45 @@ class StreamSession:
             yield f"event: object_details\ndata: {json.dumps(detail)}\n\n"
 
     async def stream_downloads(self):
-        to_download = []
-        for obj in self.download_list:
-            _, filepath, _ = get_cache_info(obj["id"], self.setup_hash)
-            if not os.path.exists(filepath):
-                to_download.append(obj)
-
-        total = len(to_download)
-        total_candidates = len(self.download_list)
-        already_cached = max(0, total_candidates - total)
-        if total == 0:
-            return
-
-        yield f"event: download_progress\ndata: {json.dumps({'current': 0, 'total': total, 'already_cached': already_cached, 'total_candidates': total_candidates})}\n\n"
-
-        queue = asyncio.Queue()
-        semaphore = asyncio.Semaphore(2)
-        completed = 0
-
-        async def worker(obj):
-            nonlocal completed
-            async with semaphore:
-                if await self.request.is_disconnected():
+        sub_queue = background_download_manager.subscribe()
+        try:
+            if self.download_list:
+                mode = self.settings.get("download_mode", "filtered")
+                status = await background_download_manager.start_job(
+                    download_list=self.download_list,
+                    fov_info=self.fov_info,
+                    mode=mode if mode in ("filtered", "all") else "filtered",
+                )
+                if status["total"] == 0:
                     return
-                obj_id = obj["id"]
-                await queue.put({"name": obj_id, "status": "downloading"})
-
-                try:
-                    url = await download_image(
-                        obj["ra"],
-                        obj["dec"],
-                        self.download_fov,
-                        obj_id,
-                        self.setup_hash,
-                        self.img_res,
-                        self.img_source,
-                        self.img_timeout,
-                    )
-                    await queue.put(
-                        {
-                            "name": obj_id,
-                            "status": "cached",
-                            "url": url,
-                            "image_fov": self.download_fov,
-                        }
-                    )
-                except Exception:
-                    await queue.put({"name": obj_id, "status": "error"})
-                finally:
-                    completed += 1
-                    await queue.put(
-                        {
-                            "progress": True,
-                            "current": completed,
-                            "total": total,
-                            "already_cached": already_cached,
-                            "total_candidates": total_candidates,
-                        }
-                    )
-
-        tasks = [asyncio.create_task(worker(o)) for o in to_download]
-
-        async def monitor():
-            if tasks:
-                await asyncio.gather(*tasks)
-            await queue.put(None)
-
-        asyncio.create_task(monitor())
-
-        while True:
-            msg = await queue.get()
-            if msg is None:
-                break
-            if "progress" in msg:
-                yield f"event: download_progress\ndata: {json.dumps(msg)}\n\n"
+                yield (
+                    f"event: download_progress\ndata: "
+                    f"{json.dumps({'current': 0, 'total': status['total'], 'already_cached': status['already_cached'], 'total_candidates': status['total_candidates']})}\n\n"
+                )
             else:
-                yield f"event: image_status\ndata: {json.dumps(msg)}\n\n"
+                if not background_download_manager.active:
+                    return
+                status = background_download_manager.get_status()
+                yield (
+                    f"event: download_progress\ndata: "
+                    f"{json.dumps({'current': status['current'], 'total': status['total'], 'already_cached': status['already_cached'], 'total_candidates': status['total_candidates']})}\n\n"
+                )
+
+            while True:
+                if await self.request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(sub_queue.get(), timeout=0.25)
+                except asyncio.TimeoutError:
+                    if not background_download_manager.active and sub_queue.empty():
+                        break
+                    continue
+
+                if msg is None:
+                    break
+                if "progress" in msg:
+                    yield f"event: download_progress\ndata: {json.dumps(msg)}\n\n"
+                else:
+                    yield f"event: image_status\ndata: {json.dumps(msg)}\n\n"
+        finally:
+            background_download_manager.unsubscribe(sub_queue)

@@ -49,6 +49,7 @@ from .models import (
 from .stream_service import (
     StreamSession,
     apply_stream_query_overrides,
+    background_download_manager,
     build_single_object_details,
     calculator,
     catalogs,
@@ -235,6 +236,93 @@ async def stream_objects_endpoint(
     )
     session = StreamSession(request, settings)
     return StreamingResponse(session.generate_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/downloads/start")
+async def start_background_downloads(request: Request):
+    base = load_settings()
+    body = {}
+    try:
+        raw_body = await request.body()
+        if raw_body:
+            parsed = await request.json()
+            if isinstance(parsed, dict):
+                body = parsed
+    except Exception:
+        body = {}
+
+    qp = request.query_params
+    focal_length = float(
+        qp.get(
+            "focal_length",
+            body.get("focal_length", base.get("telescope", {}).get("focal_length", 400)),
+        )
+    )
+    sensor_width = float(
+        qp.get(
+            "sensor_width",
+            body.get("sensor_width", base.get("camera", {}).get("sensor_width", 23.5)),
+        )
+    )
+    sensor_height = float(
+        qp.get(
+            "sensor_height",
+            body.get("sensor_height", base.get("camera", {}).get("sensor_height", 15.6)),
+        )
+    )
+    latitude = float(
+        qp.get(
+            "latitude",
+            body.get("latitude", base.get("location", {}).get("latitude", 52.0)),
+        )
+    )
+    longitude = float(
+        qp.get(
+            "longitude",
+            body.get("longitude", base.get("location", {}).get("longitude", 10.0)),
+        )
+    )
+    sort_key = str(
+        qp.get(
+            "sort_key",
+            body.get("sort_key", base.get("client_settings", {}).get("sort_key", "time")),
+        )
+    )
+    catalogs_val = qp.get("catalogs", body.get("catalogs", ""))
+    if isinstance(catalogs_val, list):
+        catalogs_str = ",".join(str(c) for c in catalogs_val)
+    else:
+        catalogs_str = str(catalogs_val or "")
+
+    settings = apply_stream_query_overrides(
+        base,
+        request,
+        focal_length,
+        sensor_width,
+        sensor_height,
+        latitude,
+        longitude,
+        catalogs_str,
+        sort_key,
+    )
+    if "download_mode" in body:
+        settings["download_mode"] = str(body["download_mode"])
+    elif "mode" in body:
+        settings["download_mode"] = str(body["mode"])
+
+    status = await background_download_manager.start_from_settings(settings)
+    return JSONResponse(content={"status": "started", **status})
+
+
+@app.get("/api/downloads/status")
+def get_background_downloads_status():
+    return JSONResponse(content=background_download_manager.get_status())
+
+
+@app.post("/api/downloads/stop")
+async def stop_background_downloads():
+    status = await background_download_manager.stop()
+    return JSONResponse(content={"status": "stopped", **status})
 
 
 @app.get("/api/object-details/{obj_id}")

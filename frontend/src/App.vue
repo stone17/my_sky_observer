@@ -602,32 +602,13 @@ const saveSettings = (newSettings = {}, immediate = false) => {
     }
 };
 
-const startStream = (mode = 'selected') => {
-    if (restartTimer) {
-        clearTimeout(restartTimer);
-        restartTimer = null;
-    }
-    if (eventSource) eventSource.close();
-    streamStatus.value = 'Connecting...';
-    isLoading.value = true;
-
-    if (mode === 'filtered' || mode === 'all') {
-        isDownloading.value = true;
-        downloadProgress.value = "Starting...";
-    } else {
-        isDownloading.value = false;
-        downloadProgress.value = "";
-    }
-
+const buildStreamQueryParams = (mode = 'selected') => {
     const params = new URLSearchParams();
     if (settings.value.telescope) params.append('focal_length', settings.value.telescope.focal_length);
     if (settings.value.camera) {
         params.append('sensor_width', settings.value.camera.sensor_width);
         params.append('sensor_height', settings.value.camera.sensor_height);
     }
-    const locKey = settings.value.location
-        ? `${settings.value.location.latitude}_${settings.value.location.longitude}`
-        : '';
     if (settings.value.location) {
         params.append('latitude', settings.value.location.latitude);
         params.append('longitude', settings.value.location.longitude);
@@ -678,6 +659,135 @@ const startStream = (mode = 'selected') => {
     if (Array.isArray(clientSettings.value.favorites) && clientSettings.value.favorites.length > 0) {
         params.append('favorites', clientSettings.value.favorites.join(','));
     }
+    return params;
+};
+
+let downloadPollTimer = null;
+
+const stopDownloadPolling = () => {
+    if (downloadPollTimer) {
+        clearInterval(downloadPollTimer);
+        downloadPollTimer = null;
+    }
+};
+
+const applyDownloadObjectUpdate = (s) => {
+    if (!s || !s.name) return;
+    const o = objectMap.get(s.name) || objects.value.find(obj => obj.name === s.name);
+    if (o) {
+        const isSelected = selectedObject.value && selectedObject.value.name === o.name;
+        if (isSelected && isManualFov.value) {
+            o.status = s.status;
+        } else {
+            o.status = s.status;
+            if (s.url) o.image_url = s.url;
+            if (s.image_fov) o.image_fov = s.image_fov;
+        }
+    }
+};
+
+const applyDownloadStatus = (statusData) => {
+    if (!statusData || typeof statusData !== 'object') return;
+    if (Array.isArray(statusData.object_updates)) {
+        for (const upd of statusData.object_updates) {
+            applyDownloadObjectUpdate(upd);
+        }
+    }
+    if (statusData.active) {
+        isDownloading.value = true;
+        if (statusData.total > 0) {
+            if (statusData.already_cached && statusData.already_cached > 0) {
+                downloadProgress.value = `Downloading ${statusData.current} of ${statusData.total} (${statusData.already_cached} cached)`;
+            } else {
+                downloadProgress.value = `Downloading ${statusData.current} of ${statusData.total}`;
+            }
+        } else {
+            downloadProgress.value = "Starting...";
+        }
+        ensureDownloadPolling();
+    } else {
+        isDownloading.value = false;
+        downloadProgress.value = "";
+        stopDownloadPolling();
+    }
+};
+
+const pollDownloadStatus = async () => {
+    try {
+        const res = await fetch('/api/downloads/status');
+        if (res.ok) {
+            const data = await res.json();
+            applyDownloadStatus(data);
+        }
+    } catch (e) {
+        // Ignore transient network errors during poll
+    }
+};
+
+const ensureDownloadPolling = () => {
+    if (!downloadPollTimer) {
+        downloadPollTimer = setInterval(pollDownloadStatus, 1000);
+    }
+};
+
+const startBackgroundDownload = async (mode = 'filtered') => {
+    isDownloading.value = true;
+    downloadProgress.value = "Starting...";
+    const params = buildStreamQueryParams(mode);
+    try {
+        const res = await fetch(`/api/downloads/start?${params.toString()}`, {
+            method: 'POST',
+            keepalive: true
+        });
+        if (res.ok) {
+            const data = await res.json();
+            applyDownloadStatus(data);
+        } else {
+            isDownloading.value = false;
+            downloadProgress.value = "";
+        }
+    } catch (e) {
+        console.error(e);
+        isDownloading.value = false;
+        downloadProgress.value = "";
+    }
+};
+
+const stopBackgroundDownload = async () => {
+    stopDownloadPolling();
+    isDownloading.value = false;
+    downloadProgress.value = "";
+    try {
+        const res = await fetch('/api/downloads/stop', {
+            method: 'POST',
+            keepalive: true
+        });
+        if (res.ok) {
+            const data = await res.json();
+            applyDownloadStatus(data);
+        }
+    } catch (e) {
+        console.error(e);
+    }
+};
+
+const startStream = (mode = 'selected') => {
+    if (mode === 'filtered' || mode === 'all') {
+        startBackgroundDownload(mode);
+        return;
+    }
+    if (restartTimer) {
+        clearTimeout(restartTimer);
+        restartTimer = null;
+    }
+    if (eventSource) eventSource.close();
+    streamStatus.value = 'Connecting...';
+    isLoading.value = true;
+
+    const locKey = settings.value.location
+        ? `${settings.value.location.latitude}_${settings.value.location.longitude}`
+        : '';
+    const params = buildStreamQueryParams('selected');
 
     eventSource = new EventSource(`/api/stream-objects?${params.toString()}`);
 
@@ -685,11 +795,15 @@ const startStream = (mode = 'selected') => {
     eventSource.addEventListener('download_progress', (e) => {
         try {
             const p = JSON.parse(e.data);
-            if (p.current !== undefined) {
+            if (p.current !== undefined && p.total !== undefined) {
+                isDownloading.value = p.current < p.total;
                 if (p.already_cached && p.already_cached > 0) {
                     downloadProgress.value = `Downloading ${p.current} of ${p.total} (${p.already_cached} cached)`;
                 } else {
                     downloadProgress.value = `Downloading ${p.current} of ${p.total}`;
+                }
+                if (isDownloading.value) {
+                    ensureDownloadPolling();
                 }
             }
         } catch (err) { }
@@ -816,25 +930,30 @@ const startStream = (mode = 'selected') => {
 
     eventSource.addEventListener('image_status', (e) => {
         const s = JSON.parse(e.data);
-        const o = objectMap.get(s.name) || objects.value.find(obj => obj.name === s.name);
-        if (o) {
-            const isSelected = selectedObject.value && selectedObject.value.name === o.name;
-            if (isSelected && isManualFov.value) {
-                o.status = s.status;
-            } else {
-                o.status = s.status;
-                if (s.url) o.image_url = s.url;
-                if (s.image_fov) o.image_fov = s.image_fov;
-            }
-        }
+        applyDownloadObjectUpdate(s);
     });
 
-    eventSource.addEventListener('close', () => { streamStatus.value = 'Stream Complete'; isDownloading.value = false; isLoading.value = false; eventSource.close(); });
-    eventSource.addEventListener('error', () => { streamStatus.value = 'Error/Disconnected'; isDownloading.value = false; isLoading.value = false; eventSource?.close(); });
+    eventSource.addEventListener('close', () => {
+        streamStatus.value = 'Stream Complete';
+        isLoading.value = false;
+        eventSource.close();
+        pollDownloadStatus();
+    });
+    eventSource.addEventListener('error', () => {
+        streamStatus.value = 'Error/Disconnected';
+        isLoading.value = false;
+        eventSource?.close();
+        pollDownloadStatus();
+    });
 };
 
 const stopStream = () => {
-    if (eventSource) { eventSource.close(); eventSource = null; streamStatus.value = 'Stopped'; isDownloading.value = false; isLoading.value = false; }
+    if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+        streamStatus.value = 'Stopped';
+        isLoading.value = false;
+    }
 };
 
 const handlePurge = () => { objectMap.clear(); objects.value = []; selectedObject.value = null; startStream('selected'); };
@@ -1021,6 +1140,7 @@ onMounted(async () => {
     isInitializing = true;
     await fetchSettings();
     startStream('selected');
+    await pollDownloadStatus();
     isInitializing = false;
 });
 
@@ -1028,6 +1148,7 @@ onUnmounted(() => {
     window.removeEventListener('beforeunload', flushPendingSave);
     window.removeEventListener('pagehide', flushPendingSave);
     flushPendingSave();
+    stopDownloadPolling();
     stopStream();
 });
 
@@ -1066,9 +1187,9 @@ watch(clientSettings, () => {
                 @start-stream="startStream"
                 @stop-stream="stopStream"
                 @purge-cache="handlePurge"
-                @download-filtered="startStream('filtered')"
-                @download-all="startStream('all')"
-                @stop-download="stopStream"
+                @download-filtered="startBackgroundDownload('filtered')"
+                @download-all="startBackgroundDownload('all')"
+                @stop-download="stopBackgroundDownload"
             />
 
             <!-- Center Framing Canvas -->
@@ -1145,9 +1266,9 @@ watch(clientSettings, () => {
                         @update-search="handleSearchUpdate"
                         @update-settings="saveSettings"
                         @update-client-settings="updateClientSettings"
-                        @fetch-all="startStream('all')"
-                        @download-filtered="startStream('filtered')"
-                        @stop-download="stopStream"
+                        @fetch-all="startBackgroundDownload('all')"
+                        @download-filtered="startBackgroundDownload('filtered')"
+                        @stop-download="stopBackgroundDownload"
                     />
                 </div>
             </aside>
