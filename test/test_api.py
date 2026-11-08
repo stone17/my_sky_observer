@@ -12,7 +12,16 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch, AsyncMock, Mock
 
 # It's better to test the app directly using the TestClient
-from backend.main import app, load_settings, save_settings, CACHE_DIR
+from backend.main import (
+    app,
+    load_settings,
+    save_settings,
+    load_favorites,
+    save_favorites,
+    invalidate_settings_cache,
+    FAVORITES_USER_FILE,
+    CACHE_DIR,
+)
 client = TestClient(app)
 
 # --- Test Data ---
@@ -33,6 +42,12 @@ def setup_and_teardown():
     if had_user_settings:
         shutil.copy2("settings_user.yaml", backup_file)
 
+    fav_backup_file = FAVORITES_USER_FILE + ".pytest_bak"
+    had_user_favorites = os.path.exists(FAVORITES_USER_FILE)
+    if had_user_favorites:
+        shutil.copy2(FAVORITES_USER_FILE, fav_backup_file)
+        os.remove(FAVORITES_USER_FILE)
+
     if os.path.exists("settings.json"):
         os.remove("settings.json")
 
@@ -48,6 +63,14 @@ def setup_and_teardown():
         os.remove("settings_user.yaml")
     if os.path.exists(backup_file):
         os.remove(backup_file)
+
+    if had_user_favorites and os.path.exists(fav_backup_file):
+        os.makedirs(os.path.dirname(os.path.abspath(FAVORITES_USER_FILE)), exist_ok=True)
+        shutil.move(fav_backup_file, FAVORITES_USER_FILE)
+    elif os.path.exists(FAVORITES_USER_FILE):
+        os.remove(FAVORITES_USER_FILE)
+    if os.path.exists(fav_backup_file):
+        os.remove(fav_backup_file)
 
 def test_get_presets():
     """Tests the /api/presets endpoint."""
@@ -79,6 +102,45 @@ def test_set_settings():
     assert loaded_settings["telescope"]["focal_length"] == 1200
     
     # Restore original test settings
+    save_favorites([], filter_favorites_only=False)
+    save_settings(TEST_SETTINGS)
+
+
+def test_favorites_user_folder_file_persistence():
+    """Verify that favorites are stored in the user folder file and survive restarts."""
+    user_home = os.path.expanduser("~")
+    assert os.path.abspath(FAVORITES_USER_FILE).startswith(os.path.abspath(user_home))
+
+    # 1. Save via /api/favorites endpoint
+    post_res = client.post(
+        "/api/favorites",
+        json={"favorites": ["NGC 7000", "M 31", "NGC 7000"], "filter_favorites_only": True},
+    )
+    assert post_res.status_code == 200
+    post_data = post_res.json()
+    assert post_data["favorites"] == ["NGC 7000", "M 31"]
+    assert post_data["filter_favorites_only"] is True
+    assert os.path.exists(FAVORITES_USER_FILE)
+
+    # 2. Simulate app restart by invalidating in-memory settings cache and removing local settings_user.yaml
+    invalidate_settings_cache()
+    if os.path.exists("settings_user.yaml"):
+        os.remove("settings_user.yaml")
+
+    # 3. Verify /api/favorites and /api/settings both reload favorites from the user folder file
+    fav_res = client.get("/api/favorites")
+    assert fav_res.status_code == 200
+    assert fav_res.json()["favorites"] == ["NGC 7000", "M 31"]
+    assert fav_res.json()["filter_favorites_only"] is True
+
+    settings_res = client.get("/api/settings")
+    assert settings_res.status_code == 200
+    cs = settings_res.json()["client_settings"]
+    assert cs["favorites"] == ["NGC 7000", "M 31"]
+    assert cs["filter_favorites_only"] is True
+
+    # Clean up back to test state
+    save_favorites([], filter_favorites_only=False)
     save_settings(TEST_SETTINGS)
 
 def test_geocode_city():

@@ -13,14 +13,18 @@ from .astro_utils import AstroCalculator, auto_stretch_image
 from .config import (
     CACHE_DIR,
     COMPONENTS_FILE,
+    FAVORITES_USER_FILE,
     SETTINGS_DEFAULT_FILE,
     SETTINGS_JSON_LEGACY,
     SETTINGS_USER_FILE,
+    USER_DATA_DIR,
     get_resource_path,
     invalidate_settings_cache,
+    load_favorites,
     load_presets,
     load_settings,
     merge_settings_update,
+    save_favorites,
     save_settings,
     validate_nina_host,
 )
@@ -100,6 +104,38 @@ async def set_settings(request: Request):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     save_settings(updated_settings)
     return {"status": "ok"}
+
+
+@app.get("/api/favorites")
+def get_favorites_endpoint():
+    settings = load_settings()
+    cs = settings.get("client_settings", {})
+    fav_data = load_favorites()
+    if not os.path.exists(FAVORITES_USER_FILE) and cs.get("favorites"):
+        fav_data["favorites"] = cs.get("favorites", [])
+        fav_data["filter_favorites_only"] = bool(cs.get("filter_favorites_only", False))
+    return JSONResponse(content=fav_data)
+
+
+@app.post("/api/favorites")
+async def set_favorites_endpoint(request: Request):
+    data = await request.json()
+    if isinstance(data, list):
+        favs = data
+        filt = None
+    elif isinstance(data, dict):
+        favs = data.get("favorites", [])
+        filt = data.get("filter_favorites_only")
+    else:
+        raise HTTPException(status_code=400, detail="Invalid favorites payload")
+
+    saved_favs = save_favorites(favs, filter_favorites_only=filt)
+    current_settings = load_settings()
+    cs = current_settings.setdefault("client_settings", {})
+    cs["favorites"] = saved_favs["favorites"]
+    cs["filter_favorites_only"] = saved_favs["filter_favorites_only"]
+    save_settings(current_settings)
+    return JSONResponse(content={"status": "ok", **saved_favs})
 
 
 @app.get("/api/profiles")

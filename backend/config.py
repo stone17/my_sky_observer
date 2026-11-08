@@ -11,6 +11,8 @@ SETTINGS_USER_FILE = "settings_user.yaml"
 SETTINGS_DEFAULT_FILE = "settings_default.yaml"
 SETTINGS_JSON_LEGACY = "settings.json"
 COMPONENTS_FILE = "components.yaml"
+USER_DATA_DIR = os.path.join(os.path.expanduser("~"), ".my_sky_observer")
+FAVORITES_USER_FILE = os.path.join(USER_DATA_DIR, "favorites.yaml")
 
 _HOSTNAME_RE = re.compile(
     r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?"
@@ -54,6 +56,8 @@ _settings_cache = {
     "user_file": None,
     "user_mtime": None,
     "legacy_mtime": None,
+    "favorites_file": None,
+    "favorites_mtime": None,
     "data": None,
 }
 
@@ -75,21 +79,97 @@ def invalidate_settings_cache():
     _settings_cache["user_file"] = None
     _settings_cache["user_mtime"] = None
     _settings_cache["legacy_mtime"] = None
+    _settings_cache["favorites_file"] = None
+    _settings_cache["favorites_mtime"] = None
     _settings_cache["data"] = None
+
+
+def _normalize_favorites_list(raw_favorites) -> list:
+    if not isinstance(raw_favorites, list):
+        return []
+    seen = set()
+    normalized = []
+    for item in raw_favorites:
+        name = str(item).strip() if item is not None else ""
+        if name and name not in seen:
+            seen.add(name)
+            normalized.append(name)
+    return normalized
+
+
+def load_favorites(favorites_file: str = None) -> dict:
+    if favorites_file is None:
+        favorites_file = FAVORITES_USER_FILE
+    result = {"favorites": [], "filter_favorites_only": False}
+    if os.path.exists(favorites_file):
+        try:
+            with open(favorites_file, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            if isinstance(data, list):
+                result["favorites"] = _normalize_favorites_list(data)
+            elif isinstance(data, dict):
+                result["favorites"] = _normalize_favorites_list(data.get("favorites", []))
+                if "filter_favorites_only" in data:
+                    result["filter_favorites_only"] = bool(data["filter_favorites_only"])
+        except Exception:
+            pass
+    return result
+
+
+def save_favorites(
+    favorites: list,
+    filter_favorites_only: bool = None,
+    favorites_file: str = None,
+) -> dict:
+    if favorites_file is None:
+        favorites_file = FAVORITES_USER_FILE
+    existing = load_favorites(favorites_file=favorites_file)
+    norm_favs = _normalize_favorites_list(favorites)
+    eff_filter = (
+        bool(filter_favorites_only)
+        if filter_favorites_only is not None
+        else existing.get("filter_favorites_only", False)
+    )
+    payload = {
+        "favorites": norm_favs,
+        "filter_favorites_only": eff_filter,
+    }
+    parent_dir = os.path.dirname(os.path.abspath(favorites_file))
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+    tmp_file = f"{favorites_file}.tmp"
+    with open(tmp_file, "w", encoding="utf-8") as f:
+        yaml.dump(payload, f, default_flow_style=False)
+    os.replace(tmp_file, favorites_file)
+
+    if _settings_cache["data"] is not None:
+        cs = _settings_cache["data"].setdefault("client_settings", {})
+        cs["favorites"] = list(norm_favs)
+        cs["filter_favorites_only"] = eff_filter
+        _settings_cache["favorites_file"] = favorites_file
+        _settings_cache["favorites_mtime"] = _get_file_mtime(favorites_file)
+
+    return payload
 
 
 def load_settings(
     user_file: str = SETTINGS_USER_FILE,
     default_file: str = SETTINGS_DEFAULT_FILE,
     legacy_file: str = SETTINGS_JSON_LEGACY,
+    favorites_file: str = None,
 ) -> dict:
+    if favorites_file is None:
+        favorites_file = FAVORITES_USER_FILE
     current_mtime = _get_file_mtime(user_file)
     legacy_mtime = _get_file_mtime(legacy_file)
+    fav_mtime = _get_file_mtime(favorites_file)
     if (
         _settings_cache["data"] is not None
         and _settings_cache["user_file"] == user_file
         and _settings_cache["user_mtime"] == current_mtime
         and _settings_cache["legacy_mtime"] == legacy_mtime
+        and _settings_cache["favorites_file"] == favorites_file
+        and _settings_cache["favorites_mtime"] == fav_mtime
     ):
         return copy.deepcopy(_settings_cache["data"])
 
@@ -163,23 +243,78 @@ def load_settings(
                 ):
                     p.pop(non_prof_key, None)
 
+    # Sync favorites from dedicated user-folder file (or migrate from settings if file doesn't exist yet)
+    cs = settings["client_settings"]
+    if os.path.exists(favorites_file):
+        fav_data = load_favorites(favorites_file=favorites_file)
+        cs["favorites"] = fav_data["favorites"]
+        cs["filter_favorites_only"] = fav_data["filter_favorites_only"]
+    else:
+        existing_favs = _normalize_favorites_list(cs.get("favorites", []))
+        existing_filter = bool(cs.get("filter_favorites_only", False))
+        cs["favorites"] = existing_favs
+        cs["filter_favorites_only"] = existing_filter
+        if existing_favs or existing_filter:
+            try:
+                save_favorites(
+                    existing_favs,
+                    filter_favorites_only=existing_filter,
+                    favorites_file=favorites_file,
+                )
+            except Exception:
+                pass
+
     if migrated_from_legacy:
-        save_settings(settings, user_file=user_file)
+        save_settings(settings, user_file=user_file, favorites_file=favorites_file)
         current_mtime = _get_file_mtime(user_file)
 
+    fav_mtime = _get_file_mtime(favorites_file)
     _settings_cache["user_file"] = user_file
     _settings_cache["user_mtime"] = current_mtime
     _settings_cache["legacy_mtime"] = legacy_mtime
+    _settings_cache["favorites_file"] = favorites_file
+    _settings_cache["favorites_mtime"] = fav_mtime
     _settings_cache["data"] = copy.deepcopy(settings)
     return settings
 
 
-def save_settings(settings: dict, user_file: str = SETTINGS_USER_FILE):
+def save_settings(
+    settings: dict,
+    user_file: str = SETTINGS_USER_FILE,
+    favorites_file: str = None,
+):
+    if favorites_file is None:
+        favorites_file = FAVORITES_USER_FILE
+
+    cs = settings.get("client_settings")
+    if isinstance(cs, dict) and ("favorites" in cs or "filter_favorites_only" in cs):
+        favs = _normalize_favorites_list(cs.get("favorites", []))
+        filt = cs.get("filter_favorites_only")
+        cs["favorites"] = favs
+        if filt is not None:
+            cs["filter_favorites_only"] = bool(filt)
+        try:
+            save_favorites(
+                favs,
+                filter_favorites_only=cs.get("filter_favorites_only"),
+                favorites_file=favorites_file,
+            )
+        except Exception:
+            pass
+    elif os.path.exists(favorites_file):
+        fav_data = load_favorites(favorites_file=favorites_file)
+        settings.setdefault("client_settings", {})["favorites"] = fav_data["favorites"]
+        settings["client_settings"]["filter_favorites_only"] = fav_data[
+            "filter_favorites_only"
+        ]
+
     with open(user_file, "w") as f:
         yaml.dump(settings, f, default_flow_style=False)
     _settings_cache["user_file"] = user_file
     _settings_cache["user_mtime"] = _get_file_mtime(user_file)
     _settings_cache["legacy_mtime"] = _get_file_mtime(SETTINGS_JSON_LEGACY)
+    _settings_cache["favorites_file"] = favorites_file
+    _settings_cache["favorites_mtime"] = _get_file_mtime(favorites_file)
     _settings_cache["data"] = copy.deepcopy(settings)
 
 

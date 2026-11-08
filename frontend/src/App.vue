@@ -426,15 +426,44 @@ const handleSearchUpdate = (val) => {
     }
 };
 
+const persistFavoritesImmediate = async (favorites, filterFavoritesOnly) => {
+    try {
+        await fetch('/api/favorites', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                favorites: Array.isArray(favorites) ? favorites : [],
+                filter_favorites_only: Boolean(filterFavoritesOnly)
+            }),
+            keepalive: true
+        });
+    } catch (e) {
+        console.error(e);
+    }
+};
+
 const updateClientSettings = (newClientSettings, shouldSave = true) => {
     if (!newClientSettings) return;
     const cloned = JSON.parse(JSON.stringify(newClientSettings));
+    const prevFavs = JSON.stringify(clientSettings.value.favorites || []);
+    const prevFavFilter = Boolean(clientSettings.value.filter_favorites_only);
     Object.assign(clientSettings.value, cloned);
     if (cloned.search_query !== undefined && searchQuery.value !== cloned.search_query) {
         searchQuery.value = cloned.search_query || '';
     }
+    const nextFavs = JSON.stringify(clientSettings.value.favorites || []);
+    const nextFavFilter = Boolean(clientSettings.value.filter_favorites_only);
+    const favChanged = prevFavs !== nextFavs || prevFavFilter !== nextFavFilter;
     if (shouldSave && !isInitializing) {
-        saveSettings({});
+        if (favChanged) {
+            persistFavoritesImmediate(
+                clientSettings.value.favorites,
+                clientSettings.value.filter_favorites_only
+            );
+            saveSettings({}, true);
+        } else {
+            saveSettings({});
+        }
     }
 };
 
@@ -515,6 +544,18 @@ const fetchSettings = async () => {
             if (data.client_settings) {
                 updateClientSettings(data.client_settings, false);
             }
+            try {
+                const favRes = await fetch('/api/favorites');
+                if (favRes.ok) {
+                    const favData = await favRes.json();
+                    if (Array.isArray(favData?.favorites)) {
+                        clientSettings.value.favorites = favData.favorites;
+                    }
+                    if (favData?.filter_favorites_only !== undefined) {
+                        clientSettings.value.filter_favorites_only = Boolean(favData.filter_favorites_only);
+                    }
+                }
+            } catch (e) { }
             searchQuery.value = clientSettings.value.search_query || '';
         }
     } catch (e) { console.error(e); }
