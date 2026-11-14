@@ -31,34 +31,140 @@ class AstroCalculator:
         fov_height = fov_height_rad * (180 / math.pi) * 60
         return fov_width, fov_height
 
+    def _find_solar_crossings(
+        self,
+        earth_location: EarthLocation,
+        ref_time: Time,
+        horizon_deg: float = 0.0,
+        window_before_h: float = 30.0,
+        window_after_h: float = 30.0,
+        step_min: float = 10.0,
+    ) -> Tuple[List[Time], List[Time]]:
+        """
+        Finds upward (rise) and downward (set) solar altitude crossings of `horizon_deg`
+        over `[ref_time - window_before_h, ref_time + window_after_h]` using a padded
+        vectorized grid + bracketed secant refinement (immune to astroplan boundary bugs).
+        """
+        total_h = window_before_h + window_after_h
+        n_pts = max(int(round(total_h * 60.0 / step_min)) + 1, 8)
+        offsets_h = np.linspace(-window_before_h, window_after_h, n_pts)
+        grid = ref_time + offsets_h * u.hour
+        alts = (
+            get_sun(grid)
+            .transform_to(AltAz(obstime=grid, location=earth_location))
+            .alt.deg
+            - horizon_deg
+        )
+
+        diff_sign = (alts[:-1] <= 0.0) != (alts[1:] <= 0.0)
+        idxs = np.where(diff_sign)[0]
+        if len(idxs) == 0:
+            return [], []
+
+        t_a = offsets_h[idxs].astype(float)
+        t_b = offsets_h[idxs + 1].astype(float)
+        y_a = alts[idxs].astype(float)
+        y_b = alts[idxs + 1].astype(float)
+        is_rise = y_b > y_a
+
+        for _ in range(2):
+            denom = np.where(np.abs(y_b - y_a) > 1e-12, y_b - y_a, 1e-12)
+            t_m = np.clip(
+                t_a - y_a * (t_b - t_a) / denom,
+                np.minimum(t_a, t_b),
+                np.maximum(t_a, t_b),
+            )
+            t_mid = ref_time + t_m * u.hour
+            y_m = (
+                get_sun(t_mid)
+                .transform_to(AltAz(obstime=t_mid, location=earth_location))
+                .alt.deg
+                - horizon_deg
+            )
+            same_as_a = (y_m <= 0.0) == (y_a <= 0.0)
+            t_a = np.where(same_as_a, t_m, t_a)
+            y_a = np.where(same_as_a, y_m, y_a)
+            t_b = np.where(~same_as_a, t_m, t_b)
+            y_b = np.where(~same_as_a, y_m, y_b)
+
+        denom = np.where(np.abs(y_b - y_a) > 1e-12, y_b - y_a, 1e-12)
+        t_root = np.clip(
+            t_a - y_a * (t_b - t_a) / denom,
+            np.minimum(t_a, t_b),
+            np.maximum(t_a, t_b),
+        )
+        roots = ref_time + t_root * u.hour
+        rises = [roots[i] for i in range(len(idxs)) if is_rise[i]]
+        sets = [roots[i] for i in range(len(idxs)) if not is_rise[i]]
+        return rises, sets
+
+    def _resolve_observing_night(
+        self, earth_location: EarthLocation, ref_time: Time
+    ) -> Optional[Tuple[Time, Time]]:
+        """
+        Returns `(sunset, sunrise)` for the active night (if Sun <= 0°) or upcoming night
+        (if Sun > 0°), guaranteed to span a single night (`0 < sunrise - sunset <= 24.5h`).
+        Returns `None` in continuous polar day or continuous polar night.
+        """
+        sun_alt_now = float(
+            get_sun(ref_time)
+            .transform_to(AltAz(obstime=ref_time, location=earth_location))
+            .alt.deg
+        )
+        rises, sets = self._find_solar_crossings(
+            earth_location,
+            ref_time,
+            horizon_deg=0.0,
+            window_before_h=30.0,
+            window_after_h=30.0,
+            step_min=10.0,
+        )
+        if not rises or not sets:
+            return None
+
+        tol = 5.0 * u.second
+        min_gap = 1.0 * u.minute
+
+        if sun_alt_now <= 0.0:
+            past_sets = [t for t in sets if t <= ref_time + tol]
+            if not past_sets:
+                return None
+            sunset = past_sets[-1]
+            next_rises = [
+                t for t in rises if t >= ref_time - tol and t > sunset + min_gap
+            ]
+            if not next_rises:
+                return None
+            sunrise = next_rises[0]
+        else:
+            future_sets = [t for t in sets if t >= ref_time - tol]
+            if not future_sets:
+                return None
+            sunset = future_sets[0]
+            next_rises = [t for t in rises if t > sunset + min_gap]
+            if not next_rises:
+                return None
+            sunrise = next_rises[0]
+
+        night_hours = (sunrise - sunset).to(u.hour).value
+        if night_hours <= 0.0 or night_hours > 24.5:
+            return None
+        return sunset, sunrise
+
     def get_observing_session(self, observer: Observer, now: Time) -> Tuple[Time, Time]:
         """
-        Determines the observing session (Sunset to Sunrise).
-        If currently night, returns (previous_sunset, next_sunrise).
-        If currently day, returns (next_sunset, next_sunrise).
+        Determines the observing session (Sunset - 0.5h to Sunrise + 0.5h).
+        If currently night, returns (previous_sunset - 0.5h, next_sunrise + 0.5h).
+        If currently day, returns (next_sunset - 0.5h, next_sunrise + 0.5h).
         """
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                next_sunrise = observer.sun_rise_time(now, which="next")
-                next_sunset = observer.sun_set_time(now, which="next")
-
-                if hasattr(next_sunrise, "masked") and next_sunrise.masked:
-                    raise ValueError("Sun does not rise")
-                if hasattr(next_sunset, "masked") and next_sunset.masked:
-                    raise ValueError("Sun does not set")
-
-                if next_sunrise < next_sunset:
-                    start_time = observer.sun_set_time(now, which="previous")
-                    end_time = next_sunrise
-                else:
-                    start_time = next_sunset
-                    end_time = observer.sun_rise_time(start_time, which="next")
-
-                start_time = start_time - 0.5 * u.hour
-                end_time = end_time + 0.5 * u.hour
-
-                return start_time, end_time
+                bounds = self._resolve_observing_night(observer.location, now)
+                if bounds is None:
+                    raise ValueError("Polar day or night without horizon crossing")
+                sunset, sunrise = bounds
+                return sunset - 0.5 * u.hour, sunrise + 0.5 * u.hour
         except Exception:
             return now - 12 * u.hour, now + 12 * u.hour
 
@@ -468,11 +574,9 @@ class AstroCalculator:
     def get_twilight_periods(
         self, location: Location, base_time: Optional[Time] = None
     ) -> Dict[str, List[str]]:
-        """Calculates twilight periods for the 24 hours starting from base_time (or now)."""
-        observer = Observer(
-            location=EarthLocation(
-                lat=location.latitude * u.deg, lon=location.longitude * u.deg
-            )
+        """Calculates twilight periods for the active or upcoming observing night."""
+        earth_loc = EarthLocation(
+            lat=location.latitude * u.deg, lon=location.longitude * u.deg
         )
         now = base_time if base_time else Time.now()
         end_time = now + 24 * u.hour
@@ -482,15 +586,11 @@ class AstroCalculator:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             try:
-                sunset = observer.sun_set_time(now, which="nearest")
-                if hasattr(sunset, "masked") and sunset.masked:
-                    sunset = now
-
-                sunrise = observer.sun_rise_time(sunset, which="next")
-                if hasattr(sunrise, "masked") and sunrise.masked:
+                bounds = self._resolve_observing_night(earth_loc, now)
+                if bounds is None:
                     sun_alt = (
                         get_sun(now)
-                        .transform_to(AltAz(location=observer.location, obstime=now))
+                        .transform_to(AltAz(location=earth_loc, obstime=now))
                         .alt.deg
                     )
                     if sun_alt > 0:
@@ -504,38 +604,30 @@ class AstroCalculator:
                     else:
                         return {"night": [now.isot + "Z", end_time.isot + "Z"]}
 
-                if sunrise < sunset:
-                    sunset = observer.sun_set_time(now, which="previous")
-                    sunrise = observer.sun_rise_time(sunset, which="next")
+                sunset, sunrise = bounds
+                night_mid = sunset + 0.5 * (sunrise - sunset)
+                half_span_h = 0.5 * (sunrise - sunset).to(u.hour).value + 0.25
 
-                def get_t(func, ref_time, which):
-                    try:
-                        t = func(ref_time, which=which)
-                        if hasattr(t, "masked") and t.masked:
-                            return None
-                        if hasattr(t, "jd") and np.isnan(t.jd):
-                            return None
-                        if which == "next" and t > sunrise:
-                            return None
-                        if which == "previous" and t < sunset:
-                            return None
-                        return t
-                    except Exception:
-                        return None
+                def get_twilight_pair(
+                    horizon_deg: float,
+                ) -> Tuple[Optional[Time], Optional[Time]]:
+                    rises, sets = self._find_solar_crossings(
+                        earth_loc,
+                        night_mid,
+                        horizon_deg=horizon_deg,
+                        window_before_h=half_span_h,
+                        window_after_h=half_span_h,
+                        step_min=6.0,
+                    )
+                    eve_candidates = [t for t in sets if sunset <= t <= sunrise]
+                    morn_candidates = [t for t in rises if sunset <= t <= sunrise]
+                    eve_t = eve_candidates[0] if eve_candidates else None
+                    morn_t = morn_candidates[-1] if morn_candidates else None
+                    return eve_t, morn_t
 
-                eve_civil = get_t(observer.twilight_evening_civil, sunset, "next")
-                eve_naut = get_t(observer.twilight_evening_nautical, sunset, "next")
-                eve_astro = get_t(
-                    observer.twilight_evening_astronomical, sunset, "next"
-                )
-
-                morn_astro = get_t(
-                    observer.twilight_morning_astronomical, sunrise, "previous"
-                )
-                morn_naut = get_t(
-                    observer.twilight_morning_nautical, sunrise, "previous"
-                )
-                morn_civil = get_t(observer.twilight_morning_civil, sunrise, "previous")
+                eve_civil, morn_civil = get_twilight_pair(-6.0)
+                eve_naut, morn_naut = get_twilight_pair(-12.0)
+                eve_astro, morn_astro = get_twilight_pair(-18.0)
 
                 def add_p(name, start, end):
                     if start and end and start < end:
@@ -567,9 +659,7 @@ class AstroCalculator:
                     midnight = t1 + (t2 - t1) / 2
                     midnight_alt = (
                         get_sun(midnight)
-                        .transform_to(
-                            AltAz(location=observer.location, obstime=midnight)
-                        )
+                        .transform_to(AltAz(location=earth_loc, obstime=midnight))
                         .alt.deg
                     )
 
@@ -589,7 +679,7 @@ class AstroCalculator:
                 print(f"Twilight calculation error: {e}")
                 sun_alt = (
                     get_sun(now)
-                    .transform_to(AltAz(location=observer.location, obstime=now))
+                    .transform_to(AltAz(location=earth_loc, obstime=now))
                     .alt.deg
                 )
                 return (

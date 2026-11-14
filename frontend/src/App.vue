@@ -288,13 +288,42 @@ const mergeObjectDetailsPayload = (d, insertIfMissing = false) => {
     return o || selectedObject.value;
 };
 
+const isValidSingleSessionGraph = (graph, currentNightTimes = nightTimes.value) => {
+    if (!Array.isArray(graph) || graph.length < 2) return false;
+    const t0 = new Date(graph[0]?.time).getTime();
+    const t1 = new Date(graph[graph.length - 1]?.time).getTime();
+    if (!Number.isFinite(t0) || !Number.isFinite(t1) || t1 <= t0) return false;
+    const spanHours = (t1 - t0) / 3600000;
+    if (spanHours > 25.5) return false;
+
+    if (currentNightTimes && typeof currentNightTimes === 'object') {
+        const refRange =
+            currentNightTimes.night ||
+            currentNightTimes.astronomical ||
+            currentNightTimes.nautical ||
+            currentNightTimes.civil;
+        if (Array.isArray(refRange) && refRange.length === 2) {
+            const ntStart = new Date(refRange[0]).getTime();
+            const ntEnd = new Date(refRange[1]).getTime();
+            if (Number.isFinite(ntStart) && Number.isFinite(ntEnd) && ntEnd >= ntStart) {
+                const ntMid = 0.5 * (ntStart + ntEnd);
+                const toleranceMs = 2 * 3600000;
+                if (ntMid < t0 - toleranceMs || ntMid > t1 + toleranceMs) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+};
+
 const ensureObjectDetails = async (targetObj) => {
     const objName = targetObj?.name;
     if (!objName) return;
-    if (Array.isArray(targetObj.altitude_graph) && targetObj.altitude_graph.length > 0) return;
+    if (isValidSingleSessionGraph(targetObj.altitude_graph)) return;
 
     const canonical = objectMap.get(objName);
-    if (canonical && Array.isArray(canonical.altitude_graph) && canonical.altitude_graph.length > 0) {
+    if (canonical && isValidSingleSessionGraph(canonical.altitude_graph)) {
         if (targetObj !== canonical) {
             Object.assign(targetObj, canonical);
         }
@@ -335,7 +364,11 @@ const handleExternalSelectObject = (incomingObj) => {
     let canonical = objectMap.get(incomingObj.name) || objects.value.find(o => o.name === incomingObj.name);
     if (!canonical) {
         canonical = mergeObjectDetailsPayload(incomingObj, true) || incomingObj;
-    } else if (incomingObj !== canonical && Array.isArray(incomingObj.altitude_graph) && incomingObj.altitude_graph.length > 0 && !canonical.altitude_graph) {
+    } else if (
+        incomingObj !== canonical &&
+        isValidSingleSessionGraph(incomingObj.altitude_graph) &&
+        !isValidSingleSessionGraph(canonical.altitude_graph)
+    ) {
         Object.assign(canonical, incomingObj);
     }
     pinnedTopObjectId.value = canonical.name;
@@ -977,7 +1010,7 @@ const startStream = (mode = 'selected') => {
                 applySavedStateToObject(item);
                 const prevObj = objectMap.get(item.name);
                 if (prevObj) {
-                    if (sameLocation && prevObj.altitude_graph) {
+                    if (sameLocation && isValidSingleSessionGraph(prevObj.altitude_graph, nightTimes.value)) {
                         item.altitude_graph = prevObj.altitude_graph;
                         item.moon_graph = prevObj.moon_graph;
                         item.sun_graph = prevObj.sun_graph;
@@ -1019,7 +1052,12 @@ const startStream = (mode = 'selected') => {
             if (currentId) {
                 const found = objectMap.get(currentId);
                 if (found) {
-                    if (sameLocation && prevSelected && prevSelected.altitude_graph && !found.altitude_graph) {
+                    if (
+                        sameLocation &&
+                        prevSelected &&
+                        isValidSingleSessionGraph(prevSelected.altitude_graph, nightTimes.value) &&
+                        !found.altitude_graph
+                    ) {
                         found.altitude_graph = prevSelected.altitude_graph;
                         found.moon_graph = prevSelected.moon_graph;
                         found.sun_graph = prevSelected.sun_graph;

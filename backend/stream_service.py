@@ -237,8 +237,9 @@ def get_sorted_objects(
         tw_cfg = _extract_time_window_settings(settings)
         time_mask = None
         if tw_cfg["active"]:
+            session_mid = session_start + 0.5 * (session_end - session_start)
             twilight = (
-                calculator.get_twilight_periods(location, session_start)
+                calculator.get_twilight_periods(location, session_mid)
                 if not tw_cfg["start"] or not tw_cfg["end"]
                 else None
             )
@@ -493,7 +494,8 @@ def _resolve_single_object_sync(
         )
     )
     session_start, session_end = calculator.get_observing_session(observer, Time.now())
-    twilight = calculator.get_twilight_periods(location, session_start)
+    session_mid = session_start + 0.5 * (session_end - session_start)
+    twilight = calculator.get_twilight_periods(location, session_mid)
     return obj, session_start, session_end, twilight
 
 
@@ -944,9 +946,10 @@ class StreamSession:
         self.session_start, self.session_end = calculator.get_observing_session(
             observer, Time.now()
         )
-        self.twilight = calculator.get_twilight_periods(
-            self.location, self.session_start
+        session_mid = self.session_start + 0.5 * (
+            self.session_end - self.session_start
         )
+        self.twilight = calculator.get_twilight_periods(self.location, session_mid)
 
     async def generate_stream(self):
         try:
