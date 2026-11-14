@@ -55,6 +55,7 @@ const textWidthCache = new Map();    // `${fontKey}|${text}` -> number
 const imageElementCache = new Map(); // url -> { img, status: 'loading' | 'ready' | 'error' }
 let inflightImageLoads = 0;
 const MAX_CONCURRENT_INDIVIDUAL_LOADS = 6;
+const photoDrawQueue = []; // Reusable scratch array for zero-GC batched tile passes
 
 const wrapRaDeg = (ra) => {
     let r = Number(ra) % 360.0;
@@ -1621,7 +1622,7 @@ const drawHorizonOverlay = (ctx, cam, w, h, fov, minPointCos, placedBoxes, overl
         ctx.stroke();
 
         ctx.fillStyle =
-            cp.label === 'N' ? '#fca5a5' : cp.major ? '#a7f3d0' : 'rgba(167, 243, 208, 0.82)';
+            cp.label === 'N' ? '#f87171' : cp.major ? '#34d399' : 'rgba(52, 211, 153, 0.88)';
         ctx.fillText(cp.label, sx, sy + 0.5);
     }
 
@@ -1632,7 +1633,7 @@ const drawHorizonOverlay = (ctx, cam, w, h, fov, minPointCos, placedBoxes, overl
         const zsx = cam.halfW - zFk * (horiz.Zx * cam.Ex + horiz.Zy * cam.Ey);
         const zsy = cam.halfH - zFk * (horiz.Zx * cam.Nx + horiz.Zy * cam.Ny + horiz.Zz * cam.Nz);
         if (zsx > 36 && zsx < w - 36 && zsy > 30 && zsy < h - 36) {
-            ctx.strokeStyle = 'rgba(110, 231, 183, 0.65)';
+            ctx.strokeStyle = 'rgba(52, 211, 153, 0.78)';
             ctx.lineWidth = 1.2;
             ctx.beginPath();
             ctx.moveTo(zsx - 5, zsy);
@@ -1641,10 +1642,15 @@ const drawHorizonOverlay = (ctx, cam, w, h, fov, minPointCos, placedBoxes, overl
             ctx.lineTo(zsx, zsy + 5);
             ctx.stroke();
 
-            ctx.font = '500 10px system-ui, -apple-system, sans-serif';
-            ctx.fillStyle = 'rgba(167, 243, 208, 0.72)';
+            ctx.font = '600 10px system-ui, -apple-system, sans-serif';
             ctx.textAlign = 'left';
             ctx.textBaseline = 'middle';
+            ctx.lineJoin = 'round';
+            ctx.miterLimit = 2;
+            ctx.lineWidth = 3.0;
+            ctx.strokeStyle = 'rgba(3, 6, 12, 0.92)';
+            ctx.strokeText('Zenith', zsx + 8, zsy);
+            ctx.fillStyle = '#34d399';
             ctx.fillText('Zenith', zsx + 8, zsy);
         }
     }
@@ -2156,13 +2162,15 @@ const drawSkyCanvas = () => {
         ctx.stroke();
     }
 
-    // 5. Sky Atlas + Cached Sky Survey Photos Projected at True Celestial Scale
+    // 5. Sky Atlas + Cached Sky Survey Photos Projected at True Celestial Scale (Zero-border GPU-batched passes)
     const hovered = hoveredItem.value;
     if (showCachedPhotos.value && allSkyPhotos.value.length > 0) {
         const photos = allSkyPhotos.value;
         const denseCatalogMode = photos.length > 120;
-        const minRenderPx = denseCatalogMode ? 3.2 : 0.0;
+        const minRenderPx = denseCatalogMode ? 3.2 : 2.5;
         const photoCullCos = Math.cos(Math.min(Math.PI * 0.72, maxVisRad + 0.15));
+        let photoDrawCount = 0;
+        let hoveredHighlight = null;
 
         for (let i = 0; i < photos.length; i++) {
             const photo = photos[i];
@@ -2174,8 +2182,10 @@ const drawSkyCanvas = () => {
             const sizePx = photo.fov * DEG2RAD * fk;
             if (sizePx < minRenderPx && !photo.isActiveTarget) continue;
 
-            const px = cam.halfW - fk * (photo.x * cam.Ex + photo.y * cam.Ey);
-            const py = cam.halfH - fk * (photo.x * cam.Nx + photo.y * cam.Ny + photo.z * cam.Nz);
+            const u = photo.x * cam.Ex + photo.y * cam.Ey;
+            const v = photo.x * cam.Nx + photo.y * cam.Ny + photo.z * cam.Nz;
+            const px = cam.halfW - fk * u;
+            const py = cam.halfH - fk * v;
 
             if (
                 px + sizePx < -40 ||
@@ -2186,87 +2196,7 @@ const drawSkyCanvas = () => {
                 continue;
             }
 
-            const isHovered =
-                hovered?.kind === 'photo' &&
-                hovered?.name === photo.name &&
-                Math.abs(hovered.ra - photo.ra) < 0.01;
-
-            const projPt = { x: px, y: py, k, cosC, f: cam.f };
-            const northAngle = computeLocalNorthAngleWithBasis(photo.ra, photo.dec, projPt, cam);
-
-            const tile = photo.atlasTile;
-            const sheetImg = tile && sizePx >= 3.2 ? ensureAtlasSheetImage(tile.s) : null;
-            const wantHiRes =
-                Boolean(photo.url) &&
-                (!tile || sizePx >= 190 || (photo.isActiveTarget && sizePx >= 115));
-            const hiResImg =
-                wantHiRes && sizePx >= 4.5
-                    ? ensureImageLoaded(photo.url, !isPanning.value || photo.isActiveTarget)
-                    : null;
-
-            ctx.save();
-            ctx.translate(px, py);
-            ctx.rotate(northAngle);
-
-            if ((hiResImg || sheetImg) && sizePx >= 4.0) {
-                const half = sizePx * 0.5;
-                ctx.fillStyle = denseCatalogMode
-                    ? 'rgba(4, 7, 14, 0.44)'
-                    : 'rgba(4, 7, 14, 0.62)';
-                ctx.fillRect(-half, -half, sizePx, sizePx);
-
-                ctx.save();
-                ctx.globalAlpha = photo.isActiveTarget ? 0.96 : 0.88;
-                ctx.globalCompositeOperation = 'screen';
-                if (hiResImg) {
-                    ctx.drawImage(hiResImg, -half, -half, sizePx, sizePx);
-                } else if (sheetImg && tile) {
-                    ctx.drawImage(
-                        sheetImg,
-                        tile.u + 0.5,
-                        tile.v + 0.5,
-                        tile.w - 1,
-                        tile.h - 1,
-                        -half,
-                        -half,
-                        sizePx,
-                        sizePx
-                    );
-                }
-                ctx.restore();
-
-                const drawFrame =
-                    photo.isActiveTarget ||
-                    isHovered ||
-                    !denseCatalogMode ||
-                    sizePx >= 44;
-                if (drawFrame) {
-                    ctx.strokeStyle = photo.isActiveTarget
-                        ? 'rgba(251, 191, 36, 0.58)'
-                        : isHovered
-                          ? 'rgba(56, 189, 248, 0.92)'
-                          : denseCatalogMode
-                            ? 'rgba(56, 189, 248, 0.22)'
-                            : 'rgba(56, 189, 248, 0.42)';
-                    ctx.lineWidth = isHovered ? 1.6 : 1.0;
-                    ctx.strokeRect(-half, -half, sizePx, sizePx);
-                }
-            } else if (!photo.isActiveTarget && (!denseCatalogMode || sizePx >= 6.0 || isHovered)) {
-                const boxSz = Math.max(sizePx, 8);
-                const half = boxSz * 0.5;
-                ctx.fillStyle = isHovered
-                    ? 'rgba(56, 189, 248, 0.28)'
-                    : 'rgba(56, 189, 248, 0.14)';
-                ctx.strokeStyle = isHovered
-                    ? 'rgba(125, 211, 252, 0.95)'
-                    : 'rgba(56, 189, 248, 0.68)';
-                ctx.lineWidth = 1.2;
-                ctx.fillRect(-half, -half, boxSz, boxSz);
-                ctx.strokeRect(-half, -half, boxSz, boxSz);
-            }
-            ctx.restore();
-
-            if (!photo.isActiveTarget && sizePx >= (denseCatalogMode ? 4.5 : 0)) {
+            if (!photo.isActiveTarget && sizePx >= (denseCatalogMode ? 4.5 : 3.0)) {
                 interactiveItems.push({
                     kind: 'photo',
                     name: photo.name,
@@ -2281,7 +2211,134 @@ const drawSkyCanvas = () => {
                     isCustom: photo.isCustom
                 });
             }
+
+            const isHovered =
+                hovered?.kind === 'photo' &&
+                hovered?.name === photo.name &&
+                Math.abs(hovered.ra - photo.ra) < 0.01;
+
+            const tile = photo.atlasTile;
+            const sheetImg = tile && sizePx >= 3.2 ? ensureAtlasSheetImage(tile.s) : null;
+            const wantHiRes =
+                Boolean(photo.url) &&
+                (!tile || sizePx >= 190 || (photo.isActiveTarget && sizePx >= 115));
+            const hiResImg =
+                wantHiRes && sizePx >= 4.5
+                    ? ensureImageLoaded(photo.url, !isPanning.value || photo.isActiveTarget)
+                    : null;
+
+            const hasReadyImg = Boolean((hiResImg || sheetImg) && sizePx >= 4.0);
+            if (!hasReadyImg && !isHovered) {
+                continue;
+            }
+
+            // Algebraic conformal local-north screen basis (zero sin/cos/atan2 calls)
+            const vx = -photo.x * photo.z;
+            const vy = -photo.y * photo.z;
+            const vz = 1.0 - photo.z * photo.z;
+            let cosA = 1.0;
+            let sinA = 0.0;
+            if (vz > 1e-8) {
+                const vDotC = vx * cam.Cx + vy * cam.Cy + vz * cam.Cz;
+                const vDotE = vx * cam.Ex + vy * cam.Ey;
+                const vDotN = vx * cam.Nx + vy * cam.Ny + vz * cam.Nz;
+                const halfKVC = 0.5 * k * vDotC;
+                const dxN = halfKVC * u - vDotE;
+                const dyN = halfKVC * v - vDotN;
+                const len = Math.hypot(dxN, dyN);
+                if (len > 1e-9) {
+                    const invLen = 1.0 / len;
+                    cosA = -dyN * invLen;
+                    sinA = dxN * invLen;
+                }
+            }
+
+            const m11 = dpr * cosA;
+            const m12 = dpr * sinA;
+            const tx = px * dpr;
+            const ty = py * dpr;
+
+            if (isHovered) {
+                hoveredHighlight = {
+                    m11,
+                    m12,
+                    tx,
+                    ty,
+                    boxSz: Math.max(sizePx, 8)
+                };
+            }
+
+            if (hasReadyImg) {
+                let slot = photoDrawQueue[photoDrawCount];
+                if (!slot) {
+                    slot = {};
+                    photoDrawQueue[photoDrawCount] = slot;
+                }
+                slot.m11 = m11;
+                slot.m12 = m12;
+                slot.tx = tx;
+                slot.ty = ty;
+                slot.sizePx = sizePx;
+                slot.half = sizePx * 0.5;
+                slot.alpha = photo.isActiveTarget ? 0.96 : 0.88;
+                slot.hiResImg = hiResImg;
+                slot.sheetImg = sheetImg;
+                slot.tile = tile;
+                photoDrawCount++;
+            }
         }
+
+        if (photoDrawCount > 0) {
+            // Pass 5a: Batched source-over backing rects (zero blend-mode switches)
+            ctx.fillStyle = denseCatalogMode ? 'rgba(4, 7, 14, 0.44)' : 'rgba(4, 7, 14, 0.62)';
+            for (let i = 0; i < photoDrawCount; i++) {
+                const s = photoDrawQueue[i];
+                ctx.setTransform(s.m11, s.m12, -s.m12, s.m11, s.tx, s.ty);
+                ctx.fillRect(-s.half, -s.half, s.sizePx, s.sizePx);
+            }
+
+            // Pass 5b: Batched screen-blended survey quads (continuous GPU sprite batch)
+            ctx.save();
+            ctx.globalCompositeOperation = 'screen';
+            let curAlpha = -1;
+            for (let i = 0; i < photoDrawCount; i++) {
+                const s = photoDrawQueue[i];
+                ctx.setTransform(s.m11, s.m12, -s.m12, s.m11, s.tx, s.ty);
+                if (s.alpha !== curAlpha) {
+                    ctx.globalAlpha = s.alpha;
+                    curAlpha = s.alpha;
+                }
+                if (s.hiResImg) {
+                    ctx.drawImage(s.hiResImg, -s.half, -s.half, s.sizePx, s.sizePx);
+                } else if (s.sheetImg && s.tile) {
+                    const tl = s.tile;
+                    ctx.drawImage(
+                        s.sheetImg,
+                        tl.u + 0.5,
+                        tl.v + 0.5,
+                        tl.w - 1,
+                        tl.h - 1,
+                        -s.half,
+                        -s.half,
+                        s.sizePx,
+                        s.sizePx
+                    );
+                }
+            }
+            ctx.restore();
+        }
+
+        // Pass 5c: Optional single hover highlight (only for the target directly under cursor)
+        if (hoveredHighlight) {
+            const hh = hoveredHighlight;
+            const half = hh.boxSz * 0.5;
+            ctx.setTransform(hh.m11, hh.m12, -hh.m12, hh.m11, hh.tx, hh.ty);
+            ctx.strokeStyle = 'rgba(251, 191, 36, 0.88)';
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(-half, -half, hh.boxSz, hh.boxSz);
+        }
+
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
 
     // Reserve label space for Active Target Pill Badge first
@@ -2391,10 +2448,14 @@ const drawSkyCanvas = () => {
             ctx.fill();
         }
 
-        // 6c. Star proper names (only iterates over ~320 named stars)
-        ctx.font = '500 11.5px system-ui, -apple-system, sans-serif';
+        // 6c. Star proper names (warm amber-gold with dark outline halo for gray survey tiles)
+        ctx.font = '600 11.5px system-ui, -apple-system, sans-serif';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
+        ctx.lineJoin = 'round';
+        ctx.miterLimit = 2;
+        ctx.lineWidth = 3.2;
+        ctx.strokeStyle = 'rgba(3, 6, 12, 0.94)';
 
         for (let i = 0; i < labeledStars.length; i++) {
             const ls = labeledStars[i];
@@ -2423,11 +2484,8 @@ const drawSkyCanvas = () => {
 
             if (!overlapsPlaced(x1, y1, x2, y2, 2)) {
                 placedBoxes.push({ x1, y1, x2, y2 });
-                ctx.fillStyle = 'rgba(3, 6, 12, 0.75)';
-                ctx.fillText(starName, lx + 1, sy + 1);
-                ctx.fillStyle = ls.isBright
-                    ? 'rgba(232, 240, 252, 0.92)'
-                    : 'rgba(196, 210, 232, 0.78)';
+                ctx.strokeText(starName, lx, sy);
+                ctx.fillStyle = ls.isBright ? '#fbbf24' : 'rgba(234, 179, 8, 0.92)';
                 ctx.fillText(starName, lx, sy);
             }
         }
@@ -2461,8 +2519,8 @@ const drawSkyCanvas = () => {
 
         if (visibleDsos.length > 0) {
             // Batch standard DSO rings
-            ctx.lineWidth = 1.2;
-            ctx.strokeStyle = 'rgba(167, 139, 250, 0.78)';
+            ctx.lineWidth = 1.25;
+            ctx.strokeStyle = 'rgba(192, 132, 252, 0.85)';
             ctx.beginPath();
             for (let i = 0; i < visibleDsos.length; i++) {
                 const v = visibleDsos[i];
@@ -2475,7 +2533,7 @@ const drawSkyCanvas = () => {
             ctx.stroke();
 
             // Batch cached DSO rings
-            ctx.strokeStyle = 'rgba(56, 189, 248, 0.85)';
+            ctx.strokeStyle = 'rgba(56, 189, 248, 0.9)';
             ctx.beginPath();
             for (let i = 0; i < visibleDsos.length; i++) {
                 const v = visibleDsos[i];
@@ -2487,10 +2545,12 @@ const drawSkyCanvas = () => {
             }
             ctx.stroke();
 
-            // Labels & hovered highlight
-            ctx.font = '500 11px system-ui, -apple-system, sans-serif';
+            // Labels & hovered highlight (saturated cyan/violet + dark outline halo)
+            ctx.font = '600 11px system-ui, -apple-system, sans-serif';
             ctx.textAlign = 'left';
             ctx.textBaseline = 'middle';
+            ctx.lineJoin = 'round';
+            ctx.miterLimit = 2;
 
             for (let i = 0; i < visibleDsos.length; i++) {
                 const { d, sx, sy, rPx } = visibleDsos[i];
@@ -2511,11 +2571,10 @@ const drawSkyCanvas = () => {
 
                 if (!overlapsPlaced(x1, y1, x2, y2, 2)) {
                     placedBoxes.push({ x1, y1, x2, y2 });
-                    ctx.fillStyle = 'rgba(3, 6, 12, 0.78)';
-                    ctx.fillText(d.shortName, lx + 1, sy + 1);
-                    ctx.fillStyle = d.isCached
-                        ? 'rgba(125, 211, 252, 0.94)'
-                        : 'rgba(186, 164, 252, 0.88)';
+                    ctx.lineWidth = 3.2;
+                    ctx.strokeStyle = 'rgba(3, 6, 12, 0.94)';
+                    ctx.strokeText(d.shortName, lx, sy);
+                    ctx.fillStyle = d.isCached ? '#38bdf8' : '#c084fc';
                     ctx.fillText(d.shortName, lx, sy);
                 }
 
@@ -2535,11 +2594,16 @@ const drawSkyCanvas = () => {
         }
     }
 
-    // 8. Constellation Names (ORION, MONOCEROS, LEPUS)
+    // 8. Constellation Names (ORION, MONOCEROS, LEPUS — saturated cobalt with dark halo)
     if (showConstellations.value && fov >= 7 && preparedSky) {
         ctx.font = '600 11px system-ui, -apple-system, sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
+        ctx.lineJoin = 'round';
+        ctx.miterLimit = 2;
+        ctx.lineWidth = 3.4;
+        ctx.strokeStyle = 'rgba(3, 6, 12, 0.92)';
+        ctx.fillStyle = 'rgba(96, 165, 250, 0.92)';
 
         const labels = preparedSky.constLabels;
         for (let i = 0; i < labels.length; i++) {
@@ -2561,9 +2625,7 @@ const drawSkyCanvas = () => {
 
             if (!overlapsPlaced(x1, y1, x2, y2, 3)) {
                 placedBoxes.push({ x1, y1, x2, y2 });
-                ctx.fillStyle = 'rgba(3, 6, 12, 0.65)';
-                ctx.fillText(c.tracked, sx + 1, sy + 1);
-                ctx.fillStyle = 'rgba(138, 168, 210, 0.58)';
+                ctx.strokeText(c.tracked, sx, sy);
                 ctx.fillText(c.tracked, sx, sy);
             }
         }
