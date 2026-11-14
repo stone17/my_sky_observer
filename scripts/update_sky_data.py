@@ -57,7 +57,6 @@ def build_sky_data():
     constellations_geo = fetch_json("constellations.json")
     const_lines_geo = fetch_json("constellations.lines.json")
     const_bounds_geo = fetch_json("constellations.bounds.json")
-    mw_geo = fetch_json("mw.json")
 
     # 1. Process Stars
     # Compact array format per star: [ra, dec, mag, bv, name, desig]
@@ -176,36 +175,12 @@ def build_sky_data():
         if rings:
             const_bounds_out.append({"id": cid, "rings": rings})
 
-    # 5. Process Milky Way Polygons (keep subtle contours, lightly simplified for size)
-    mw_out = []
-    for idx, feat in enumerate(mw_geo.get("features", [])):
-        if idx >= 3:
-            # First 3 contours capture the main diffuse Galactic band & brighter core clouds cleanly
-            break
-        geom = feat.get("geometry", {})
-        gtype = geom.get("type")
-        coords = geom.get("coordinates", [])
-        polys = []
-        step = 3 if idx == 0 else 2
-        if gtype == "MultiPolygon":
-            for poly in coords:
-                rings = [simplify_ring(ring, step=step) for ring in poly if len(ring) >= 4]
-                if rings:
-                    polys.append(rings)
-        elif gtype == "Polygon":
-            rings = [simplify_ring(ring, step=step) for ring in coords if len(ring) >= 4]
-            if rings:
-                polys.append(rings)
-        if polys:
-            mw_out.append({"level": idx, "polygons": polys})
-
     os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
     payload = {
         "stars": stars_out,
         "constellations": constellations_out,
         "constellation_lines": const_lines_out,
         "constellation_bounds": const_bounds_out,
-        "milky_way": mw_out,
     }
     with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
         json.dump(payload, f, separators=(",", ":"), ensure_ascii=False)
