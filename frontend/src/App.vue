@@ -1217,6 +1217,7 @@ watch(clientSettings, () => {
                         :objects="objects"
                         :settings="settings"
                         :clientSettings="clientSettings"
+                        :nightTimes="nightTimes"
                         :searchQuery="searchQuery"
                         :activeFov="activeFov"
                         @update-fov="handleFovUpdate"

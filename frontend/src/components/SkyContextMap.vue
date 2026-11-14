@@ -6,6 +6,7 @@ const props = defineProps({
     objects: { type: Array, default: () => [] },
     settings: { type: Object, default: () => ({}) },
     clientSettings: { type: Object, default: () => ({}) },
+    nightTimes: { type: Object, default: () => ({}) },
     sensorFov: { type: Object, default: () => ({ w: 0, h: 0 }) },
     comparisonRectangles: { type: Array, default: () => [] },
     sensorCenter: { type: Object, default: null },
@@ -82,6 +83,96 @@ const formatDecDms = (decDeg) => {
     const d = Math.floor(totalArcmin / 60);
     const m = totalArcmin % 60;
     return `${sign}${String(d).padStart(2, '0')}° ${String(m).padStart(2, '0')}′`;
+};
+
+const COMPASS_POINTS = [
+    { label: 'N', azDeg: 0, major: true },
+    { label: 'NE', azDeg: 45, major: false },
+    { label: 'E', azDeg: 90, major: true },
+    { label: 'SE', azDeg: 135, major: false },
+    { label: 'S', azDeg: 180, major: true },
+    { label: 'SW', azDeg: 225, major: false },
+    { label: 'W', azDeg: 270, major: true },
+    { label: 'NW', azDeg: 315, major: false }
+].map((p) => ({
+    ...p,
+    sinAz: Math.sin(p.azDeg * DEG2RAD),
+    cosAz: Math.cos(p.azDeg * DEG2RAD)
+}));
+
+const COMPASS_SECTORS_16 = [
+    'N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE',
+    'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'
+];
+
+const formatAltDeg = (altDeg) => {
+    const sign = altDeg >= 0 ? '+' : '−';
+    return `${sign}${Math.abs(altDeg).toFixed(1)}°`;
+};
+
+const formatAzCompass = (azDeg) => {
+    const norm = wrapRaDeg(azDeg);
+    const idx = Math.round(norm / 22.5) % 16;
+    return `${Math.round(norm)}° ${COMPASS_SECTORS_16[idx]}`;
+};
+
+const formatLocalClock = (ms) => {
+    const dt = new Date(ms);
+    const hh = String(dt.getHours()).padStart(2, '0');
+    const mm = String(dt.getMinutes()).padStart(2, '0');
+    return `${hh}:${mm}`;
+};
+
+const computeLstDeg = (timeMs, lonDeg) => {
+    const jd = timeMs / 86400000.0 + 2440587.5;
+    const d = jd - 2451545.0;
+    const T = d / 36525.0;
+    const gmst =
+        280.46061837 +
+        360.98564736629 * d +
+        0.000387933 * T * T -
+        (T * T * T) / 38710000.0;
+    return wrapRaDeg(gmst + lonDeg);
+};
+
+const makeHorizontalBasis = (latDeg, lonDeg, timeMs) => {
+    const clampedLat = Math.max(-89.999, Math.min(89.999, latDeg));
+    const phi = clampedLat * DEG2RAD;
+    const theta = computeLstDeg(timeMs, lonDeg) * DEG2RAD;
+    const sinP = Math.sin(phi);
+    const cosP = Math.cos(phi);
+    const sinT = Math.sin(theta);
+    const cosT = Math.cos(theta);
+
+    return {
+        // Zenith unit vector Z
+        Zx: cosP * cosT,
+        Zy: cosP * sinT,
+        Zz: sinP,
+        // Horizontal due-North tangent vector Nh
+        Nhx: -sinP * cosT,
+        Nhy: -sinP * sinT,
+        Nhz: cosP,
+        // Horizontal due-East tangent vector Eh (Ehz = 0)
+        Ehx: -sinT,
+        Ehy: cosT
+    };
+};
+
+const computeAltAzFromRaDec = (raDeg, decDeg, horiz) => {
+    const a = raDeg * DEG2RAD;
+    const d = decDeg * DEG2RAD;
+    const cd = Math.cos(d);
+    const x = cd * Math.cos(a);
+    const y = cd * Math.sin(a);
+    const z = Math.sin(d);
+
+    const sinAlt = Math.max(-1.0, Math.min(1.0, x * horiz.Zx + y * horiz.Zy + z * horiz.Zz));
+    const altDeg = Math.asin(sinAlt) * RAD2DEG;
+    const eastComp = x * horiz.Ehx + y * horiz.Ehy;
+    const northComp = x * horiz.Nhx + y * horiz.Nhy + z * horiz.Nhz;
+    const azDeg = wrapRaDeg(Math.atan2(eastComp, northComp) * RAD2DEG);
+    return { altDeg, azDeg };
 };
 
 const getBvColorIndex = (bv) => {
@@ -486,6 +577,149 @@ const showCachedPhotos = ref(true);
 const showConstellations = ref(true);
 const showGrid = ref(true);
 const showDsos = ref(true);
+const showHorizon = ref(true);
+
+// Observer Location, Minimum Altitude & Observation Time State
+const observerLocation = computed(() => {
+    const loc = props.settings?.location;
+    if (!loc) return null;
+    const lat = Number(loc.latitude);
+    const lon = Number(loc.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+
+    const city = typeof loc.city_name === 'string' ? loc.city_name.trim() : '';
+    const latTag = `${Math.abs(lat).toFixed(1)}°${lat >= 0 ? 'N' : 'S'}`;
+    const lonTag = `${Math.abs(lon).toFixed(1)}°${lon >= 0 ? 'E' : 'W'}`;
+    return {
+        lat,
+        lon,
+        label: city || `${latTag} ${lonTag}`,
+        coordsLabel: `${latTag}, ${lonTag}`
+    };
+});
+
+const minAltitudeDeg = computed(() => {
+    const raw = props.clientSettings?.min_hours_altitude ?? props.settings?.min_altitude ?? 30;
+    const val = Number(raw);
+    return Number.isFinite(val) ? Math.max(0, Math.min(88, val)) : 30;
+});
+
+const isLiveTime = ref(true);
+const liveNowMs = ref(Date.now());
+const scrubTimeMs = ref(Date.now());
+const effectiveTimeMs = computed(() => (isLiveTime.value ? liveNowMs.value : scrubTimeMs.value));
+
+const sessionRange = computed(() => {
+    // 1. Prefer object's tonight altitude_graph session bounds (sunset - 30m -> sunrise + 30m)
+    const graph = props.object?.altitude_graph;
+    if (Array.isArray(graph) && graph.length >= 2) {
+        const s = Date.parse(graph[0].time);
+        const e = Date.parse(graph[graph.length - 1].time);
+        if (Number.isFinite(s) && Number.isFinite(e) && e > s) {
+            let midMs = (s + e) * 0.5;
+            const nightPair = props.nightTimes?.night;
+            if (Array.isArray(nightPair) && nightPair.length === 2) {
+                const ns = Date.parse(nightPair[0]);
+                const ne = Date.parse(nightPair[1]);
+                if (Number.isFinite(ns) && Number.isFinite(ne) && ne > ns) {
+                    midMs = (ns + ne) * 0.5;
+                }
+            }
+            return { startMs: s, endMs: e, midMs };
+        }
+    }
+
+    // 2. Fallback to nightTimes twilight bounds
+    const nt = props.nightTimes;
+    if (nt && typeof nt === 'object') {
+        let minT = Infinity;
+        let maxT = -Infinity;
+        for (const key of [
+            'civil',
+            'nautical',
+            'astronomical',
+            'night',
+            'astronomical_morn',
+            'nautical_morn',
+            'civil_morn'
+        ]) {
+            const pair = nt[key];
+            if (Array.isArray(pair) && pair.length === 2) {
+                const t0 = Date.parse(pair[0]);
+                const t1 = Date.parse(pair[1]);
+                if (Number.isFinite(t0) && t0 < minT) minT = t0;
+                if (Number.isFinite(t1) && t1 > maxT) maxT = t1;
+            }
+        }
+        if (Number.isFinite(minT) && Number.isFinite(maxT) && maxT > minT) {
+            const startMs = minT - 30 * 60 * 1000;
+            const endMs = maxT + 30 * 60 * 1000;
+            return { startMs, endMs, midMs: (startMs + endMs) * 0.5 };
+        }
+    }
+
+    // 3. Clean local-clock tonight fallback (17:00 -> 07:00)
+    const base = new Date(liveNowMs.value);
+    const start = new Date(base);
+    if (base.getHours() < 12) {
+        start.setDate(start.getDate() - 1);
+    }
+    start.setHours(17, 0, 0, 0);
+    const startMs = start.getTime();
+    const endMs = startMs + 14 * 3600 * 1000;
+    return { startMs, endMs, midMs: (startMs + endMs) * 0.5 };
+});
+
+const sliderValueMs = computed(() => {
+    const { startMs, endMs } = sessionRange.value;
+    return Math.max(startMs, Math.min(endMs, effectiveTimeMs.value));
+});
+
+const sliderTrackStyle = computed(() => {
+    const { startMs, endMs } = sessionRange.value;
+    const span = endMs - startMs;
+    const nt = props.nightTimes;
+    if (!nt || span <= 0) {
+        return {
+            background:
+                'linear-gradient(90deg, #334155 0%, #1e3a8a 25%, #0f172a 50%, #1e3a8a 75%, #334155 100%)'
+        };
+    }
+
+    const pct = (iso) => {
+        const t = Date.parse(iso);
+        if (!Number.isFinite(t)) return null;
+        return Math.max(0, Math.min(100, ((t - startMs) / span) * 100));
+    };
+
+    const c0 = pct(nt.civil?.[0]) ?? 4;
+    const n0 = pct(nt.nautical?.[0]) ?? 12;
+    const a0 = pct(nt.astronomical?.[0]) ?? 20;
+    const d0 = pct(nt.night?.[0]) ?? 26;
+    const d1 = pct(nt.night?.[1]) ?? 74;
+    const a1 = pct(nt.astronomical_morn?.[1]) ?? 80;
+    const n1 = pct(nt.nautical_morn?.[1]) ?? 88;
+    const c1 = pct(nt.civil_morn?.[1]) ?? 96;
+
+    return {
+        background: `linear-gradient(90deg,
+            rgba(71, 85, 105, 0.75) 0%,
+            rgba(59, 130, 246, 0.45) ${c0.toFixed(1)}%,
+            rgba(37, 99, 235, 0.55) ${n0.toFixed(1)}%,
+            rgba(29, 78, 216, 0.72) ${a0.toFixed(1)}%,
+            rgba(15, 23, 42, 0.95) ${d0.toFixed(1)}%,
+            rgba(15, 23, 42, 0.95) ${d1.toFixed(1)}%,
+            rgba(29, 78, 216, 0.72) ${a1.toFixed(1)}%,
+            rgba(37, 99, 235, 0.55) ${n1.toFixed(1)}%,
+            rgba(59, 130, 246, 0.45) ${c1.toFixed(1)}%,
+            rgba(71, 85, 105, 0.75) 100%)`
+    };
+});
+
+const formattedObsTime = computed(() => formatLocalClock(effectiveTimeMs.value));
+const formattedSessionStart = computed(() => formatLocalClock(sessionRange.value.startMs));
+const formattedSessionEnd = computed(() => formatLocalClock(sessionRange.value.endMs));
 
 const isLoadingSky = ref(!preparedSky);
 const cachedServerImages = ref([]);
@@ -494,6 +728,9 @@ const hoveredItem = ref(null);
 // Throttled status bar readout refs (decoupled from high-frequency mousemove events)
 const readoutRaText = ref(formatRaHms(initialCoords.ra));
 const readoutDecText = ref(formatDecDms(initialCoords.dec));
+const readoutAltText = ref('');
+const readoutAzText = ref('');
+const readoutBelowHorizon = ref(false);
 const readoutConstellation = ref('');
 const readoutFovText = computed(() => {
     const v = mapFovDeg.value;
@@ -506,8 +743,10 @@ let cachedBgKey = '';
 let rafId = null;
 let pointerRafId = null;
 let animFrameId = null;
+let liveClockTimer = null;
 let resizeObserver = null;
 let lastReadoutTs = 0;
+let lastReadoutCoords = { ra: initialCoords.ra, dec: initialCoords.dec };
 
 // Coalesced pointer state
 const isPanning = ref(false);
@@ -688,9 +927,384 @@ const updateStatusReadout = (raDeg, decDeg, force = false) => {
     const now = performance.now();
     if (!force && now - lastReadoutTs < 65) return;
     lastReadoutTs = now;
+    lastReadoutCoords = { ra: raDeg, dec: decDeg };
     readoutRaText.value = formatRaHms(raDeg);
     readoutDecText.value = formatDecDms(decDeg);
     readoutConstellation.value = findConstellationName(raDeg, decDeg);
+
+    const loc = observerLocation.value;
+    if (loc) {
+        const horiz = makeHorizontalBasis(loc.lat, loc.lon, effectiveTimeMs.value);
+        const { altDeg, azDeg } = computeAltAzFromRaDec(raDeg, decDeg, horiz);
+        readoutAltText.value = formatAltDeg(altDeg);
+        readoutAzText.value = formatAzCompass(azDeg);
+        readoutBelowHorizon.value = altDeg < 0;
+    } else {
+        readoutAltText.value = '';
+        readoutAzText.value = '';
+        readoutBelowHorizon.value = false;
+    }
+};
+
+// --- OBSERVATION TIME CONTROLS ---
+const onTimeSliderInput = (e) => {
+    const val = Number(e.target?.value);
+    if (!Number.isFinite(val)) return;
+    isLiveTime.value = false;
+    scrubTimeMs.value = val;
+    updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
+    scheduleDraw();
+};
+
+const stepObsTime = (deltaMinutes) => {
+    const base = effectiveTimeMs.value;
+    isLiveTime.value = false;
+    scrubTimeMs.value = base + deltaMinutes * 60 * 1000;
+    updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
+    scheduleDraw();
+};
+
+const jumpToTonightMid = () => {
+    isLiveTime.value = false;
+    scrubTimeMs.value = sessionRange.value.midMs;
+    updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
+    scheduleDraw();
+};
+
+const resetToLiveNow = () => {
+    liveNowMs.value = Date.now();
+    isLiveTime.value = true;
+    updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
+    scheduleDraw();
+};
+
+// --- 60 FPS STEREOGRAPHIC ALTITUDE CIRCLE & LOCAL HORIZON RENDERER ---
+const drawAltitudeCurveAndGround = (
+    ctx,
+    cam,
+    horiz,
+    w,
+    h,
+    altDeg,
+    fillBelowStyle,
+    strokeStyle,
+    lineWidth = 1.5,
+    lineDash = null
+) => {
+    const zC = cam.Cx * horiz.Zx + cam.Cy * horiz.Zy + cam.Cz * horiz.Zz;
+    const zE = cam.Ex * horiz.Zx + cam.Ey * horiz.Zy;
+    const zN = cam.Nx * horiz.Zx + cam.Ny * horiz.Zy + cam.Nz * horiz.Zz;
+
+    const altRad = altDeg * DEG2RAD;
+    const s = Math.sin(altRad);
+    const cosAlt = Math.cos(altRad);
+    const a = zC + s;
+    const diag = Math.hypot(w, h);
+    const rThresh = Math.max(8000, diag * 4.0);
+
+    // Branch 1: Moderate stereographic circle radius (exact Euclidean circle on screen)
+    if (Math.abs(a) * rThresh >= 2.0 * cam.f * cosAlt) {
+        const invA = 1.0 / a;
+        const cx = cam.halfW - cam.f * 2.0 * zE * invA;
+        const cy = cam.halfH - cam.f * 2.0 * zN * invA;
+        const R = Math.abs(cam.f * 2.0 * cosAlt * invA);
+
+        const nearX = Math.max(0, Math.min(w, cx));
+        const nearY = Math.max(0, Math.min(h, cy));
+        const minDist = Math.hypot(cx - nearX, cy - nearY);
+        const farX = cx < cam.halfW ? w : 0;
+        const farY = cy < cam.halfH ? h : 0;
+        const maxDist = Math.hypot(cx - farX, cy - farY);
+
+        if (fillBelowStyle) {
+            ctx.fillStyle = fillBelowStyle;
+            if (a > 0) {
+                // Sky above altDeg is INSIDE circle; ground (Alt < altDeg) is OUTSIDE
+                if (minDist >= R) {
+                    ctx.fillRect(0, 0, w, h);
+                } else if (maxDist > R) {
+                    ctx.beginPath();
+                    ctx.rect(-2, -2, w + 4, h + 4);
+                    ctx.arc(cx, cy, R, 0, TAU);
+                    ctx.fill('evenodd');
+                }
+            } else {
+                // Ground (Alt < altDeg) is INSIDE circle
+                if (maxDist <= R) {
+                    ctx.fillRect(0, 0, w, h);
+                } else if (minDist < R) {
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, R, 0, TAU);
+                    ctx.fill();
+                }
+            }
+        }
+
+        if (strokeStyle && minDist <= R + 4 && maxDist >= R - 4) {
+            ctx.save();
+            if (lineDash) ctx.setLineDash(lineDash);
+            ctx.strokeStyle = strokeStyle;
+            ctx.lineWidth = lineWidth;
+            ctx.beginPath();
+            ctx.arc(cx, cy, R, 0, TAU);
+            ctx.stroke();
+            ctx.restore();
+        }
+        return;
+    }
+
+    // Branch 2: Large radius / straight-line regime (exact rationalized quadratic, zero float32 arc jitter)
+    const G = Math.hypot(zE, zN);
+    const centerG = 4.0 * cam.f * (s - zC);
+    if (G < 1e-5) {
+        if (fillBelowStyle && centerG > 0) {
+            ctx.fillStyle = fillBelowStyle;
+            ctx.fillRect(0, 0, w, h);
+        }
+        return;
+    }
+
+    const ux = zE / G;
+    const uy = zN / G;
+    const tx = -uy;
+    const ty = ux;
+    const D = diag * 0.65;
+    const halfSpanN = 0.5 * (Math.abs(ux) * w + Math.abs(uy) * h) + 8;
+    const A = a / cam.f;
+    const B = 4.0 * G;
+    const STEPS = 48;
+
+    let minN = Infinity;
+    let maxN = -Infinity;
+    const ptsX = new Float64Array(STEPS + 1);
+    const ptsY = new Float64Array(STEPS + 1);
+
+    for (let i = 0; i <= STEPS; i++) {
+        const t = -D + (2.0 * D * i) / STEPS;
+        const C = A * t * t + centerG;
+        const disc = B * B - 4.0 * A * C;
+        if (disc < 0) {
+            if (fillBelowStyle && centerG > 0) {
+                ctx.fillStyle = fillBelowStyle;
+                ctx.fillRect(0, 0, w, h);
+            }
+            return;
+        }
+        const n = (-2.0 * C) / (B + Math.sqrt(disc));
+        if (n < minN) minN = n;
+        if (n > maxN) maxN = n;
+        ptsX[i] = cam.halfW + t * tx + n * ux;
+        ptsY[i] = cam.halfH + t * ty + n * uy;
+    }
+
+    if (minN > halfSpanN || maxN < -halfSpanN) {
+        if (fillBelowStyle && centerG > 0) {
+            ctx.fillStyle = fillBelowStyle;
+            ctx.fillRect(0, 0, w, h);
+        }
+        return;
+    }
+
+    if (fillBelowStyle) {
+        const farN = diag * 1.25;
+        ctx.fillStyle = fillBelowStyle;
+        ctx.beginPath();
+        ctx.moveTo(ptsX[0], ptsY[0]);
+        for (let i = 1; i <= STEPS; i++) {
+            ctx.lineTo(ptsX[i], ptsY[i]);
+        }
+        ctx.lineTo(cam.halfW + D * tx + farN * ux, cam.halfH + D * ty + farN * uy);
+        ctx.lineTo(cam.halfW - D * tx + farN * ux, cam.halfH - D * ty + farN * uy);
+        ctx.closePath();
+        ctx.fill();
+    }
+
+    if (strokeStyle) {
+        ctx.save();
+        if (lineDash) ctx.setLineDash(lineDash);
+        ctx.strokeStyle = strokeStyle;
+        ctx.lineWidth = lineWidth;
+        ctx.beginPath();
+        ctx.moveTo(ptsX[0], ptsY[0]);
+        for (let i = 1; i <= STEPS; i++) {
+            ctx.lineTo(ptsX[i], ptsY[i]);
+        }
+        ctx.stroke();
+        ctx.restore();
+    }
+};
+
+const drawHorizonOverlay = (ctx, cam, w, h, fov, minPointCos, placedBoxes, overlapsPlaced) => {
+    const loc = observerLocation.value;
+    if (!loc) return;
+
+    const horiz = makeHorizontalBasis(loc.lat, loc.lon, effectiveTimeMs.value);
+
+    // 1. Shaded below-horizon ground veil + soft horizon glow + crisp Alt = 0° curve
+    drawAltitudeCurveAndGround(
+        ctx,
+        cam,
+        horiz,
+        w,
+        h,
+        0.0,
+        'rgba(5, 9, 15, 0.74)',
+        'rgba(45, 212, 191, 0.22)',
+        4.2,
+        null
+    );
+    drawAltitudeCurveAndGround(
+        ctx,
+        cam,
+        horiz,
+        w,
+        h,
+        0.0,
+        null,
+        'rgba(52, 211, 153, 0.82)',
+        1.6,
+        null
+    );
+
+    // 2. Minimum Imaging Altitude dashed ring (matching AltitudeGraph yellow threshold)
+    const minAlt = minAltitudeDeg.value;
+    if (minAlt > 0.5 && minAlt < 88) {
+        drawAltitudeCurveAndGround(
+            ctx,
+            cam,
+            horiz,
+            w,
+            h,
+            minAlt,
+            null,
+            'rgba(234, 179, 8, 0.44)',
+            1.25,
+            [6, 5]
+        );
+
+        // Place a concise "Min XX°" tag near the view center's azimuth along the min-altitude curve
+        const eastC = cam.Cx * horiz.Ehx + cam.Cy * horiz.Ehy;
+        const northC = cam.Cx * horiz.Nhx + cam.Cy * horiz.Nhy + cam.Cz * horiz.Nhz;
+        const azLen = Math.hypot(eastC, northC);
+        const cosAz = azLen > 1e-5 ? northC / azLen : 0.0;
+        const sinAz = azLen > 1e-5 ? eastC / azLen : 1.0;
+        const sinMin = Math.sin(minAlt * DEG2RAD);
+        const cosMin = Math.cos(minAlt * DEG2RAD);
+        const mx3 = sinMin * horiz.Zx + cosMin * (cosAz * horiz.Nhx + sinAz * horiz.Ehx);
+        const my3 = sinMin * horiz.Zy + cosMin * (cosAz * horiz.Nhy + sinAz * horiz.Ehy);
+        const mz3 = sinMin * horiz.Zz + cosMin * (cosAz * horiz.Nhz);
+        const mCosC = mx3 * cam.Cx + my3 * cam.Cy + mz3 * cam.Cz;
+
+        if (mCosC > minPointCos) {
+            const mFk = (cam.f * 2.0) / (1.0 + mCosC);
+            const msx = cam.halfW - mFk * (mx3 * cam.Ex + my3 * cam.Ey);
+            const msy = cam.halfH - mFk * (mx3 * cam.Nx + my3 * cam.Ny + mz3 * cam.Nz);
+            if (msx > 46 && msx < w - 46 && msy > 34 && msy < h - 42) {
+                const tag = `Min ${Math.round(minAlt)}°`;
+                ctx.font = '500 10px system-ui, -apple-system, sans-serif';
+                const tw = getMeasuredTextWidth(ctx, 'minalt', tag);
+                const pw = tw + 10;
+                const ph = 16;
+                const x1 = msx - pw * 0.5;
+                const y1 = msy - ph * 0.5;
+                if (!overlapsPlaced(x1, y1, x1 + pw, y1 + ph, 3)) {
+                    placedBoxes.push({ x1, y1, x2: x1 + pw, y2: y1 + ph });
+                    ctx.fillStyle = 'rgba(10, 14, 22, 0.88)';
+                    ctx.strokeStyle = 'rgba(234, 179, 8, 0.45)';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    if (ctx.roundRect) {
+                        ctx.roundRect(x1, y1, pw, ph, 4);
+                    } else {
+                        ctx.rect(x1, y1, pw, ph);
+                    }
+                    ctx.fill();
+                    ctx.stroke();
+
+                    ctx.fillStyle = 'rgba(253, 224, 71, 0.9)';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(tag, msx, msy + 0.5);
+                }
+            }
+        }
+    }
+
+    // 3. Cardinal & Intercardinal Compass Badges along Alt = 0°
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    for (let i = 0; i < COMPASS_POINTS.length; i++) {
+        const cp = COMPASS_POINTS[i];
+        if (!cp.major && fov > 85) continue;
+
+        const px3 = cp.cosAz * horiz.Nhx + cp.sinAz * horiz.Ehx;
+        const py3 = cp.cosAz * horiz.Nhy + cp.sinAz * horiz.Ehy;
+        const pz3 = cp.cosAz * horiz.Nhz;
+        const cosC = px3 * cam.Cx + py3 * cam.Cy + pz3 * cam.Cz;
+        if (cosC < minPointCos) continue;
+
+        const fk = (cam.f * 2.0) / (1.0 + cosC);
+        const sx = cam.halfW - fk * (px3 * cam.Ex + py3 * cam.Ey);
+        const sy = cam.halfH - fk * (px3 * cam.Nx + py3 * cam.Ny + pz3 * cam.Nz);
+        if (sx < 20 || sx > w - 20 || sy < 24 || sy > h - 34) continue;
+
+        ctx.font = cp.major
+            ? '700 11.5px system-ui, -apple-system, sans-serif'
+            : '600 10px system-ui, -apple-system, sans-serif';
+        const tw = getMeasuredTextWidth(ctx, cp.major ? 'cmpM' : 'cmpS', cp.label);
+        const pw = Math.max(cp.major ? 22 : 20, tw + (cp.major ? 12 : 9));
+        const ph = cp.major ? 20 : 17;
+        const x1 = sx - pw * 0.5;
+        const y1 = sy - ph * 0.5;
+
+        placedBoxes.push({ x1, y1, x2: x1 + pw, y2: y1 + ph });
+
+        ctx.fillStyle = 'rgba(7, 13, 20, 0.92)';
+        ctx.strokeStyle =
+            cp.label === 'N'
+                ? 'rgba(248, 113, 113, 0.72)'
+                : cp.major
+                  ? 'rgba(52, 211, 153, 0.72)'
+                  : 'rgba(52, 211, 153, 0.38)';
+        ctx.lineWidth = cp.major ? 1.25 : 1.0;
+        ctx.beginPath();
+        if (ctx.roundRect) {
+            ctx.roundRect(x1, y1, pw, ph, 5);
+        } else {
+            ctx.rect(x1, y1, pw, ph);
+        }
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle =
+            cp.label === 'N' ? '#fca5a5' : cp.major ? '#a7f3d0' : 'rgba(167, 243, 208, 0.82)';
+        ctx.fillText(cp.label, sx, sy + 0.5);
+    }
+
+    // 4. Overhead Zenith Marker (+ Zenith)
+    const zCosC = horiz.Zx * cam.Cx + horiz.Zy * cam.Cy + horiz.Zz * cam.Cz;
+    if (zCosC > minPointCos) {
+        const zFk = (cam.f * 2.0) / (1.0 + zCosC);
+        const zsx = cam.halfW - zFk * (horiz.Zx * cam.Ex + horiz.Zy * cam.Ey);
+        const zsy = cam.halfH - zFk * (horiz.Zx * cam.Nx + horiz.Zy * cam.Ny + horiz.Zz * cam.Nz);
+        if (zsx > 36 && zsx < w - 36 && zsy > 30 && zsy < h - 36) {
+            ctx.strokeStyle = 'rgba(110, 231, 183, 0.65)';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.moveTo(zsx - 5, zsy);
+            ctx.lineTo(zsx + 5, zsy);
+            ctx.moveTo(zsx, zsy - 5);
+            ctx.lineTo(zsx, zsy + 5);
+            ctx.stroke();
+
+            ctx.font = '500 10px system-ui, -apple-system, sans-serif';
+            ctx.fillStyle = 'rgba(167, 243, 208, 0.72)';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('Zenith', zsx + 8, zsy);
+        }
+    }
 };
 
 // --- COMBINED CACHED SKY IMAGES & PRE-INDEXED DSO TABLE ---
@@ -1487,6 +2101,11 @@ const drawSkyCanvas = () => {
         }
     }
 
+    // 8.5 Local Observer Horizon, Ground Veil, Min-Altitude Ring & Compass Points
+    if (showHorizon.value && observerLocation.value) {
+        drawHorizonOverlay(ctx, cam, w, h, fov, minPointCos, placedBoxes, overlapsPlaced);
+    }
+
     // 9. Active Target Highlight Ring, Rotated Sensor FOV Frame & Comparison Setups
     if (props.object) {
         const sensorCoords = getTargetCoords();
@@ -1905,12 +2524,17 @@ watch(
         showCachedPhotos.value,
         showConstellations.value,
         showGrid.value,
-        showDsos.value
+        showDsos.value,
+        showHorizon.value,
+        observerLocation.value?.lat,
+        observerLocation.value?.lon,
+        minAltitudeDeg.value
     ],
     ([, newStatus]) => {
         if (newStatus === 'cached') {
             fetchCachedSkyImages();
         }
+        updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
         scheduleDraw();
     }
 );
@@ -1927,6 +2551,16 @@ watch(
 
 onMounted(async () => {
     window.addEventListener('keydown', onKeyDown);
+
+    liveClockTimer = window.setInterval(() => {
+        if (isLiveTime.value) {
+            liveNowMs.value = Date.now();
+            updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
+            if (showHorizon.value && observerLocation.value) {
+                scheduleDraw();
+            }
+        }
+    }, 30000);
 
     if (containerRef.value) {
         const updateDims = () => {
@@ -1949,6 +2583,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
     window.removeEventListener('keydown', onKeyDown);
+    if (liveClockTimer) clearInterval(liveClockTimer);
     if (resizeObserver) resizeObserver.disconnect();
     if (rafId) cancelAnimationFrame(rafId);
     if (pointerRafId) cancelAnimationFrame(pointerRafId);
@@ -1999,6 +2634,16 @@ onUnmounted(() => {
 
         <!-- Top-Right Layer Toggles & Quick Zoom -->
         <div class="sky-top-right-bar" @mousedown.stop @touchstart.stop>
+            <button
+                v-if="observerLocation"
+                type="button"
+                class="sky-layer-chip horizon-chip"
+                :class="{ active: showHorizon }"
+                @click="showHorizon = !showHorizon"
+                :title="`Toggle local horizon, cardinal directions & min altitude (${observerLocation.coordsLabel})`"
+            >
+                <span>⛰ Horizon</span>
+            </button>
             <button
                 type="button"
                 class="sky-layer-chip"
@@ -2086,14 +2731,96 @@ onUnmounted(() => {
             <span>Loading star chart...</span>
         </div>
 
-        <!-- Bottom-Left Live Coordinate / Constellation / FOV Readout -->
+        <!-- Bottom-Left Live Coordinate / Alt-Az / Constellation / FOV Readout -->
         <div class="sky-bottom-left-bar">
             <span class="coord-seg">RA {{ readoutRaText }}</span>
             <span class="coord-seg">Dec {{ readoutDecText }}</span>
+            <span
+                v-if="readoutAltText"
+                class="coord-seg alt-seg"
+                :class="{ 'below-horizon': readoutBelowHorizon }"
+            >
+                Alt {{ readoutAltText }}
+            </span>
+            <span v-if="readoutAzText" class="coord-seg az-seg">
+                Az {{ readoutAzText }}
+            </span>
             <span v-if="readoutConstellation" class="coord-seg const-seg">
                 {{ readoutConstellation }}
             </span>
             <span class="coord-seg fov-seg">FOV {{ readoutFovText }}</span>
+        </div>
+
+        <!-- Bottom-Right Observation Time Bar (when Horizon is enabled) -->
+        <div
+            v-if="showHorizon && observerLocation"
+            class="sky-time-bar"
+            @mousedown.stop
+            @touchstart.stop
+            @wheel.stop
+        >
+            <div class="time-bar-top">
+                <span class="loc-pill" :title="observerLocation.coordsLabel">
+                    📍 {{ observerLocation.label }}
+                </span>
+
+                <div class="time-readout-group">
+                    <span class="time-mode-dot" :class="{ live: isLiveTime }"></span>
+                    <span class="time-clock-text">{{ formattedObsTime }}</span>
+                </div>
+
+                <div class="time-quick-btns">
+                    <button
+                        type="button"
+                        class="time-mini-btn"
+                        @click="stepObsTime(-60)"
+                        title="Step back 1 hour"
+                    >
+                        −1h
+                    </button>
+                    <button
+                        type="button"
+                        class="time-mini-btn"
+                        @click="stepObsTime(60)"
+                        title="Step forward 1 hour"
+                    >
+                        +1h
+                    </button>
+                    <button
+                        type="button"
+                        class="time-mini-btn"
+                        @click="jumpToTonightMid"
+                        title="Jump to tonight's dark-sky midpoint"
+                    >
+                        Tonight
+                    </button>
+                    <button
+                        type="button"
+                        class="time-mini-btn now-btn"
+                        :class="{ active: isLiveTime }"
+                        @click="resetToLiveNow"
+                        title="Sync horizon to live current time"
+                    >
+                        Now
+                    </button>
+                </div>
+            </div>
+
+            <div class="time-slider-row">
+                <span class="session-bound">{{ formattedSessionStart }}</span>
+                <input
+                    type="range"
+                    class="sky-time-slider"
+                    :min="sessionRange.startMs"
+                    :max="sessionRange.endMs"
+                    :step="60000"
+                    :value="sliderValueMs"
+                    :style="sliderTrackStyle"
+                    @input="onTimeSliderInput"
+                    title="Scrub through tonight's observing session (Sunset → Astronomical Night → Sunrise)"
+                />
+                <span class="session-bound">{{ formattedSessionEnd }}</span>
+            </div>
         </div>
     </div>
 </template>
@@ -2225,6 +2952,12 @@ onUnmounted(() => {
     color: #e0f2fe;
 }
 
+.sky-layer-chip.horizon-chip.active {
+    background: rgba(8, 38, 32, 0.94);
+    border-color: rgba(52, 211, 153, 0.52);
+    color: #d1fae5;
+}
+
 .sky-zoom-stepper {
     display: inline-flex;
     border-radius: 7px;
@@ -2315,23 +3048,35 @@ onUnmounted(() => {
     pointer-events: none;
 }
 
-/* Bottom-Left Status Readout (RA / Dec / Constellation / FOV) */
+/* Bottom-Left Status Readout (RA / Dec / Alt / Az / Constellation / FOV) */
 .sky-bottom-left-bar {
     position: absolute;
     bottom: 10px;
     left: 12px;
     display: inline-flex;
     align-items: center;
-    gap: 14px;
+    gap: 13px;
     padding: 4px 10px;
     border-radius: 6px;
-    background: rgba(6, 9, 16, 0.86);
+    background: rgba(6, 9, 16, 0.88);
     color: #cbd5e1;
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.76rem;
+    font-size: 0.75rem;
     letter-spacing: 0.01em;
     pointer-events: none;
     z-index: 32;
+}
+
+.alt-seg {
+    color: #6ee7b7;
+}
+
+.alt-seg.below-horizon {
+    color: #fca5a5;
+}
+
+.az-seg {
+    color: #94a3b8;
 }
 
 .const-seg {
@@ -2344,6 +3089,151 @@ onUnmounted(() => {
     color: #93c5fd;
 }
 
+/* Bottom-Right Observation Time Bar */
+.sky-time-bar {
+    position: absolute;
+    bottom: 10px;
+    right: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: rgba(9, 14, 23, 0.94);
+    border: 1px solid rgba(148, 163, 184, 0.26);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+    z-index: 33;
+    min-width: 272px;
+    max-width: 340px;
+}
+
+.time-bar-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.loc-pill {
+    font-size: 0.71rem;
+    color: #94a3b8;
+    max-width: 112px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.time-readout-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.time-mode-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #f59e0b;
+}
+
+.time-mode-dot.live {
+    background: #34d399;
+}
+
+.time-clock-text {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #f1f5f9;
+}
+
+.time-quick-btns {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.time-mini-btn {
+    padding: 2px 6px;
+    margin: 0;
+    border-radius: 4px;
+    border: 1px solid rgba(148, 163, 184, 0.24);
+    background: rgba(18, 26, 40, 0.92);
+    color: #cbd5e1;
+    font-size: 0.68rem;
+    font-weight: 500;
+    line-height: 1.25;
+    cursor: pointer;
+    transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.time-mini-btn:hover {
+    background: rgba(30, 41, 59, 0.96);
+    border-color: rgba(148, 163, 184, 0.48);
+    color: #ffffff;
+}
+
+.time-mini-btn.now-btn.active {
+    background: rgba(10, 46, 38, 0.95);
+    border-color: rgba(52, 211, 153, 0.58);
+    color: #a7f3d0;
+}
+
+.time-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.session-bound {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.65rem;
+    color: #64748b;
+    flex-shrink: 0;
+}
+
+.sky-time-slider {
+    flex: 1;
+    height: 6px;
+    margin: 0;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.24);
+    appearance: none;
+    -webkit-appearance: none;
+    cursor: pointer;
+    outline: none;
+}
+
+.sky-time-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #34d399;
+    border: 1.5px solid #061018;
+    cursor: pointer;
+}
+
+.sky-time-slider::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #34d399;
+    border: 1.5px solid #061018;
+    cursor: pointer;
+}
+
+@media (max-width: 960px) {
+    .sky-time-bar {
+        bottom: 42px;
+        right: 12px;
+        left: 12px;
+        max-width: none;
+    }
+}
+
 @media (max-width: 768px) {
     .sky-top-right-bar {
         top: 52px;
@@ -2353,10 +3243,15 @@ onUnmounted(() => {
     }
 
     .sky-bottom-left-bar {
-        gap: 9px;
-        font-size: 0.69rem;
+        gap: 8px;
+        font-size: 0.68rem;
         right: 12px;
         flex-wrap: wrap;
+    }
+
+    .sky-time-bar {
+        bottom: 52px;
+        min-width: 0;
     }
 }
 </style>

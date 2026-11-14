@@ -13,7 +13,7 @@ import {
     formatMagnitude
 } from '../utils/catalogMeta.js';
 
-const props = defineProps(['object', 'objects', 'settings', 'clientSettings', 'searchQuery', 'activeFov']);
+const props = defineProps(['object', 'objects', 'settings', 'clientSettings', 'nightTimes', 'searchQuery', 'activeFov']);
 const emit = defineEmits(['update-settings', 'update-client-settings', 'update-search', 'select-object', 'update-fov', 'open-mobile-list', 'update-object-settings']);
 
 // --- PHYSICAL SENSOR & DEFAULT IMAGE FOV CALCULATION (Single Source of Truth) ---
@@ -873,6 +873,7 @@ onUnmounted(() => {
                 :objects="objects"
                 :settings="settings"
                 :clientSettings="clientSettings"
+                :nightTimes="nightTimes"
                 :sensorFov="systemSensorFov"
                 :comparisonRectangles="activeComparisonRectangles"
                 :sensorCenter="currentSensorCenter"
