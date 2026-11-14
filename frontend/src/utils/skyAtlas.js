@@ -39,6 +39,112 @@ const angularSeparationDeg = (ra1, dec1, ra2, dec2) => {
     return Math.acos(Math.max(-1.0, Math.min(1.0, cosC))) * RAD2DEG;
 };
 
+const disposeSheetCache = (cacheMap) => {
+    if (!cacheMap) return;
+    for (const rec of cacheMap.values()) {
+        if (rec?.isBitmap && rec.img && typeof rec.img.close === 'function') {
+            try {
+                rec.img.close();
+            } catch {
+                // Ignore already-closed ImageBitmap
+            }
+        }
+    }
+};
+
+const loadSheetInternal = (sheetIndex) => {
+    const meta = sheetMetaByIndex.get(sheetIndex);
+    if (!meta) return Promise.resolve(null);
+
+    const existing = sheetImageCache.get(sheetIndex);
+    if (existing) {
+        return existing.promise || Promise.resolve(existing.status === 'ready' ? existing.img : null);
+    }
+
+    const cacheRef = sheetImageCache;
+    const record = { img: null, status: 'loading', isBitmap: false, promise: null };
+    cacheRef.set(sheetIndex, record);
+
+    const loadViaHtmlImage = () =>
+        new Promise((resolve) => {
+            const img = new Image();
+            img.decoding = 'async';
+            img.onload = () => {
+                if (sheetImageCache !== cacheRef) {
+                    resolve(null);
+                    return;
+                }
+                record.img = img;
+                record.isBitmap = false;
+                record.status = 'ready';
+                skyAtlasVersion.value++;
+                resolve(img);
+            };
+            img.onerror = () => {
+                if (sheetImageCache === cacheRef) {
+                    record.status = 'error';
+                }
+                resolve(null);
+            };
+            img.src = meta.url;
+        });
+
+    record.promise = (async () => {
+        if (typeof createImageBitmap === 'function') {
+            try {
+                const res = await fetch(meta.url);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const blob = await res.blob();
+                const bitmap = await createImageBitmap(blob, {
+                    premultiplyAlpha: 'premultiply',
+                    colorSpaceConversion: 'none'
+                });
+                if (sheetImageCache !== cacheRef) {
+                    bitmap.close();
+                    return null;
+                }
+                record.img = bitmap;
+                record.isBitmap = true;
+                record.status = 'ready';
+                skyAtlasVersion.value++;
+                return bitmap;
+            } catch {
+                return loadViaHtmlImage();
+            }
+        }
+        return loadViaHtmlImage();
+    })();
+
+    return record.promise;
+};
+
+const scheduleBackgroundSheetPreload = () => {
+    const indices = Array.from(sheetMetaByIndex.keys());
+    if (indices.length === 0) return;
+
+    let cursor = 0;
+    let active = 0;
+    const MAX_PRELOAD_CONCURRENCY = 2;
+
+    const pump = () => {
+        while (active < MAX_PRELOAD_CONCURRENCY && cursor < indices.length) {
+            const idx = indices[cursor++];
+            if (sheetImageCache.has(idx)) continue;
+            active++;
+            loadSheetInternal(idx).finally(() => {
+                active = Math.max(0, active - 1);
+                pump();
+            });
+        }
+    };
+
+    if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+        window.requestIdleCallback(() => pump(), { timeout: 300 });
+    } else {
+        setTimeout(pump, 50);
+    }
+};
+
 const indexManifest = (data) => {
     const nextSheets = new Map();
     const rawSheets = Array.isArray(data?.sheets) ? data.sheets : [];
@@ -80,8 +186,11 @@ const indexManifest = (data) => {
         const d = dec * DEG2RAD;
         const cd = Math.cos(d);
 
+        const norm = normalizeTargetKey(it.name);
+
         const record = {
             name: String(it.name || ''),
+            normName: norm,
             commonName: String(it.common || ''),
             type: String(it.type || ''),
             ra,
@@ -100,7 +209,6 @@ const indexManifest = (data) => {
 
         preparedItems.push(record);
 
-        const norm = normalizeTargetKey(record.name);
         if (norm && !nextByName.has(norm)) {
             nextByName.set(norm, record);
         }
@@ -114,8 +222,10 @@ const indexManifest = (data) => {
         bucket.push(record);
     }
 
+    const prevCache = sheetImageCache;
     sheetMetaByIndex = nextSheets;
     sheetImageCache = new Map();
+    disposeSheetCache(prevCache);
     itemByNormName = nextByName;
     decBuckets = nextBuckets;
     skyAtlasItems.value = preparedItems;
@@ -128,6 +238,7 @@ const indexManifest = (data) => {
     };
     skyAtlasReady.value = preparedItems.length > 0;
     skyAtlasVersion.value++;
+    scheduleBackgroundSheetPreload();
 };
 
 export const ensureSkyAtlasLoaded = (forceReload = false) => {
@@ -143,8 +254,10 @@ export const ensureSkyAtlasLoaded = (forceReload = false) => {
             });
             if (!res.ok) {
                 if (forceReload) {
+                    const prevCache = sheetImageCache;
                     sheetMetaByIndex = new Map();
                     sheetImageCache = new Map();
+                    disposeSheetCache(prevCache);
                     itemByNormName = new Map();
                     decBuckets = new Map();
                     skyAtlasItems.value = [];
@@ -172,27 +285,11 @@ export const ensureSkyAtlasLoaded = (forceReload = false) => {
 };
 
 export const ensureAtlasSheetImage = (sheetIndex) => {
-    const meta = sheetMetaByIndex.get(sheetIndex);
-    if (!meta) return null;
-
     const existing = sheetImageCache.get(sheetIndex);
     if (existing) {
         return existing.status === 'ready' ? existing.img : null;
     }
-
-    const img = new Image();
-    img.decoding = 'async';
-    const record = { img, status: 'loading' };
-    sheetImageCache.set(sheetIndex, record);
-
-    img.onload = () => {
-        record.status = 'ready';
-        skyAtlasVersion.value++;
-    };
-    img.onerror = () => {
-        record.status = 'error';
-    };
-    img.src = meta.url;
+    loadSheetInternal(sheetIndex);
     return null;
 };
 

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { ref, shallowRef, computed, watch, onMounted, onUnmounted } from 'vue';
 import {
     skyAtlasVersion,
     skyAtlasItems,
@@ -55,6 +55,86 @@ const textWidthCache = new Map();    // `${fontKey}|${text}` -> number
 const imageElementCache = new Map(); // url -> { img, status: 'loading' | 'ready' | 'error' }
 let inflightImageLoads = 0;
 const MAX_CONCURRENT_INDIVIDUAL_LOADS = 6;
+
+// --- 48-PATCH SPHERICAL BOUNDING-CONE PARTITION (6 Dec bands x 8 RA sectors) ---
+const PATCH_DEC_BINS = 6;
+const PATCH_RA_BINS = 8;
+const PATCH_COUNT = PATCH_DEC_BINS * PATCH_RA_BINS;
+const patchCx = new Float64Array(PATCH_COUNT);
+const patchCy = new Float64Array(PATCH_COUNT);
+const patchCz = new Float64Array(PATCH_COUNT);
+const patchRadius = new Float64Array(PATCH_COUNT);
+const patchCosR = new Float64Array(PATCH_COUNT);
+const patchSinR = new Float64Array(PATCH_COUNT);
+const visPatch = new Uint8Array(PATCH_COUNT);
+
+(() => {
+    const SAMPLES = 12;
+    for (let dBin = 0; dBin < PATCH_DEC_BINS; dBin++) {
+        const decMin = -90.0 + dBin * 30.0;
+        const decMax = decMin + 30.0;
+        for (let rBin = 0; rBin < PATCH_RA_BINS; rBin++) {
+            const raMin = rBin * 45.0;
+            const raMax = raMin + 45.0;
+            const pid = dBin * PATCH_RA_BINS + rBin;
+
+            let sx = 0;
+            let sy = 0;
+            let sz = 0;
+            for (let di = 0; di <= SAMPLES; di++) {
+                const d = (decMin + ((decMax - decMin) * di) / SAMPLES) * DEG2RAD;
+                const cd = Math.cos(d);
+                const sd = Math.sin(d);
+                for (let ri = 0; ri <= SAMPLES; ri++) {
+                    const a = (raMin + ((raMax - raMin) * ri) / SAMPLES) * DEG2RAD;
+                    sx += cd * Math.cos(a);
+                    sy += cd * Math.sin(a);
+                    sz += sd;
+                }
+            }
+            const len = Math.hypot(sx, sy, sz) || 1.0;
+            const cx = sx / len;
+            const cy = sy / len;
+            const cz = sz / len;
+
+            let minDot = 1.0;
+            for (let di = 0; di <= SAMPLES; di++) {
+                const d = (decMin + ((decMax - decMin) * di) / SAMPLES) * DEG2RAD;
+                const cd = Math.cos(d);
+                const sd = Math.sin(d);
+                for (let ri = 0; ri <= SAMPLES; ri++) {
+                    if (di > 0 && di < SAMPLES && ri > 0 && ri < SAMPLES) continue;
+                    const a = (raMin + ((raMax - raMin) * ri) / SAMPLES) * DEG2RAD;
+                    const dot = cx * cd * Math.cos(a) + cy * cd * Math.sin(a) + cz * sd;
+                    if (dot < minDot) minDot = dot;
+                }
+            }
+            // Add +0.065 rad (~3.7 deg) safety margin for wide-FOV tiles near patch borders
+            const rad = Math.min(Math.PI, Math.acos(Math.max(-1.0, Math.min(1.0, minDot))) + 0.065);
+            patchCx[pid] = cx;
+            patchCy[pid] = cy;
+            patchCz[pid] = cz;
+            patchRadius[pid] = rad;
+            patchCosR[pid] = Math.cos(rad);
+            patchSinR[pid] = Math.sin(rad);
+        }
+    }
+})();
+
+const getSkyPatchId = (raDeg, decDeg) => {
+    let r = Number(raDeg) % 360.0;
+    if (r < 0) r += 360.0;
+    const rBin = Math.min(PATCH_RA_BINS - 1, Math.max(0, (r / 45.0) | 0));
+    const dClamped = Math.max(-90.0, Math.min(89.999, Number(decDeg)));
+    const dBin = Math.min(PATCH_DEC_BINS - 1, Math.max(0, ((dClamped + 90.0) / 30.0) | 0));
+    return dBin * PATCH_RA_BINS + rBin;
+};
+
+// Reusable zero-GC scratch buffers for per-frame horizon curves and dense-tile cell culling
+const HORIZ_STEPS = 48;
+const horizPtsX = new Float64Array(HORIZ_STEPS + 1);
+const horizPtsY = new Float64Array(HORIZ_STEPS + 1);
+let denseCellCounts = new Uint8Array(4096);
 
 const wrapRaDeg = (ra) => {
     let r = Number(ra) % 360.0;
@@ -1010,7 +1090,8 @@ const formattedSessionStart = computed(() => formatLocalClock(sessionRange.value
 const formattedSessionEnd = computed(() => formatLocalClock(sessionRange.value.endMs));
 
 const isLoadingSky = ref(!preparedSky);
-const cachedServerImages = ref([]);
+const cachedServerImages = shallowRef([]);
+const skyPhotoCount = ref(0);
 const hoveredItem = ref(null);
 
 // Throttled status bar readout refs (decoupled from high-frequency mousemove events)
@@ -1036,7 +1117,21 @@ let resizeObserver = null;
 let lastReadoutTs = 0;
 let lastReadoutCoords = { ra: initialCoords.ra, dec: initialCoords.dec };
 
-// Coalesced pointer state
+// Cached canvas screen origin (avoids synchronous getBoundingClientRect() layout reflows on mousemove/wheel)
+let canvasLeft = 0;
+let canvasTop = 0;
+let canvasRectValid = false;
+const refreshCanvasRect = () => {
+    const el = canvasRef.value;
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    canvasLeft = rect.left;
+    canvasTop = rect.top;
+    canvasRectValid = rect.width > 0 && rect.height > 0;
+    return canvasRectValid;
+};
+
+// Coalesced pointer state & reusable zero-GC per-frame pools
 const isPanning = ref(false);
 let panMoved = false;
 let panStartScreen = { x: 0, y: 0 };
@@ -1044,7 +1139,85 @@ let panStartSky = { ra: 0, dec: 0 };
 let pendingPointer = null; // { px, py, clientX, clientY }
 let pinchStartDist = 0;
 let pinchStartFov = 35.0;
-let interactiveItems = [];
+
+const interactivePool = [];
+let interactiveCount = 0;
+const pushInteractiveItem = (
+    kind,
+    name,
+    commonName,
+    fov,
+    ra,
+    dec,
+    x,
+    y,
+    hitR,
+    refObj = null,
+    isCustom = false
+) => {
+    let slot = interactivePool[interactiveCount];
+    if (!slot) {
+        slot = {
+            kind,
+            name,
+            commonName,
+            fov,
+            ra,
+            dec,
+            x,
+            y,
+            hitR,
+            refObj,
+            isCustom
+        };
+        interactivePool[interactiveCount] = slot;
+    } else {
+        slot.kind = kind;
+        slot.name = name;
+        slot.commonName = commonName;
+        slot.fov = fov;
+        slot.ra = ra;
+        slot.dec = dec;
+        slot.x = x;
+        slot.y = y;
+        slot.hitR = hitR;
+        slot.refObj = refObj;
+        slot.isCustom = isCustom;
+    }
+    interactiveCount++;
+};
+
+const placedBoxesPool = [];
+let placedBoxesCount = 0;
+const pushPlacedBox = (x1, y1, x2, y2) => {
+    let slot = placedBoxesPool[placedBoxesCount];
+    if (!slot) {
+        slot = { x1, y1, x2, y2 };
+        placedBoxesPool[placedBoxesCount] = slot;
+    } else {
+        slot.x1 = x1;
+        slot.y1 = y1;
+        slot.x2 = x2;
+        slot.y2 = y2;
+    }
+    placedBoxesCount++;
+};
+
+const visibleDsosPool = [];
+let visibleDsosCount = 0;
+const pushVisibleDso = (d, sx, sy, rPx) => {
+    let slot = visibleDsosPool[visibleDsosCount];
+    if (!slot) {
+        slot = { d, sx, sy, rPx };
+        visibleDsosPool[visibleDsosCount] = slot;
+    } else {
+        slot.d = d;
+        slot.sx = sx;
+        slot.sy = sy;
+        slot.rPx = rPx;
+    }
+    visibleDsosCount++;
+};
 
 // --- FAST CAMERA BASIS & PROJECTION ---
 const makeCameraBasis = (centerRaDeg, centerDecDeg, w, h, fovDeg) => {
@@ -1415,12 +1588,12 @@ const drawAltitudeCurveAndGround = (
     const halfSpanN = 0.5 * (Math.abs(ux) * w + Math.abs(uy) * h) + 8;
     const A = a / cam.f;
     const B = 4.0 * G;
-    const STEPS = 48;
+    const STEPS = HORIZ_STEPS;
 
     let minN = Infinity;
     let maxN = -Infinity;
-    const ptsX = new Float64Array(STEPS + 1);
-    const ptsY = new Float64Array(STEPS + 1);
+    const ptsX = horizPtsX;
+    const ptsY = horizPtsY;
 
     for (let i = 0; i <= STEPS; i++) {
         const t = -D + (2.0 * D * i) / STEPS;
@@ -1477,7 +1650,7 @@ const drawAltitudeCurveAndGround = (
     }
 };
 
-const drawHorizonOverlay = (ctx, cam, w, h, fov, minPointCos, placedBoxes, overlapsPlaced) => {
+const drawHorizonOverlay = (ctx, cam, w, h, fov, minPointCos, overlapsPlaced) => {
     const loc = observerLocation.value;
     if (!loc) return;
 
@@ -1551,7 +1724,7 @@ const drawHorizonOverlay = (ctx, cam, w, h, fov, minPointCos, placedBoxes, overl
                 const x1 = msx - pw * 0.5;
                 const y1 = msy - ph * 0.5;
                 if (!overlapsPlaced(x1, y1, x1 + pw, y1 + ph, 3)) {
-                    placedBoxes.push({ x1, y1, x2: x1 + pw, y2: y1 + ph });
+                    pushPlacedBox(x1, y1, x1 + pw, y1 + ph);
                     ctx.fillStyle = 'rgba(10, 14, 22, 0.88)';
                     ctx.strokeStyle = 'rgba(234, 179, 8, 0.45)';
                     ctx.lineWidth = 1;
@@ -1601,7 +1774,7 @@ const drawHorizonOverlay = (ctx, cam, w, h, fov, minPointCos, placedBoxes, overl
         const x1 = sx - pw * 0.5;
         const y1 = sy - ph * 0.5;
 
-        placedBoxes.push({ x1, y1, x2: x1 + pw, y2: y1 + ph });
+        pushPlacedBox(x1, y1, x1 + pw, y1 + ph);
 
         ctx.fillStyle = 'rgba(7, 13, 20, 0.92)';
         ctx.strokeStyle =
@@ -1655,20 +1828,19 @@ const drawHorizonOverlay = (ctx, cam, w, h, fov, minPointCos, placedBoxes, overl
     }
 };
 
-// --- COMBINED CACHED SKY IMAGES & PRE-INDEXED DSO TABLE ---
-const fetchCachedSkyImages = async () => {
-    try {
-        const res = await fetch('/api/cache/sky-images');
-        if (!res.ok) return;
-        const data = await res.json();
-        if (Array.isArray(data?.images)) {
-            cachedServerImages.value = data.images;
-            scheduleDraw();
-        }
-    } catch (err) {
-        console.warn('Could not load cached sky images:', err);
-    }
-};
+// --- PRE-INDEXED NON-REACTIVE SCENE TABLES + 3D SPHERICAL PATCH SOA ---
+let skyPhotosList = [];
+let photoSoA = new Float32Array(0);      // [x, y, z, fovRad] * N
+let photoPatchIds = new Uint8Array(0);   // patchId (0..47) * N
+let photoIndexByName = new Map();
+let photoByNormName = new Map();
+let photoByKey = new Map();
+
+let preparedDsos = [];
+let dsoSoA = new Float32Array(0);        // [x, y, z, majHalfRad] * M
+let dsoPatchIds = new Uint8Array(0);     // patchId (0..47) * M
+let dsoByNameMap = new Map();
+let objectByNameMap = new Map();
 
 const normalizePhotoKeyName = (name) =>
     String(name || '')
@@ -1676,16 +1848,72 @@ const normalizePhotoKeyName = (name) =>
         .toUpperCase()
         .replace(/[\s_-]+/g, '');
 
-const allSkyPhotos = computed(() => {
-    const byKey = new Map();
-    const atlasByNormName = new Map();
-    const activeName = props.object?.name || '';
+const normCatalogKey = (s) => (s ? String(s).toLowerCase().replace(/\s+/g, '') : '');
 
-    // 1. Pre-baked Sky Atlas tiles (zero per-target HTTP / GPU texture overhead)
+const lookupCatalogObject = (name) => {
+    if (!name) return null;
+    return objectByNameMap.get(name) || objectByNameMap.get(normCatalogKey(name)) || null;
+};
+
+const rebuildPhotoSoA = () => {
+    const n = skyPhotosList.length;
+    const soa = new Float32Array(n * 4);
+    const patches = new Uint8Array(n);
+    const idxMap = new Map();
+    for (let i = 0; i < n; i++) {
+        const p = skyPhotosList[i];
+        const o = i * 4;
+        soa[o] = p.x;
+        soa[o + 1] = p.y;
+        soa[o + 2] = p.z;
+        soa[o + 3] = p.fov * DEG2RAD;
+        patches[i] = getSkyPatchId(p.ra, p.dec);
+        if (p.name && !idxMap.has(p.name)) {
+            idxMap.set(p.name, i);
+        }
+    }
+    photoSoA = soa;
+    photoPatchIds = patches;
+    photoIndexByName = idxMap;
+    skyPhotoCount.value = n;
+};
+
+const rebuildSceneIndex = () => {
+    // Step 1: Build O(1) catalog lookup map first so photos pre-link refObj once
+    const objs = props.objects;
+    const byName = new Map();
+    if (Array.isArray(objs)) {
+        for (let i = 0; i < objs.length; i++) {
+            const obj = objs[i];
+            if (!obj || !obj.name) continue;
+            byName.set(obj.name, obj);
+            const normName = normCatalogKey(obj.name);
+            if (normName && !byName.has(normName)) {
+                byName.set(normName, obj);
+            }
+            if (obj.aliases) {
+                const parts = String(obj.aliases).split(',');
+                for (let p = 0; p < parts.length; p++) {
+                    const nk = normCatalogKey(parts[p]);
+                    if (nk && !byName.has(nk)) {
+                        byName.set(nk, obj);
+                    }
+                }
+            }
+        }
+    }
+    objectByNameMap = byName;
+
+    // Step 2: Build unified Sky Photos list (sorted purely by FOV, independent of active target)
+    const byKey = new Map();
+    const byNorm = new Map();
+    const cachedNames = new Set();
+
     const atlasList = skyAtlasItems.value;
     for (let i = 0; i < atlasList.length; i++) {
         const at = atlasList[i];
         const key = `${at.ra.toFixed(3)}_${at.dec.toFixed(3)}_${at.fov.toFixed(2)}`;
+        const norm = at.normName || normalizePhotoKeyName(at.name);
         const entry = {
             name: at.name,
             commonName: at.commonName || '',
@@ -1697,29 +1925,30 @@ const allSkyPhotos = computed(() => {
             fov: at.fov,
             url: null,
             atlasTile: at,
-            isActiveTarget: Boolean(activeName && at.name === activeName),
+            refObj: lookupCatalogObject(at.name),
             isCustom: Boolean(at.isCustom)
         };
         byKey.set(key, entry);
-        const norm = normalizePhotoKeyName(at.name);
-        if (norm && !atlasByNormName.has(norm)) {
-            atlasByNormName.set(norm, entry);
+        if (at.name) cachedNames.add(at.name);
+        if (norm && !byNorm.has(norm)) {
+            byNorm.set(norm, entry);
         }
     }
 
     const mergeLivePhoto = (name, commonName, ra, dec, fov, url, isCustom) => {
+        if (name) cachedNames.add(name);
         const norm = !isCustom ? normalizePhotoKeyName(name) : '';
         if (norm) {
-            const existingAtlas = atlasByNormName.get(norm);
+            const existing = byNorm.get(norm);
             if (
-                existingAtlas &&
-                Math.abs(existingAtlas.ra - ra) < 0.05 &&
-                Math.abs(existingAtlas.dec - dec) < 0.05 &&
-                Math.abs(existingAtlas.fov - fov) < 0.3
+                existing &&
+                Math.abs(existing.ra - ra) < 0.05 &&
+                Math.abs(existing.dec - dec) < 0.05 &&
+                Math.abs(existing.fov - fov) < 0.3
             ) {
-                existingAtlas.url = url;
-                if (activeName && name === activeName) {
-                    existingAtlas.isActiveTarget = true;
+                existing.url = url;
+                if (!existing.refObj && name) {
+                    existing.refObj = lookupCatalogObject(name);
                 }
                 return;
             }
@@ -1729,8 +1958,8 @@ const allSkyPhotos = computed(() => {
         const prev = byKey.get(key);
         if (prev) {
             prev.url = url;
-            if (activeName && name === activeName) {
-                prev.isActiveTarget = true;
+            if (!prev.refObj && name) {
+                prev.refObj = lookupCatalogObject(name);
             }
             return;
         }
@@ -1738,7 +1967,7 @@ const allSkyPhotos = computed(() => {
         const a = ra * DEG2RAD;
         const d = dec * DEG2RAD;
         const cd = Math.cos(d);
-        byKey.set(key, {
+        const entry = {
             name,
             commonName: commonName || '',
             ra,
@@ -1749,13 +1978,18 @@ const allSkyPhotos = computed(() => {
             fov,
             url,
             atlasTile: null,
-            isActiveTarget: Boolean(activeName && name === activeName),
+            refObj: lookupCatalogObject(name),
             isCustom: Boolean(isCustom)
-        });
+        };
+        byKey.set(key, entry);
+        if (norm && !byNorm.has(norm)) {
+            byNorm.set(norm, entry);
+        }
     };
 
-    // 2. Live cached high-res cutouts from /api/cache/sky-images
-    for (const img of cachedServerImages.value) {
+    const serverImgs = cachedServerImages.value;
+    for (let i = 0; i < serverImgs.length; i++) {
+        const img = serverImgs[i];
         if (!img?.url || img.ra === undefined || img.dec === undefined) continue;
         const cleanUrl = String(img.url).split('?')[0];
         const ra = Number(img.ra);
@@ -1773,10 +2007,9 @@ const allSkyPhotos = computed(() => {
         );
     }
 
-    // 3. Streamed session objects marked cached
-    if (Array.isArray(props.objects)) {
-        for (let i = 0; i < props.objects.length; i++) {
-            const o = props.objects[i];
+    if (Array.isArray(objs)) {
+        for (let i = 0; i < objs.length; i++) {
+            const o = objs[i];
             if (!o || o.status !== 'cached' || !o.image_url) continue;
             const ra = Number(o.center_ra !== undefined ? o.center_ra : o.ra);
             const dec = Number(o.center_dec !== undefined ? o.center_dec : o.dec);
@@ -1794,7 +2027,6 @@ const allSkyPhotos = computed(() => {
         }
     }
 
-    // 4. Active selected target
     if (props.object?.image_url) {
         const ra = Number(
             props.object.center_ra !== undefined ? props.object.center_ra : props.object.ra
@@ -1818,52 +2050,18 @@ const allSkyPhotos = computed(() => {
         }
     }
 
-    return Array.from(byKey.values()).sort((a, b) => {
-        if (a.isActiveTarget !== b.isActiveTarget) return a.isActiveTarget ? 1 : -1;
-        return b.fov - a.fov;
-    });
-});
+    skyPhotosList = Array.from(byKey.values()).sort((a, b) => b.fov - a.fov);
+    photoByKey = byKey;
+    photoByNormName = byNorm;
+    rebuildPhotoSoA();
 
-// Pre-indexed non-reactive DSO list + O(1) object map (rebuilt only when catalog/photo state changes)
-let preparedDsos = [];
-let objectByNameMap = new Map();
-
-const normCatalogKey = (s) => (s ? String(s).toLowerCase().replace(/\s+/g, '') : '');
-
-const lookupCatalogObject = (name) => {
-    if (!name) return null;
-    return objectByNameMap.get(name) || objectByNameMap.get(normCatalogKey(name)) || null;
-};
-
-const rebuildDsoIndex = () => {
-    const objs = props.objects;
-    const byName = new Map();
-    const cachedNames = new Set();
-    const photos = allSkyPhotos.value;
-    for (let i = 0; i < photos.length; i++) {
-        if (photos[i].name) cachedNames.add(photos[i].name);
-    }
-
-    const list = [];
+    // Step 3: Build pre-sorted DSO table + contiguous SoA & patch IDs
+    const dsoList = [];
+    const dsoMap = new Map();
     if (Array.isArray(objs)) {
         for (let i = 0; i < objs.length; i++) {
             const obj = objs[i];
             if (!obj || !obj.name) continue;
-            byName.set(obj.name, obj);
-            const normName = normCatalogKey(obj.name);
-            if (normName && !byName.has(normName)) {
-                byName.set(normName, obj);
-            }
-            if (obj.aliases) {
-                const parts = String(obj.aliases).split(',');
-                for (let p = 0; p < parts.length; p++) {
-                    const nk = normCatalogKey(parts[p]);
-                    if (nk && !byName.has(nk)) {
-                        byName.set(nk, obj);
-                    }
-                }
-            }
-
             const ra = parseFloat(obj.ra);
             const dec = parseFloat(obj.dec);
             if (!Number.isFinite(ra) || !Number.isFinite(dec)) continue;
@@ -1877,7 +2075,7 @@ const rebuildDsoIndex = () => {
             const maj = typeof obj.maj_ax === 'number' ? obj.maj_ax : 0;
             const isCached = obj.status === 'cached' || cachedNames.has(obj.name);
 
-            list.push({
+            const entry = {
                 obj,
                 name: obj.name,
                 shortName,
@@ -1893,13 +2091,118 @@ const rebuildDsoIndex = () => {
                 maj,
                 majHalfRad: (maj / 60.0) * DEG2RAD * 0.5,
                 score: (isCached ? 200 : 0) + (isMessier ? 100 : 0) + Math.min(maj, 60) - mag * 3
-            });
+            };
+            dsoList.push(entry);
+            dsoMap.set(obj.name, entry);
         }
     }
 
-    list.sort((a, b) => b.score - a.score);
-    preparedDsos = list;
-    objectByNameMap = byName;
+    dsoList.sort((a, b) => b.score - a.score);
+    const m = dsoList.length;
+    const dSoa = new Float32Array(m * 4);
+    const dPatches = new Uint8Array(m);
+    for (let i = 0; i < m; i++) {
+        const d = dsoList[i];
+        const o = i * 4;
+        dSoa[o] = d.x;
+        dSoa[o + 1] = d.y;
+        dSoa[o + 2] = d.z;
+        dSoa[o + 3] = d.majHalfRad;
+        dPatches[i] = getSkyPatchId(d.ra, d.dec);
+    }
+
+    preparedDsos = dsoList;
+    dsoSoA = dSoa;
+    dsoPatchIds = dPatches;
+    dsoByNameMap = dsoMap;
+};
+
+// O(1) incremental live-photo upsert (avoids re-fetching /api/cache/sky-images or rebuilding 7,300 items)
+const upsertLivePhotoFromObject = (obj) => {
+    if (!obj || !obj.image_url) return;
+    const ra = Number(obj.center_ra !== undefined ? obj.center_ra : obj.ra);
+    const dec = Number(obj.center_dec !== undefined ? obj.center_dec : obj.dec);
+    const fov = Math.max(Number(obj.image_fov || props.baseImageFov || 1.0), 0.2);
+    if (!Number.isFinite(ra) || !Number.isFinite(dec)) return;
+
+    const url = String(obj.image_url);
+    const isCustom = Boolean(obj.custom_framed);
+    const norm = !isCustom ? normalizePhotoKeyName(obj.name) : '';
+
+    if (obj.name) {
+        const dsoEntry = dsoByNameMap.get(obj.name);
+        if (dsoEntry) dsoEntry.isCached = true;
+    }
+
+    if (norm) {
+        const existing = photoByNormName.get(norm);
+        if (
+            existing &&
+            Math.abs(existing.ra - ra) < 0.05 &&
+            Math.abs(existing.dec - dec) < 0.05 &&
+            Math.abs(existing.fov - fov) < 0.3
+        ) {
+            existing.url = url;
+            if (!existing.refObj) existing.refObj = obj;
+            return;
+        }
+    }
+
+    const key = `${ra.toFixed(3)}_${dec.toFixed(3)}_${fov.toFixed(2)}`;
+    const prev = photoByKey.get(key);
+    if (prev) {
+        prev.url = url;
+        if (!prev.refObj) prev.refObj = obj;
+        return;
+    }
+
+    const a = ra * DEG2RAD;
+    const d = dec * DEG2RAD;
+    const cd = Math.cos(d);
+    const entry = {
+        name: obj.name,
+        commonName: obj.common_name && obj.common_name !== 'N/A' ? obj.common_name : '',
+        ra,
+        dec,
+        x: cd * Math.cos(a),
+        y: cd * Math.sin(a),
+        z: Math.sin(d),
+        fov,
+        url,
+        atlasTile: null,
+        refObj: obj,
+        isCustom
+    };
+    photoByKey.set(key, entry);
+    if (norm && !photoByNormName.has(norm)) {
+        photoByNormName.set(norm, entry);
+    }
+
+    // Insert in descending FOV order
+    let insertAt = skyPhotosList.length;
+    for (let i = 0; i < skyPhotosList.length; i++) {
+        if (fov >= skyPhotosList[i].fov) {
+            insertAt = i;
+            break;
+        }
+    }
+    skyPhotosList.splice(insertAt, 0, entry);
+    rebuildPhotoSoA();
+};
+
+const fetchCachedSkyImages = async () => {
+    try {
+        const res = await fetch('/api/cache/sky-images');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (Array.isArray(data?.images)) {
+            cachedServerImages.value = data.images;
+            rebuildSceneIndex();
+            scheduleDraw();
+        }
+    } catch (err) {
+        console.warn('Could not load cached sky images:', err);
+    }
 };
 
 const ensureImageLoaded = (url, allowQueue = true) => {
@@ -2044,12 +2347,27 @@ const drawSkyCanvas = () => {
     const maxJumpPx = Math.max(w, h) * 1.4;
     const maxJumpSq = maxJumpPx * maxJumpPx;
 
-    interactiveItems = [];
-    const placedBoxes = [];
+    // 1b. Update 48-patch spherical bounding-cone visibility mask once per frame
+    const coneLimitRad = Math.min(Math.PI, maxVisRad + 0.16);
+    const cosCone = Math.cos(coneLimitRad);
+    const sinCone = Math.sin(coneLimitRad);
+    for (let p = 0; p < PATCH_COUNT; p++) {
+        if (coneLimitRad + patchRadius[p] >= Math.PI) {
+            visPatch[p] = 1;
+        } else {
+            const thresh = cosCone * patchCosR[p] - sinCone * patchSinR[p];
+            visPatch[p] =
+                cam.Cx * patchCx[p] + cam.Cy * patchCy[p] + cam.Cz * patchCz[p] >= thresh ? 1 : 0;
+        }
+    }
+
+    const buildHitItems = !isPanning.value;
+    interactiveCount = 0;
+    placedBoxesCount = 0;
 
     const overlapsPlaced = (x1, y1, x2, y2, pad = 2) => {
-        for (let i = 0; i < placedBoxes.length; i++) {
-            const b = placedBoxes[i];
+        for (let i = 0; i < placedBoxesCount; i++) {
+            const b = placedBoxesPool[i];
             if (x1 - pad < b.x2 && x2 + pad > b.x1 && y1 - pad < b.y2 && y2 + pad > b.y1) {
                 return true;
             }
@@ -2165,27 +2483,48 @@ const drawSkyCanvas = () => {
     // IMPORTANT: Each tile MUST draw its source-over dark backing rect immediately before its
     // screen-blended image so overlapping DSS2 cutouts attenuate underlying tiles instead of blowing out to white.
     const hovered = hoveredItem.value;
-    if (showCachedPhotos.value && allSkyPhotos.value.length > 0) {
-        const photos = allSkyPhotos.value;
-        const denseCatalogMode = photos.length > 120;
+    const photoCount = skyPhotosList.length;
+    if (showCachedPhotos.value && photoCount > 0) {
+        const denseCatalogMode = photoCount > 120;
         const minRenderPx = denseCatalogMode ? 3.2 : 2.5;
+        const minHitPx = denseCatalogMode ? 4.5 : 3.0;
         const photoCullCos = Math.cos(Math.min(Math.PI * 0.72, maxVisRad + 0.15));
+        const activeName = props.object?.name || '';
+        const activeIdx = activeName ? (photoIndexByName.get(activeName) ?? -1) : -1;
         let hoveredHighlight = null;
+
+        // 8x8 px screen-cell overlap cap for tiny zoomed-out cluster tiles (Virgo/Coma/Sagittarius)
+        let gridCols = 1;
+        let gridRows = 1;
+        if (denseCatalogMode) {
+            gridCols = Math.max(1, (w >> 3) + 2);
+            gridRows = Math.max(1, (h >> 3) + 2);
+            const neededCells = gridCols * gridRows;
+            if (denseCellCounts.length < neededCells) {
+                denseCellCounts = new Uint8Array(neededCells * 2);
+            }
+            denseCellCounts.fill(0, 0, neededCells);
+        }
 
         ctx.fillStyle = denseCatalogMode ? 'rgba(4, 7, 14, 0.44)' : 'rgba(4, 7, 14, 0.62)';
 
-        for (let i = 0; i < photos.length; i++) {
-            const photo = photos[i];
-            const cosC = photo.x * cam.Cx + photo.y * cam.Cy + photo.z * cam.Cz;
-            if (cosC < photoCullCos) continue;
+        const renderPhotoAt = (idx, isActiveTarget) => {
+            if (!isActiveTarget && !visPatch[photoPatchIds[idx]]) return;
+
+            const o = idx * 4;
+            const x = photoSoA[o];
+            const y = photoSoA[o + 1];
+            const z = photoSoA[o + 2];
+            const cosC = x * cam.Cx + y * cam.Cy + z * cam.Cz;
+            if (cosC < photoCullCos) return;
 
             const k = 2.0 / (1.0 + cosC);
             const fk = cam.f * k;
-            const sizePx = photo.fov * DEG2RAD * fk;
-            if (sizePx < minRenderPx && !photo.isActiveTarget) continue;
+            const sizePx = photoSoA[o + 3] * fk;
+            if (sizePx < minRenderPx && !isActiveTarget) return;
 
-            const u = photo.x * cam.Ex + photo.y * cam.Ey;
-            const v = photo.x * cam.Nx + photo.y * cam.Ny + photo.z * cam.Nz;
+            const u = x * cam.Ex + y * cam.Ey;
+            const v = x * cam.Nx + y * cam.Ny + z * cam.Nz;
             const px = cam.halfW - fk * u;
             const py = cam.halfH - fk * v;
 
@@ -2195,23 +2534,25 @@ const drawSkyCanvas = () => {
                 py + sizePx < -40 ||
                 py - sizePx > h + 40
             ) {
-                continue;
+                return;
             }
 
-            if (!photo.isActiveTarget && sizePx >= (denseCatalogMode ? 4.5 : 3.0)) {
-                interactiveItems.push({
-                    kind: 'photo',
-                    name: photo.name,
-                    commonName: photo.commonName,
-                    fov: photo.fov,
-                    ra: photo.ra,
-                    dec: photo.dec,
-                    x: px,
-                    y: py,
-                    hitR: Math.max(sizePx * 0.5, 9),
-                    refObj: lookupCatalogObject(photo.name),
-                    isCustom: photo.isCustom
-                });
+            const photo = skyPhotosList[idx];
+
+            if (!isActiveTarget && buildHitItems && sizePx >= minHitPx) {
+                pushInteractiveItem(
+                    'photo',
+                    photo.name,
+                    photo.commonName,
+                    photo.fov,
+                    photo.ra,
+                    photo.dec,
+                    px,
+                    py,
+                    Math.max(sizePx * 0.5, 9),
+                    photo.refObj,
+                    photo.isCustom
+                );
             }
 
             const isHovered =
@@ -2219,25 +2560,39 @@ const drawSkyCanvas = () => {
                 hovered?.name === photo.name &&
                 Math.abs(hovered.ra - photo.ra) < 0.01;
 
+            let cellIdx = -1;
+            if (denseCatalogMode && sizePx < 18.0 && !isActiveTarget && !isHovered) {
+                const gx = Math.min(gridCols - 1, Math.max(0, (px >> 3) + 1));
+                const gy = Math.min(gridRows - 1, Math.max(0, (py >> 3) + 1));
+                cellIdx = gy * gridCols + gx;
+                if (denseCellCounts[cellIdx] >= 2) {
+                    return;
+                }
+            }
+
             const tile = photo.atlasTile;
             const sheetImg = tile && sizePx >= 3.2 ? ensureAtlasSheetImage(tile.s) : null;
             const wantHiRes =
                 Boolean(photo.url) &&
-                (!tile || sizePx >= 190 || (photo.isActiveTarget && sizePx >= 115));
+                (!tile || sizePx >= 190 || (isActiveTarget && sizePx >= 115));
             const hiResImg =
                 wantHiRes && sizePx >= 4.5
-                    ? ensureImageLoaded(photo.url, !isPanning.value || photo.isActiveTarget)
+                    ? ensureImageLoaded(photo.url, !isPanning.value || isActiveTarget)
                     : null;
 
             const hasReadyImg = Boolean((hiResImg || sheetImg) && sizePx >= 4.0);
             if (!hasReadyImg && !isHovered) {
-                continue;
+                return;
+            }
+
+            if (cellIdx >= 0 && hasReadyImg) {
+                denseCellCounts[cellIdx]++;
             }
 
             // Algebraic conformal local-north screen basis (zero sin/cos/atan2 calls)
-            const vx = -photo.x * photo.z;
-            const vy = -photo.y * photo.z;
-            const vz = 1.0 - photo.z * photo.z;
+            const vx = -x * z;
+            const vy = -y * z;
+            const vz = 1.0 - z * z;
             let cosA = 1.0;
             let sinA = 0.0;
             if (vz > 1e-8) {
@@ -2281,7 +2636,7 @@ const drawSkyCanvas = () => {
 
                 // Screen-blend this tile onto the darkened backing
                 ctx.globalCompositeOperation = 'screen';
-                ctx.globalAlpha = photo.isActiveTarget ? 0.96 : 0.88;
+                ctx.globalAlpha = isActiveTarget ? 0.96 : 0.88;
                 if (hiResImg) {
                     ctx.drawImage(hiResImg, -half, -half, sizePx, sizePx);
                 } else if (sheetImg && tile) {
@@ -2298,6 +2653,14 @@ const drawSkyCanvas = () => {
                     );
                 }
             }
+        };
+
+        for (let i = 0; i < photoCount; i++) {
+            if (i === activeIdx) continue;
+            renderPhotoAt(i, false);
+        }
+        if (activeIdx >= 0 && activeIdx < photoCount) {
+            renderPhotoAt(activeIdx, true);
         }
 
         ctx.globalCompositeOperation = 'source-over';
@@ -2339,12 +2702,12 @@ const drawSkyCanvas = () => {
                 );
                 const ringR = Math.max(baseImgPx * 0.56, 16);
                 const by = tp.y - ringR - 20;
-                placedBoxes.push({
-                    x1: tp.x - tw * 0.5 - 6,
-                    y1: by - 14,
-                    x2: tp.x + tw * 0.5 + 6,
-                    y2: tp.y + ringR + 6
-                });
+                pushPlacedBox(
+                    tp.x - tw * 0.5 - 6,
+                    by - 14,
+                    tp.x + tw * 0.5 + 6,
+                    tp.y + ringR + 6
+                );
             }
         }
     }
@@ -2458,7 +2821,7 @@ const drawSkyCanvas = () => {
             const y2 = sy + 7;
 
             if (!overlapsPlaced(x1, y1, x2, y2, 2)) {
-                placedBoxes.push({ x1, y1, x2, y2 });
+                pushPlacedBox(x1, y1, x2, y2);
                 ctx.strokeText(starName, lx, sy);
                 ctx.fillStyle = ls.isBright ? '#fbbf24' : 'rgba(234, 179, 8, 0.92)';
                 ctx.fillText(starName, lx, sy);
@@ -2466,39 +2829,46 @@ const drawSkyCanvas = () => {
         }
     }
 
-    // 7. Nearby Deep-Sky Objects (Pre-sorted, pre-indexed, batched ring strokes)
+    // 7. Nearby Deep-Sky Objects (48-patch culled + Float32Array SoA + zero-GC pool)
     if (showDsos.value && preparedDsos.length > 0) {
         const activeName = props.object?.name || '';
         const maxMarkers = fov > 35 ? 28 : fov > 15 ? 42 : 65;
-        const visibleDsos = [];
+        visibleDsosCount = 0;
+        const dsoTotal = preparedDsos.length;
 
-        for (let i = 0; i < preparedDsos.length; i++) {
+        for (let i = 0; i < dsoTotal; i++) {
+            if (!visPatch[dsoPatchIds[i]]) continue;
+
+            const o = i * 4;
+            const dx = dsoSoA[o];
+            const dy = dsoSoA[o + 1];
+            const dz = dsoSoA[o + 2];
+            const cosC = dx * cam.Cx + dy * cam.Cy + dz * cam.Cz;
+            if (cosC < minPointCos) continue;
+
             const d = preparedDsos[i];
             if (d.name === activeName) continue;
             if (fov > 35 && !d.isMessier && !d.isCached && d.mag > 7.2 && d.maj < 30) continue;
             if (fov > 16 && !d.isMessier && !d.isCached && d.mag > 9.0 && d.maj < 15) continue;
 
-            const cosC = d.x * cam.Cx + d.y * cam.Cy + d.z * cam.Cz;
-            if (cosC < minPointCos) continue;
-
             const fk = (cam.f * 2.0) / (1.0 + cosC);
-            const sx = cam.halfW - fk * (d.x * cam.Ex + d.y * cam.Ey);
+            const sx = cam.halfW - fk * (dx * cam.Ex + dy * cam.Ey);
             if (sx < 10 || sx > w - 10) continue;
-            const sy = cam.halfH - fk * (d.x * cam.Nx + d.y * cam.Ny + d.z * cam.Nz);
+            const sy = cam.halfH - fk * (dx * cam.Nx + dy * cam.Ny + dz * cam.Nz);
             if (sy < 14 || sy > h - 18) continue;
 
-            const rPx = Math.max(3.4, Math.min(22, d.majHalfRad * fk));
-            visibleDsos.push({ d, sx, sy, rPx });
-            if (visibleDsos.length >= maxMarkers) break;
+            const rPx = Math.max(3.4, Math.min(22, dsoSoA[o + 3] * fk));
+            pushVisibleDso(d, sx, sy, rPx);
+            if (visibleDsosCount >= maxMarkers) break;
         }
 
-        if (visibleDsos.length > 0) {
+        if (visibleDsosCount > 0) {
             // Batch standard DSO rings
             ctx.lineWidth = 1.25;
             ctx.strokeStyle = 'rgba(192, 132, 252, 0.85)';
             ctx.beginPath();
-            for (let i = 0; i < visibleDsos.length; i++) {
-                const v = visibleDsos[i];
+            for (let i = 0; i < visibleDsosCount; i++) {
+                const v = visibleDsosPool[i];
                 if (v.d.isCached || (hovered?.name === v.d.name && hovered?.kind !== 'active')) {
                     continue;
                 }
@@ -2510,8 +2880,8 @@ const drawSkyCanvas = () => {
             // Batch cached DSO rings
             ctx.strokeStyle = 'rgba(56, 189, 248, 0.9)';
             ctx.beginPath();
-            for (let i = 0; i < visibleDsos.length; i++) {
-                const v = visibleDsos[i];
+            for (let i = 0; i < visibleDsosCount; i++) {
+                const v = visibleDsosPool[i];
                 if (!v.d.isCached || (hovered?.name === v.d.name && hovered?.kind !== 'active')) {
                     continue;
                 }
@@ -2527,8 +2897,8 @@ const drawSkyCanvas = () => {
             ctx.lineJoin = 'round';
             ctx.miterLimit = 2;
 
-            for (let i = 0; i < visibleDsos.length; i++) {
-                const { d, sx, sy, rPx } = visibleDsos[i];
+            for (let i = 0; i < visibleDsosCount; i++) {
+                const { d, sx, sy, rPx } = visibleDsosPool[i];
                 if (hovered?.name === d.name && hovered?.kind !== 'active') {
                     ctx.strokeStyle = '#38bdf8';
                     ctx.lineWidth = 1.8;
@@ -2545,7 +2915,7 @@ const drawSkyCanvas = () => {
                 const y2 = sy + 6.5;
 
                 if (!overlapsPlaced(x1, y1, x2, y2, 2)) {
-                    placedBoxes.push({ x1, y1, x2, y2 });
+                    pushPlacedBox(x1, y1, x2, y2);
                     ctx.lineWidth = 3.2;
                     ctx.strokeStyle = 'rgba(3, 6, 12, 0.94)';
                     ctx.strokeText(d.shortName, lx, sy);
@@ -2553,18 +2923,21 @@ const drawSkyCanvas = () => {
                     ctx.fillText(d.shortName, lx, sy);
                 }
 
-                interactiveItems.push({
-                    kind: 'dso',
-                    name: d.name,
-                    commonName: d.commonName,
-                    fov: d.obj.image_fov || null,
-                    ra: d.ra,
-                    dec: d.dec,
-                    x: sx,
-                    y: sy,
-                    hitR: Math.max(rPx + 5, 10),
-                    refObj: d.obj
-                });
+                if (buildHitItems) {
+                    pushInteractiveItem(
+                        'dso',
+                        d.name,
+                        d.commonName,
+                        d.obj.image_fov || null,
+                        d.ra,
+                        d.dec,
+                        sx,
+                        sy,
+                        Math.max(rPx + 5, 10),
+                        d.obj,
+                        false
+                    );
+                }
             }
         }
     }
@@ -2599,7 +2972,7 @@ const drawSkyCanvas = () => {
             const y2 = sy + 8;
 
             if (!overlapsPlaced(x1, y1, x2, y2, 3)) {
-                placedBoxes.push({ x1, y1, x2, y2 });
+                pushPlacedBox(x1, y1, x2, y2);
                 ctx.strokeText(c.tracked, sx, sy);
                 ctx.fillText(c.tracked, sx, sy);
             }
@@ -2608,7 +2981,7 @@ const drawSkyCanvas = () => {
 
     // 8.5 Local Observer Horizon, Ground Veil, Min-Altitude Ring & Compass Points
     if (showHorizon.value && observerLocation.value) {
-        drawHorizonOverlay(ctx, cam, w, h, fov, minPointCos, placedBoxes, overlapsPlaced);
+        drawHorizonOverlay(ctx, cam, w, h, fov, minPointCos, overlapsPlaced);
     }
 
     // 9. Active Target Highlight Ring, Rotated Sensor FOV Frame & Comparison Setups
@@ -2709,20 +3082,23 @@ const drawSkyCanvas = () => {
                 ctx.fillText(activeBadgeText, px + pillW * 0.5, py + pillH * 0.5 + 0.5);
             }
 
-            interactiveItems.push({
-                kind: 'active',
-                name: props.object.name,
-                commonName:
+            if (buildHitItems) {
+                pushInteractiveItem(
+                    'active',
+                    props.object.name,
                     props.object.common_name && props.object.common_name !== 'N/A'
                         ? props.object.common_name
                         : '',
-                fov: props.object.image_fov || props.baseImageFov,
-                ra: tp.ra,
-                dec: tp.dec,
-                x: tp.x,
-                y: tp.y,
-                hitR: ringR
-            });
+                    props.object.image_fov || props.baseImageFov,
+                    tp.ra,
+                    tp.dec,
+                    tp.x,
+                    tp.y,
+                    ringR,
+                    props.object,
+                    false
+                );
+            }
         }
     }
 };
@@ -2801,9 +3177,9 @@ const applyZoomFactor = (factor, anchorPx = null, anchorPy = null) => {
 };
 
 const onWheel = (e) => {
-    const rect = canvasRef.value?.getBoundingClientRect();
-    const px = rect ? e.clientX - rect.left : null;
-    const py = rect ? e.clientY - rect.top : null;
+    if (!canvasRectValid) refreshCanvasRect();
+    const px = canvasRectValid ? e.clientX - canvasLeft : null;
+    const py = canvasRectValid ? e.clientY - canvasTop : null;
     const factor = e.deltaY > 0 ? 1.14 : 1 / 1.14;
     applyZoomFactor(factor, px, py);
 };
@@ -2811,8 +3187,8 @@ const onWheel = (e) => {
 const findHitItem = (px, py) => {
     let best = null;
     let bestDistSq = Infinity;
-    for (let i = 0; i < interactiveItems.length; i++) {
-        const item = interactiveItems[i];
+    for (let i = 0; i < interactiveCount; i++) {
+        const item = interactivePool[i];
         const dx = px - item.x;
         const dy = py - item.y;
         const dSq = dx * dx + dy * dy;
@@ -2852,10 +3228,11 @@ const flushPointerFrame = () => {
 
     const hit = findHitItem(ptr.px, ptr.py);
     if (hit?.name !== hoveredItem.value?.name || hit?.kind !== hoveredItem.value?.kind) {
-        hoveredItem.value = hit;
+        hoveredItem.value = hit ? { ...hit } : null;
         drawSkyCanvas();
-    } else if (hit) {
-        hoveredItem.value = hit;
+    } else if (hit && hoveredItem.value) {
+        hoveredItem.value.x = hit.x;
+        hoveredItem.value.y = hit.y;
     }
 };
 
@@ -2865,6 +3242,7 @@ const onMouseDown = (e) => {
         cancelAnimationFrame(animFrameId);
         animFrameId = null;
     }
+    refreshCanvasRect();
     isPanning.value = true;
     panMoved = false;
     panStartScreen = { x: e.clientX, y: e.clientY };
@@ -2872,11 +3250,10 @@ const onMouseDown = (e) => {
 };
 
 const onMouseMove = (e) => {
-    const rect = canvasRef.value?.getBoundingClientRect();
-    if (!rect) return;
+    if (!canvasRectValid && !refreshCanvasRect()) return;
     pendingPointer = {
-        px: e.clientX - rect.left,
-        py: e.clientY - rect.top,
+        px: e.clientX - canvasLeft,
+        py: e.clientY - canvasTop,
         clientX: e.clientX,
         clientY: e.clientY
     };
@@ -2930,11 +3307,10 @@ const handleItemClick = async (item, closeMapAfterSelect = false) => {
 };
 
 const onDoubleClick = (e) => {
-    const rect = canvasRef.value?.getBoundingClientRect();
-    if (!rect) return;
-    const hit = findHitItem(e.clientX - rect.left, e.clientY - rect.top);
+    if (!canvasRectValid && !refreshCanvasRect()) return;
+    const hit = findHitItem(e.clientX - canvasLeft, e.clientY - canvasTop);
     if (hit) {
-        handleItemClick(hit, true);
+        handleItemClick({ ...hit }, true);
     }
 };
 
@@ -2942,15 +3318,15 @@ const onMouseUp = (e) => {
     const wasPanning = isPanning.value;
     isPanning.value = false;
     if (wasPanning && !panMoved) {
-        const rect = canvasRef.value?.getBoundingClientRect();
-        if (rect) {
-            const hit = findHitItem(e.clientX - rect.left, e.clientY - rect.top);
+        if (canvasRectValid || refreshCanvasRect()) {
+            const hit = findHitItem(e.clientX - canvasLeft, e.clientY - canvasTop);
             if (hit) {
-                handleItemClick(hit);
+                handleItemClick({ ...hit });
             }
         }
     } else if (wasPanning) {
         updateStatusReadout(viewRa.value, viewDec.value, true);
+        scheduleDraw();
     }
 };
 
@@ -2967,6 +3343,7 @@ const onMouseLeave = () => {
 const getTouchDist = (t1, t2) => Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
 
 const onTouchStart = (e) => {
+    refreshCanvasRect();
     if (e.touches.length === 2) {
         isPanning.value = false;
         pinchStartDist = getTouchDist(e.touches[0], e.touches[1]);
@@ -3009,6 +3386,7 @@ const onTouchEnd = (e) => {
         isPanning.value = false;
         pinchStartDist = 0;
         updateStatusReadout(viewRa.value, viewDec.value, true);
+        scheduleDraw();
     }
 };
 
@@ -3020,9 +3398,9 @@ const onKeyDown = (e) => {
 
 // --- LIGHTWEIGHT WATCHERS & LIFECYCLE ---
 watch(
-    () => [props.objects?.length, allSkyPhotos.value.length],
+    () => [props.objects?.length, skyAtlasItems.value.length],
     () => {
-        rebuildDsoIndex();
+        rebuildSceneIndex();
         scheduleDraw();
     },
     { immediate: true }
@@ -3032,6 +3410,9 @@ watch(
     () => props.object?.name,
     (newName, oldName) => {
         if (newName && newName !== oldName) {
+            if (props.object?.image_url) {
+                upsertLivePhotoFromObject(props.object);
+            }
             const tgt = getTargetCoords();
             viewRa.value = tgt.ra;
             viewDec.value = tgt.dec;
@@ -3058,9 +3439,9 @@ watch(
         observerLocation.value?.lon,
         minAltitudeDeg.value
     ],
-    ([, newStatus]) => {
-        if (newStatus === 'cached') {
-            fetchCachedSkyImages();
+    ([newUrl, newStatus]) => {
+        if (newUrl || newStatus === 'cached') {
+            upsertLivePhotoFromObject(props.object);
         }
         updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
         scheduleDraw();
@@ -3083,6 +3464,8 @@ watch(skyAtlasVersion, () => {
 
 onMounted(async () => {
     window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('resize', refreshCanvasRect, { passive: true });
+    window.addEventListener('scroll', refreshCanvasRect, { capture: true, passive: true });
 
     liveClockTimer = window.setInterval(() => {
         if (isLiveTime.value) {
@@ -3099,6 +3482,7 @@ onMounted(async () => {
             if (!containerRef.value) return;
             viewportW.value = containerRef.value.clientWidth || 800;
             viewportH.value = containerRef.value.clientHeight || 600;
+            refreshCanvasRect();
             scheduleDraw();
         };
         resizeObserver = new ResizeObserver(updateDims);
@@ -3110,12 +3494,15 @@ onMounted(async () => {
     fetchCachedSkyImages();
     await loadSkyData();
     isLoadingSky.value = false;
+    refreshCanvasRect();
     updateStatusReadout(viewRa.value, viewDec.value, true);
     scheduleDraw();
 });
 
 onUnmounted(() => {
     window.removeEventListener('keydown', onKeyDown);
+    window.removeEventListener('resize', refreshCanvasRect);
+    window.removeEventListener('scroll', refreshCanvasRect, { capture: true });
     if (liveClockTimer) clearInterval(liveClockTimer);
     if (resizeObserver) resizeObserver.disconnect();
     if (rafId) cancelAnimationFrame(rafId);
@@ -3185,7 +3572,7 @@ onUnmounted(() => {
                 @click="showCachedPhotos = !showCachedPhotos"
                 title="Project already-downloaded sky survey images at their true celestial coordinates and FOV"
             >
-                <span>📷 Photos ({{ allSkyPhotos.length }})</span>
+                <span>📷 Photos ({{ skyPhotoCount }})</span>
             </button>
             <button
                 type="button"
