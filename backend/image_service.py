@@ -288,18 +288,14 @@ def get_cache_status_info(
             "setup_size_mb": 0,
             "setup_hash": setup_hash or "",
         }
-    total_size = sum(
-        os.path.getsize(os.path.join(r, f))
-        for r, _, files in os.walk(cache_dir)
-        for f in files
-        if _is_cached_image_file(f)
-    )
-    count = sum(
-        1
-        for _, _, files in os.walk(cache_dir)
-        for f in files
-        if _is_cached_image_file(f)
-    )
+    total_size = 0
+    count = 0
+    for r, dirs, files in os.walk(cache_dir):
+        dirs[:] = [d for d in dirs if d != "_sky_atlas"]
+        for f in files:
+            if _is_cached_image_file(f):
+                total_size += os.path.getsize(os.path.join(r, f))
+                count += 1
 
     setup_count = 0
     setup_size = 0
@@ -324,9 +320,22 @@ def get_cache_status_info(
     }
 
 
-def purge_image_cache(cache_dir: str = CACHE_DIR) -> dict:
+def purge_image_cache(cache_dir: str = CACHE_DIR, include_atlas: bool = False) -> dict:
     if os.path.exists(cache_dir):
-        shutil.rmtree(cache_dir)
+        if include_atlas:
+            shutil.rmtree(cache_dir)
+        else:
+            for entry in os.listdir(cache_dir):
+                if entry == "_sky_atlas":
+                    continue
+                try:
+                    target = resolve_safe_cache_path(cache_dir, entry)
+                except ValueError:
+                    continue
+                if os.path.isdir(target):
+                    shutil.rmtree(target)
+                elif os.path.isfile(target):
+                    os.remove(target)
     os.makedirs(cache_dir, exist_ok=True)
     return {"status": "purged"}
 
@@ -467,6 +476,8 @@ def list_cached_sky_images(
     dedup: Dict[Tuple[str, float], dict] = {}
 
     for entry in sorted(os.listdir(cache_dir)):
+        if entry == "_sky_atlas":
+            continue
         try:
             setup_dir = resolve_safe_cache_path(cache_dir, entry)
         except ValueError:

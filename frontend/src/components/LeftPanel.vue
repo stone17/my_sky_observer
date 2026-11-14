@@ -7,6 +7,7 @@ import {
     getObjectTypeIcon,
     getObjectTypeDescription
 } from '../utils/catalogMeta.js';
+import { ensureSkyAtlasLoaded } from '../utils/skyAtlas.js';
 
 const props = defineProps({
     settings: Object,
@@ -98,6 +99,9 @@ const localClientSettings = ref({});
 const profiles = ref({});
 const presets = ref({ cameras: {} });
 const cacheStatus = ref({ size_mb: 0, count: 0, setup_count: 0, setup_size_mb: 0 });
+const atlasStatus = ref({ exists: false, count: 0, sheets: 0, size_mb: 0 });
+const isBuildingAtlas = ref(false);
+const atlasBuildMessage = ref('');
 const selectedProfileName = ref(null);
 const newProfileName = ref("");
 
@@ -125,6 +129,39 @@ const fetchCacheStatus = async () => {
         const res = await fetch(`/api/cache/status${query}`);
         if (res.ok) cacheStatus.value = await res.json();
     } catch (e) { console.error(e); }
+    fetchAtlasStatus();
+};
+
+const fetchAtlasStatus = async () => {
+    try {
+        const res = await fetch('/api/cache/sky-atlas/status');
+        if (res.ok) atlasStatus.value = await res.json();
+    } catch (e) { console.error(e); }
+};
+
+const buildSkyAtlas = async () => {
+    if (isBuildingAtlas.value) return;
+    isBuildingAtlas.value = true;
+    atlasBuildMessage.value = 'Packing cached images into WebP sprite sheets...';
+    try {
+        const res = await fetch('/api/cache/sky-atlas/build', { method: 'POST' });
+        if (res.ok) {
+            const data = await res.json();
+            await fetchAtlasStatus();
+            await ensureSkyAtlasLoaded(true);
+            atlasBuildMessage.value = `Built ${data.count || 0} tiles (${data.sheets || 0} sheet${data.sheets === 1 ? '' : 's'}, ${data.size_mb || 0} MB)`;
+        } else {
+            atlasBuildMessage.value = 'Failed to build Sky Atlas.';
+        }
+    } catch (e) {
+        console.error(e);
+        atlasBuildMessage.value = 'Error building Sky Atlas.';
+    } finally {
+        isBuildingAtlas.value = false;
+        setTimeout(() => {
+            atlasBuildMessage.value = '';
+        }, 6000);
+    }
 };
 
 watch(() => props.setupHash, () => {
@@ -1111,6 +1148,47 @@ const activeFiltersCount = computed(() => {
                         <button type="button" class="btn-danger full-width" @click="purgeCache">
                             🗑️ Purge Image Cache
                         </button>
+                    </div>
+
+                    <div class="section-card">
+                        <div class="section-title-row">
+                            <h4>Sky Map Sprite Atlas</h4>
+                            <span class="badge-accent">{{ atlasStatus.exists ? `${atlasStatus.size_mb} MB` : 'None' }}</span>
+                        </div>
+                        <p class="helper-text">
+                            Packs downloaded targets into compact 4096×4096 WebP sprite sheets for 60 FPS wide-field Sky Map rendering and instant low-res Framing previews.
+                        </p>
+                        <div class="info-banner" style="margin-bottom: 10px;">
+                            <span>Baked Atlas:</span>
+                            <strong v-if="atlasStatus.exists">
+                                {{ atlasStatus.count }} targets · {{ atlasStatus.sheets }} {{ atlasStatus.sheets === 1 ? 'sheet' : 'sheets' }}
+                            </strong>
+                            <strong v-else>Not built yet</strong>
+                        </div>
+                        <div class="btn-col">
+                            <button
+                                type="button"
+                                class="btn-primary full-width"
+                                :disabled="isBuildingAtlas || (cacheStatus.count === 0 && !atlasStatus.exists)"
+                                @click="buildSkyAtlas"
+                                title="Build or update pre-baked WebP Sky Atlas from all downloaded cache images"
+                            >
+                                {{ isBuildingAtlas ? '⏳ Building Sky Atlas...' : '⚡ Build / Update Sky Atlas' }}
+                            </button>
+                            <a
+                                v-if="atlasStatus.exists"
+                                href="/api/cache/sky-atlas/export.zip"
+                                download="sky_atlas.zip"
+                                class="btn-secondary full-width"
+                                style="text-align: center; text-decoration: none; display: inline-block; box-sizing: border-box;"
+                                title="Download sky_atlas WebP sheets + JSON manifest + CC BY-NC-SA 4.0 attribution notice as a ZIP archive"
+                            >
+                                ⬇️ Export Atlas (.zip)
+                            </a>
+                        </div>
+                        <p v-if="atlasBuildMessage" class="helper-text" style="margin-top: 8px; margin-bottom: 0; color: #34d399;">
+                            {{ atlasBuildMessage }}
+                        </p>
                     </div>
                 </div>
 

@@ -1,5 +1,11 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import {
+    skyAtlasVersion,
+    skyAtlasItems,
+    ensureSkyAtlasLoaded,
+    ensureAtlasSheetImage
+} from '../utils/skyAtlas.js';
 
 const props = defineProps({
     object: { type: Object, default: null },
@@ -47,6 +53,8 @@ let mwCloudSprite = null;
 const gridGeometryCache = new Map(); // tierIndex -> { meridians, parallels }
 const textWidthCache = new Map();    // `${fontKey}|${text}` -> number
 const imageElementCache = new Map(); // url -> { img, status: 'loading' | 'ready' | 'error' }
+let inflightImageLoads = 0;
+const MAX_CONCURRENT_INDIVIDUAL_LOADS = 6;
 
 const wrapRaDeg = (ra) => {
     let r = Number(ra) % 360.0;
@@ -1657,34 +1665,110 @@ const fetchCachedSkyImages = async () => {
     }
 };
 
+const normalizePhotoKeyName = (name) =>
+    String(name || '')
+        .trim()
+        .toUpperCase()
+        .replace(/[\s_-]+/g, '');
+
 const allSkyPhotos = computed(() => {
     const byKey = new Map();
+    const atlasByNormName = new Map();
+    const activeName = props.object?.name || '';
 
-    for (const img of cachedServerImages.value) {
-        if (!img?.url || img.ra === undefined || img.dec === undefined) continue;
-        const cleanUrl = String(img.url).split('?')[0];
-        const ra = Number(img.ra);
-        const dec = Number(img.dec);
-        const fov = Math.max(Number(img.fov) || 1.0, 0.2);
+    // 1. Pre-baked Sky Atlas tiles (zero per-target HTTP / GPU texture overhead)
+    const atlasList = skyAtlasItems.value;
+    for (let i = 0; i < atlasList.length; i++) {
+        const at = atlasList[i];
+        const key = `${at.ra.toFixed(3)}_${at.dec.toFixed(3)}_${at.fov.toFixed(2)}`;
+        const entry = {
+            name: at.name,
+            commonName: at.commonName || '',
+            ra: at.ra,
+            dec: at.dec,
+            x: at.x,
+            y: at.y,
+            z: at.z,
+            fov: at.fov,
+            url: null,
+            atlasTile: at,
+            isActiveTarget: Boolean(activeName && at.name === activeName),
+            isCustom: Boolean(at.isCustom)
+        };
+        byKey.set(key, entry);
+        const norm = normalizePhotoKeyName(at.name);
+        if (norm && !atlasByNormName.has(norm)) {
+            atlasByNormName.set(norm, entry);
+        }
+    }
+
+    const mergeLivePhoto = (name, commonName, ra, dec, fov, url, isCustom) => {
+        const norm = !isCustom ? normalizePhotoKeyName(name) : '';
+        if (norm) {
+            const existingAtlas = atlasByNormName.get(norm);
+            if (
+                existingAtlas &&
+                Math.abs(existingAtlas.ra - ra) < 0.05 &&
+                Math.abs(existingAtlas.dec - dec) < 0.05 &&
+                Math.abs(existingAtlas.fov - fov) < 0.3
+            ) {
+                existingAtlas.url = url;
+                if (activeName && name === activeName) {
+                    existingAtlas.isActiveTarget = true;
+                }
+                return;
+            }
+        }
+
+        const key = `${ra.toFixed(3)}_${dec.toFixed(3)}_${fov.toFixed(2)}`;
+        const prev = byKey.get(key);
+        if (prev) {
+            prev.url = url;
+            if (activeName && name === activeName) {
+                prev.isActiveTarget = true;
+            }
+            return;
+        }
+
         const a = ra * DEG2RAD;
         const d = dec * DEG2RAD;
         const cd = Math.cos(d);
-        const key = `${ra.toFixed(3)}_${dec.toFixed(3)}_${fov.toFixed(2)}`;
         byKey.set(key, {
-            name: img.name,
-            commonName: img.common_name || '',
+            name,
+            commonName: commonName || '',
             ra,
             dec,
             x: cd * Math.cos(a),
             y: cd * Math.sin(a),
             z: Math.sin(d),
             fov,
-            url: cleanUrl,
-            isActiveTarget: Boolean(props.object && img.name === props.object.name),
-            isCustom: Boolean(img.is_custom)
+            url,
+            atlasTile: null,
+            isActiveTarget: Boolean(activeName && name === activeName),
+            isCustom: Boolean(isCustom)
         });
+    };
+
+    // 2. Live cached high-res cutouts from /api/cache/sky-images
+    for (const img of cachedServerImages.value) {
+        if (!img?.url || img.ra === undefined || img.dec === undefined) continue;
+        const cleanUrl = String(img.url).split('?')[0];
+        const ra = Number(img.ra);
+        const dec = Number(img.dec);
+        const fov = Math.max(Number(img.fov) || 1.0, 0.2);
+        if (!Number.isFinite(ra) || !Number.isFinite(dec)) continue;
+        mergeLivePhoto(
+            img.name,
+            img.common_name || '',
+            ra,
+            dec,
+            fov,
+            cleanUrl,
+            Boolean(img.is_custom)
+        );
     }
 
+    // 3. Streamed session objects marked cached
     if (Array.isArray(props.objects)) {
         for (let i = 0; i < props.objects.length; i++) {
             const o = props.objects[i];
@@ -1693,26 +1777,19 @@ const allSkyPhotos = computed(() => {
             const dec = Number(o.center_dec !== undefined ? o.center_dec : o.dec);
             const fov = Math.max(Number(o.image_fov || props.baseImageFov || 1.0), 0.2);
             if (!Number.isFinite(ra) || !Number.isFinite(dec)) continue;
-            const a = ra * DEG2RAD;
-            const d = dec * DEG2RAD;
-            const cd = Math.cos(d);
-            const key = `${ra.toFixed(3)}_${dec.toFixed(3)}_${fov.toFixed(2)}`;
-            byKey.set(key, {
-                name: o.name,
-                commonName: o.common_name && o.common_name !== 'N/A' ? o.common_name : '',
+            mergeLivePhoto(
+                o.name,
+                o.common_name && o.common_name !== 'N/A' ? o.common_name : '',
                 ra,
                 dec,
-                x: cd * Math.cos(a),
-                y: cd * Math.sin(a),
-                z: Math.sin(d),
                 fov,
-                url: String(o.image_url),
-                isActiveTarget: Boolean(props.object && o.name === props.object.name),
-                isCustom: Boolean(o.custom_framed)
-            });
+                String(o.image_url),
+                Boolean(o.custom_framed)
+            );
         }
     }
 
+    // 4. Active selected target
     if (props.object?.image_url) {
         const ra = Number(
             props.object.center_ra !== undefined ? props.object.center_ra : props.object.ra
@@ -1722,26 +1799,17 @@ const allSkyPhotos = computed(() => {
         );
         const fov = Math.max(Number(props.object.image_fov || props.baseImageFov || 1.0), 0.2);
         if (Number.isFinite(ra) && Number.isFinite(dec)) {
-            const a = ra * DEG2RAD;
-            const d = dec * DEG2RAD;
-            const cd = Math.cos(d);
-            const key = `${ra.toFixed(3)}_${dec.toFixed(3)}_${fov.toFixed(2)}`;
-            byKey.set(key, {
-                name: props.object.name,
-                commonName:
-                    props.object.common_name && props.object.common_name !== 'N/A'
-                        ? props.object.common_name
-                        : '',
+            mergeLivePhoto(
+                props.object.name,
+                props.object.common_name && props.object.common_name !== 'N/A'
+                    ? props.object.common_name
+                    : '',
                 ra,
                 dec,
-                x: cd * Math.cos(a),
-                y: cd * Math.sin(a),
-                z: Math.sin(d),
                 fov,
-                url: String(props.object.image_url),
-                isActiveTarget: true,
-                isCustom: Boolean(props.object.custom_framed)
-            });
+                String(props.object.image_url),
+                Boolean(props.object.custom_framed)
+            );
         }
     }
 
@@ -1809,20 +1877,27 @@ const rebuildDsoIndex = () => {
     objectByNameMap = byName;
 };
 
-const ensureImageLoaded = (url) => {
+const ensureImageLoaded = (url, allowQueue = true) => {
     if (!url) return null;
     const existing = imageElementCache.get(url);
     if (existing) {
         return existing.status === 'ready' ? existing.img : null;
     }
+    if (!allowQueue || inflightImageLoads >= MAX_CONCURRENT_INDIVIDUAL_LOADS) {
+        return null;
+    }
     const img = new Image();
+    img.decoding = 'async';
     const record = { img, status: 'loading' };
     imageElementCache.set(url, record);
+    inflightImageLoads++;
     img.onload = () => {
+        inflightImageLoads = Math.max(0, inflightImageLoads - 1);
         record.status = 'ready';
         scheduleDraw();
     };
     img.onerror = () => {
+        inflightImageLoads = Math.max(0, inflightImageLoads - 1);
         record.status = 'error';
     };
     img.src = url;
@@ -2061,10 +2136,12 @@ const drawSkyCanvas = () => {
         ctx.stroke();
     }
 
-    // 5. Already-Downloaded Sky Survey Photos Projected at True Celestial Scale
+    // 5. Sky Atlas + Cached Sky Survey Photos Projected at True Celestial Scale
     const hovered = hoveredItem.value;
     if (showCachedPhotos.value && allSkyPhotos.value.length > 0) {
         const photos = allSkyPhotos.value;
+        const denseCatalogMode = photos.length > 120;
+        const minRenderPx = denseCatalogMode ? 3.2 : 0.0;
         const photoCullCos = Math.cos(Math.min(Math.PI * 0.72, maxVisRad + 0.15));
 
         for (let i = 0; i < photos.length; i++) {
@@ -2074,9 +2151,11 @@ const drawSkyCanvas = () => {
 
             const k = 2.0 / (1.0 + cosC);
             const fk = cam.f * k;
+            const sizePx = photo.fov * DEG2RAD * fk;
+            if (sizePx < minRenderPx && !photo.isActiveTarget) continue;
+
             const px = cam.halfW - fk * (photo.x * cam.Ex + photo.y * cam.Ey);
             const py = cam.halfH - fk * (photo.x * cam.Nx + photo.y * cam.Ny + photo.z * cam.Nz);
-            const sizePx = photo.fov * DEG2RAD * fk;
 
             if (
                 px + sizePx < -40 ||
@@ -2087,38 +2166,72 @@ const drawSkyCanvas = () => {
                 continue;
             }
 
-            const projPt = { x: px, y: py, k, cosC, f: cam.f };
-            const northAngle = computeLocalNorthAngleWithBasis(photo.ra, photo.dec, projPt, cam);
             const isHovered =
                 hovered?.kind === 'photo' &&
                 hovered?.name === photo.name &&
                 Math.abs(hovered.ra - photo.ra) < 0.01;
 
-            const imgEl = sizePx >= 3.5 ? ensureImageLoaded(photo.url) : null;
+            const projPt = { x: px, y: py, k, cosC, f: cam.f };
+            const northAngle = computeLocalNorthAngleWithBasis(photo.ra, photo.dec, projPt, cam);
+
+            const tile = photo.atlasTile;
+            const sheetImg = tile && sizePx >= 3.2 ? ensureAtlasSheetImage(tile.s) : null;
+            const wantHiRes =
+                Boolean(photo.url) &&
+                (!tile || sizePx >= 190 || (photo.isActiveTarget && sizePx >= 115));
+            const hiResImg =
+                wantHiRes && sizePx >= 4.5
+                    ? ensureImageLoaded(photo.url, !isPanning.value || photo.isActiveTarget)
+                    : null;
 
             ctx.save();
             ctx.translate(px, py);
             ctx.rotate(northAngle);
 
-            if (imgEl && sizePx >= 5) {
+            if ((hiResImg || sheetImg) && sizePx >= 4.0) {
                 const half = sizePx * 0.5;
-                ctx.fillStyle = 'rgba(4, 7, 14, 0.62)';
+                ctx.fillStyle = denseCatalogMode
+                    ? 'rgba(4, 7, 14, 0.44)'
+                    : 'rgba(4, 7, 14, 0.62)';
                 ctx.fillRect(-half, -half, sizePx, sizePx);
 
                 ctx.save();
                 ctx.globalAlpha = photo.isActiveTarget ? 0.96 : 0.88;
                 ctx.globalCompositeOperation = 'screen';
-                ctx.drawImage(imgEl, -half, -half, sizePx, sizePx);
+                if (hiResImg) {
+                    ctx.drawImage(hiResImg, -half, -half, sizePx, sizePx);
+                } else if (sheetImg && tile) {
+                    ctx.drawImage(
+                        sheetImg,
+                        tile.u + 0.5,
+                        tile.v + 0.5,
+                        tile.w - 1,
+                        tile.h - 1,
+                        -half,
+                        -half,
+                        sizePx,
+                        sizePx
+                    );
+                }
                 ctx.restore();
 
-                ctx.strokeStyle = photo.isActiveTarget
-                    ? 'rgba(251, 191, 36, 0.58)'
-                    : isHovered
-                      ? 'rgba(56, 189, 248, 0.9)'
-                      : 'rgba(56, 189, 248, 0.42)';
-                ctx.lineWidth = isHovered ? 1.6 : 1.0;
-                ctx.strokeRect(-half, -half, sizePx, sizePx);
-            } else if (!photo.isActiveTarget) {
+                const drawFrame =
+                    photo.isActiveTarget ||
+                    isHovered ||
+                    !denseCatalogMode ||
+                    sizePx >= 44;
+                if (drawFrame) {
+                    ctx.strokeStyle = photo.isActiveTarget
+                        ? 'rgba(251, 191, 36, 0.58)'
+                        : isHovered
+                          ? 'rgba(56, 189, 248, 0.92)'
+                          : denseCatalogMode
+                            ? 'rgba(56, 189, 248, 0.22)'
+                            : 'rgba(56, 189, 248, 0.42)';
+                    ctx.lineWidth = isHovered ? 1.6 : 1.0;
+                    ctx.strokeRect(-half, -half, sizePx, sizePx);
+                }
+            } else if (!photo.isActiveTarget && (!denseCatalogMode || sizePx >= 6.0 || isHovered)) {
                 const boxSz = Math.max(sizePx, 8);
                 const half = boxSz * 0.5;
                 ctx.fillStyle = isHovered
@@ -2133,7 +2246,7 @@ const drawSkyCanvas = () => {
             }
             ctx.restore();
 
-            if (!photo.isActiveTarget) {
+            if (!photo.isActiveTarget && sizePx >= (denseCatalogMode ? 4.5 : 0)) {
                 interactiveItems.push({
                     kind: 'photo',
                     name: photo.name,
@@ -2715,7 +2828,7 @@ const onMouseMove = (e) => {
     }
 };
 
-const handleItemClick = async (item) => {
+const handleItemClick = async (item, closeMapAfterSelect = false) => {
     if (!item) return;
     if (item.kind === 'active') {
         emit('close');
@@ -2723,6 +2836,7 @@ const handleItemClick = async (item) => {
     }
     if (item.refObj) {
         emit('select-object', item.refObj);
+        if (closeMapAfterSelect) emit('close');
         return;
     }
     if (!item.isCustom && item.name) {
@@ -2732,6 +2846,7 @@ const handleItemClick = async (item) => {
                 const details = await res.json();
                 if (details?.name) {
                     emit('select-object', details);
+                    if (closeMapAfterSelect) emit('close');
                     return;
                 }
             }
@@ -2743,6 +2858,15 @@ const handleItemClick = async (item) => {
     viewDec.value = clampDecDeg(item.dec);
     updateStatusReadout(viewRa.value, viewDec.value, true);
     scheduleDraw();
+};
+
+const onDoubleClick = (e) => {
+    const rect = canvasRef.value?.getBoundingClientRect();
+    if (!rect) return;
+    const hit = findHitItem(e.clientX - rect.left, e.clientY - rect.top);
+    if (hit) {
+        handleItemClick(hit, true);
+    }
 };
 
 const onMouseUp = (e) => {
@@ -2884,6 +3008,10 @@ watch(
     }
 );
 
+watch(skyAtlasVersion, () => {
+    scheduleDraw();
+});
+
 onMounted(async () => {
     window.addEventListener('keydown', onKeyDown);
 
@@ -2909,6 +3037,7 @@ onMounted(async () => {
         updateDims();
     }
 
+    ensureSkyAtlasLoaded();
     fetchCachedSkyImages();
     await loadSkyData();
     isLoadingSky.value = false;
@@ -2934,6 +3063,7 @@ onUnmounted(() => {
         @mousedown="onMouseDown"
         @mousemove="onMouseMove"
         @mouseup="onMouseUp"
+        @dblclick="onDoubleClick"
         @mouseleave="onMouseLeave"
         @wheel.prevent="onWheel"
         @touchstart="onTouchStart"

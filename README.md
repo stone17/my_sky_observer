@@ -12,11 +12,11 @@
     *   **Intelligent Infinite Scroll**: Effortlessly browse through thousands of targets with lazy-loading and smart caching, keeping your browser extremely fast and responsive.
     *   **Cross-Catalog Deduplication**: Seamlessly merges major catalogs (Messier, NGC, IC, etc.) while automatically removing redundant or overlapping entries based on coordinates.
 
-*   **Interactive Framing**:
-    *   Visualize your camera and telescope's **Field of View (FOV)** projected onto Deep Sky Survey (DSS) images.
-    *   **Zoom & Pan**: Use your mouse wheel to zoom in and out, and drag the FOV box to frame the perfect shot.
-    *   **Center & Fetch**: Click "Update/Center Image" to download a fresh high-resolution slice of the sky perfectly centered on your custom framing.
-    *   **Cache Busting**: Ensures you always see the latest image updates when tweaking framing settings.
+*   **Interactive Framing & Wide-Field Sky Context Map**:
+    *   Visualize your camera and telescope's **Field of View (FOV)** projected onto Deep Sky Survey (DSS) images, alongside multi-profile equipment comparisons.
+    *   **Zoom Out to Wide-Field Sky Map**: Scroll out past `1.0×` (or click **🌌 Sky Map**) to explore constellations, bright stars, nearby deep-sky objects, your local horizon (`Alt = 0°`), minimum-altitude ring, and multi-day / time-of-night sky rotation at 60 FPS.
+    *   **Pre-Baked Sky Sprite Atlas & Instant Previews**: Pack downloaded catalog cutouts into compact `4096×4096` WebP sprite sheets (`sky_atlas_*.webp` + `sky_atlas.json`) for instant 60 FPS wide-field rendering and zero-latency low-res Framing previews while high-resolution (`1024×1024`) cutouts load in the background.
+    *   **Center & Fetch**: Drag the FOV box and click "Update/Center Image" to download a fresh high-resolution slice of the sky perfectly centered on your custom framing.
 
 *   **Seamless Integration**:
     *   **N.I.N.A. Support**: Send target coordinates and rotation directly to N.I.N.A. via its local API for automated slewing and centering. (Works natively and via Docker!).
@@ -106,6 +106,17 @@ Settings are automatically stored in `settings_user.yaml`. You can configure:
 
 *Note: All settings should be adjusted directly within the application's UI.*
 
+## 🌌 Building the Pre-Baked Sky Sprite Atlas
+
+After downloading sky survey cutouts into `image_cache/`, you can pack all cached targets into compact `4096×4096` WebP sprite sheets (`frontend/public/sky_atlas/`) for 60 FPS wide-field Sky Map rendering and instant low-resolution Framing previews:
+
+*   **From the Web UI:** Open the left sidebar → **Images & Cache** → click **⚡ Build / Update Sky Atlas** (and optionally **⬇️ Export Atlas (.zip)** when running inside Docker).
+*   **From the Command Line:**
+    ```bash
+    python scripts/build_sky_atlas.py
+    ```
+    This writes `sky_atlas_0.webp`, `sky_atlas.json`, and `LICENSE-ASSETS.md` into `frontend/public/sky_atlas/`, which can be committed directly to Git so clones get instant sky previews out of the box.
+
 ## 🤝 Contributing
 
 We welcome contributions!
@@ -118,6 +129,7 @@ We welcome contributions!
     *   Backend tests are located in `test/`. Run them using `pytest`.
     *   Ensure all tests pass before submitting a pull request.
 
-## 📄 License
+## 📄 License & Sky Survey Attribution
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+*   **Source Code ([MIT License](LICENSE)):** All application source code in this repository is licensed under the MIT License.
+*   **Sky Survey Image Assets ([CC BY-NC-SA 4.0](LICENSE-ASSETS.md)):** Any pre-baked Digitized Sky Survey (DSS / DSS2) sprite sheets under `frontend/public/sky_atlas/` are courtesy of STScI / Caltech (POSS-II) / UKST / AAO / NASA HEASARC *SkyView* and are licensed for non-commercial open-source, educational, and scientific use under **CC BY-NC-SA 4.0** — see [LICENSE-ASSETS.md](LICENSE-ASSETS.md) for full terms and required attribution. Commercial distributions should either obtain permission from STScI or omit `frontend/public/sky_atlas/`.

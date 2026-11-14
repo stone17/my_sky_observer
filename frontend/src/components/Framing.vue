@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import SkyContextMap from './SkyContextMap.vue';
 import {
     computeSensorFov,
@@ -12,6 +12,12 @@ import {
     getObjectTypeDescription,
     formatMagnitude
 } from '../utils/catalogMeta.js';
+import {
+    ensureSkyAtlasLoaded,
+    ensureAtlasSheetImage,
+    findOverlappingAtlasTiles,
+    skyAtlasVersion
+} from '../utils/skyAtlas.js';
 
 const props = defineProps(['object', 'objects', 'settings', 'clientSettings', 'nightTimes', 'searchQuery', 'activeFov']);
 const emit = defineEmits(['update-settings', 'update-client-settings', 'update-search', 'select-object', 'update-fov', 'open-mobile-list', 'update-object-settings']);
@@ -46,6 +52,146 @@ watch(
 const isObjectDownloading = computed(() => {
     return props.object && props.object.status === 'downloading';
 });
+
+// --- INSTANT LOW-RES SKY ATLAS PREVIEW & HD CROSS-FADE ---
+const hdImgRef = ref(null);
+const loadedHdUrl = ref('');
+const atlasPreviewCanvasRef = ref(null);
+
+watch(
+    () => props.object?.image_url,
+    (newUrl) => {
+        if (!newUrl) {
+            loadedHdUrl.value = '';
+            return;
+        }
+        if (newUrl !== loadedHdUrl.value) {
+            nextTick(() => {
+                const imgEl = hdImgRef.value;
+                if (imgEl && imgEl.complete && imgEl.naturalWidth > 0 && props.object?.image_url === newUrl) {
+                    loadedHdUrl.value = newUrl;
+                }
+            });
+        }
+    },
+    { immediate: true }
+);
+
+const onHdImageLoad = () => {
+    loadedHdUrl.value = props.object?.image_url || '';
+};
+
+const onHdImageError = () => {
+    if (loadedHdUrl.value === props.object?.image_url) {
+        loadedHdUrl.value = '';
+    }
+};
+
+const isHdReady = computed(() => {
+    return Boolean(
+        props.object?.image_url &&
+            loadedHdUrl.value === props.object.image_url &&
+            !isObjectDownloading.value
+    );
+});
+
+const previewFrameSpec = computed(() => {
+    // Subscribe to atlas load / sheet decode updates
+    void skyAtlasVersion.value;
+    if (!props.object) return null;
+
+    const ra = parseFloat(
+        props.object.center_ra !== undefined ? props.object.center_ra : props.object.ra
+    );
+    const dec = parseFloat(
+        props.object.center_dec !== undefined ? props.object.center_dec : props.object.dec
+    );
+    if (!Number.isFinite(ra) || !Number.isFinite(dec)) return null;
+
+    const fov = parseFloat(
+        (isObjectDownloading.value || !props.object.image_fov
+            ? localFov.value
+            : props.object.image_fov) ||
+            localFov.value ||
+            defaultImageFov.value
+    );
+    if (!Number.isFinite(fov) || fov <= 0.001) return null;
+
+    const tiles = findOverlappingAtlasTiles(ra, dec, fov, props.object);
+    return { ra, dec, fov, tiles };
+});
+
+const hasAtlasPreview = computed(() => {
+    return Boolean(previewFrameSpec.value && previewFrameSpec.value.tiles.length > 0);
+});
+
+const effectiveDisplayFov = computed(() => {
+    if (!isHdReady.value && hasAtlasPreview.value && previewFrameSpec.value) {
+        return previewFrameSpec.value.fov;
+    }
+    const raw = parseFloat(props.object?.image_fov || localFov.value || defaultImageFov.value);
+    return Number.isFinite(raw) && raw > 0.001 ? raw : 1.0;
+});
+
+const renderAtlasPreviewCanvas = () => {
+    const canvas = atlasPreviewCanvasRef.value;
+    const spec = previewFrameSpec.value;
+    if (!canvas || !spec || !spec.tiles.length) return;
+
+    const size = 384;
+    if (canvas.width !== size) canvas.width = size;
+    if (canvas.height !== size) canvas.height = size;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.fillStyle = '#04070f';
+    ctx.fillRect(0, 0, size, size);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+
+    const cosDec = Math.max(Math.cos((spec.dec * Math.PI) / 180.0), 0.01);
+
+    for (let i = 0; i < spec.tiles.length; i++) {
+        const tile = spec.tiles[i];
+        const sheetImg = ensureAtlasSheetImage(tile.s);
+        if (!sheetImg) continue;
+
+        let dRa = tile.ra - spec.ra;
+        if (dRa > 180) dRa -= 360;
+        if (dRa < -180) dRa += 360;
+
+        // Standard astronomical SkyView projection: North is up (-Y), East is left (-X)
+        const dxDeg = -dRa * cosDec;
+        const dyDeg = -(tile.dec - spec.dec);
+
+        const destSize = (tile.fov / spec.fov) * size;
+        const destCx = size * 0.5 + (dxDeg / spec.fov) * size;
+        const destCy = size * 0.5 + (dyDeg / spec.fov) * size;
+
+        ctx.drawImage(
+            sheetImg,
+            tile.u + 0.5,
+            tile.v + 0.5,
+            tile.w - 1,
+            tile.h - 1,
+            destCx - destSize * 0.5,
+            destCy - destSize * 0.5,
+            destSize,
+            destSize
+        );
+    }
+};
+
+watch(
+    [previewFrameSpec, isHdReady, skyAtlasVersion],
+    () => {
+        if (!isHdReady.value && hasAtlasPreview.value) {
+            nextTick(renderAtlasPreviewCanvas);
+        }
+    },
+    { immediate: true }
+);
 
 // --- FAVORITES BOOKMARKING ---
 const isCurrentFavorite = computed(() => {
@@ -170,7 +316,7 @@ const parseSizeArcmin = (obj) => {
 const fovOverlayObjects = computed(() => {
     if (!showOverlays.value || !props.object) return [];
 
-    const imgFov = parseFloat(props.object.image_fov || localFov.value || defaultImageFov.value);
+    const imgFov = effectiveDisplayFov.value;
     if (!imgFov || imgFov <= 0.001) return [];
 
     const centerRa = parseFloat(
@@ -629,7 +775,7 @@ const onViewportTouchMove = (e) => {
 };
 
 const getCurrentCenterCoordinates = () => {
-    const baseFov = props.object?.image_fov || localFov.value;
+    const baseFov = effectiveDisplayFov.value || localFov.value;
     const pxToDeg = baseFov / (wrapperSize.value || 1);
 
     const centerRa = parseFloat(props.object?.center_ra !== undefined ? props.object.center_ra : props.object.ra);
@@ -768,6 +914,7 @@ const sendToNina = async () => {
 };
 
 onMounted(() => {
+    ensureSkyAtlasLoaded();
     if (viewportRef.value) {
         resizeObserver = new ResizeObserver(entries => {
             for (let entry of entries) {
@@ -906,15 +1053,33 @@ onUnmounted(() => {
                 }"
             >
                 <div class="image-container">
-                    <img v-if="object.image_url" :src="object.image_url" class="sky-image" />
-                    <div v-else class="sky-image placeholder-text">
+                    <canvas
+                        v-show="hasAtlasPreview"
+                        ref="atlasPreviewCanvasRef"
+                        width="384"
+                        height="384"
+                        class="sky-image sky-atlas-preview-canvas"
+                    ></canvas>
+                    <img
+                        v-if="object.image_url"
+                        ref="hdImgRef"
+                        :src="object.image_url"
+                        class="sky-image sky-hd-image"
+                        :class="{
+                            'is-hd-ready': isHdReady,
+                            'has-atlas-underlay': hasAtlasPreview
+                        }"
+                        @load="onHdImageLoad"
+                        @error="onHdImageError"
+                    />
+                    <div v-if="!object.image_url && !hasAtlasPreview" class="sky-image placeholder-text">
                         <span>No Image Loaded</span>
                     </div>
                 </div>
 
                 <!-- FOV Object Circles & Labels Overlay -->
                 <div
-                    v-if="showOverlays && !isObjectDownloading && fovOverlayObjects.length > 0"
+                    v-if="showOverlays && (!isObjectDownloading || hasAtlasPreview) && fovOverlayObjects.length > 0"
                     class="object-overlays-layer"
                 >
                     <div
@@ -960,13 +1125,30 @@ onUnmounted(() => {
                     </div>
                 </div>
 
-                <div v-if="isObjectDownloading" class="download-overlay">
+                <div v-if="isObjectDownloading && !hasAtlasPreview" class="download-overlay">
                     <div class="spinner"></div>
                     <span>Downloading sky survey...</span>
                 </div>
 
+                <div
+                    v-else-if="hasAtlasPreview && !isHdReady"
+                    class="atlas-hd-status-pill"
+                    :class="{ 'is-loading': isObjectDownloading || Boolean(object.image_url) }"
+                >
+                    <span
+                        v-if="isObjectDownloading || Boolean(object.image_url)"
+                        class="atlas-pill-spinner"
+                    ></span>
+                    <span v-if="isObjectDownloading || Boolean(object.image_url)">
+                        Atlas preview · Loading HD survey…
+                    </span>
+                    <span v-else>
+                        Atlas preview (low-res)
+                    </span>
+                </div>
+
                 <!-- Comparison Sensor Rectangles for Other Saved Setups -->
-                <template v-if="object && settings && !isObjectDownloading">
+                <template v-if="object && settings && (!isObjectDownloading || hasAtlasPreview)">
                     <div
                         v-for="comp in activeComparisonRectangles"
                         :key="`comp-rect-${comp.name}`"
@@ -986,7 +1168,7 @@ onUnmounted(() => {
                 </template>
 
                 <div
-                    v-if="object && settings && !isObjectDownloading"
+                    v-if="object && settings && (!isObjectDownloading || hasAtlasPreview)"
                     :style="sensorStyle"
                     @mousedown="startDrag"
                     @touchstart.stop.prevent="startTouchDrag"
@@ -1010,8 +1192,8 @@ onUnmounted(() => {
                 <div
                     v-for="comp in activeComparisonRectangles"
                     :key="`osd-comp-${comp.name}`"
-                    class="osd-row"
                     :title="`Comparison FOV for saved profile '${comp.name}'`"
+                    class="osd-row"
                 >
                     <span
                         class="osd-dot"
@@ -1028,7 +1210,7 @@ onUnmounted(() => {
                 <div class="osd-row" title="Field of View of the currently displayed sky survey image">
                     <span class="osd-dot view"></span>
                     <span class="osd-lbl">Current View:</span>
-                    <strong class="view-val">{{ (object.image_fov || localFov).toFixed(2) }}° × {{ (object.image_fov || localFov).toFixed(2) }}°</strong>
+                    <strong class="view-val">{{ effectiveDisplayFov.toFixed(2) }}° × {{ effectiveDisplayFov.toFixed(2) }}°</strong>
                 </div>
                 <div v-if="isZoomModified" class="osd-row">
                     <span class="osd-lbl">Canvas Zoom:</span>
@@ -1421,11 +1603,13 @@ onUnmounted(() => {
 }
 
 .image-container {
+    position: relative;
     width: 100%;
     height: 100%;
     display: flex;
     justify-content: center;
     align-items: center;
+    overflow: hidden;
 }
 
 .sky-image {
@@ -1434,6 +1618,67 @@ onUnmounted(() => {
     object-fit: contain;
     user-select: none;
     -webkit-user-drag: none;
+}
+
+.sky-atlas-preview-canvas {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    filter: contrast(1.03);
+}
+
+.sky-hd-image {
+    position: relative;
+    z-index: 2;
+}
+
+.sky-hd-image.has-atlas-underlay {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    transition: opacity 0.18s ease-out;
+}
+
+.sky-hd-image.has-atlas-underlay.is-hd-ready {
+    opacity: 1;
+}
+
+.atlas-hd-status-pill {
+    position: absolute;
+    top: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 22;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 11px;
+    border-radius: 999px;
+    background: rgba(15, 23, 42, 0.84);
+    backdrop-filter: blur(6px);
+    border: 1px solid rgba(56, 189, 248, 0.45);
+    color: #bae6fd;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    pointer-events: none;
+    white-space: nowrap;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.55);
+}
+
+.atlas-hd-status-pill.is-loading {
+    border-color: rgba(16, 185, 129, 0.55);
+    color: #a7f3d0;
+}
+
+.atlas-pill-spinner {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    border: 2px solid rgba(16, 185, 129, 0.28);
+    border-top-color: #34d399;
+    animation: spin 0.85s linear infinite;
+    flex-shrink: 0;
 }
 
 .placeholder-text {
