@@ -55,7 +55,6 @@ const textWidthCache = new Map();    // `${fontKey}|${text}` -> number
 const imageElementCache = new Map(); // url -> { img, status: 'loading' | 'ready' | 'error' }
 let inflightImageLoads = 0;
 const MAX_CONCURRENT_INDIVIDUAL_LOADS = 6;
-const photoDrawQueue = []; // Reusable scratch array for zero-GC batched tile passes
 
 const wrapRaDeg = (ra) => {
     let r = Number(ra) % 360.0;
@@ -2162,15 +2161,18 @@ const drawSkyCanvas = () => {
         ctx.stroke();
     }
 
-    // 5. Sky Atlas + Cached Sky Survey Photos Projected at True Celestial Scale (Zero-border GPU-batched passes)
+    // 5. Sky Atlas + Cached Sky Survey Photos Projected at True Celestial Scale
+    // IMPORTANT: Each tile MUST draw its source-over dark backing rect immediately before its
+    // screen-blended image so overlapping DSS2 cutouts attenuate underlying tiles instead of blowing out to white.
     const hovered = hoveredItem.value;
     if (showCachedPhotos.value && allSkyPhotos.value.length > 0) {
         const photos = allSkyPhotos.value;
         const denseCatalogMode = photos.length > 120;
         const minRenderPx = denseCatalogMode ? 3.2 : 2.5;
         const photoCullCos = Math.cos(Math.min(Math.PI * 0.72, maxVisRad + 0.15));
-        let photoDrawCount = 0;
         let hoveredHighlight = null;
+
+        ctx.fillStyle = denseCatalogMode ? 'rgba(4, 7, 14, 0.44)' : 'rgba(4, 7, 14, 0.62)';
 
         for (let i = 0; i < photos.length; i++) {
             const photo = photos[i];
@@ -2269,66 +2271,39 @@ const drawSkyCanvas = () => {
             }
 
             if (hasReadyImg) {
-                let slot = photoDrawQueue[photoDrawCount];
-                if (!slot) {
-                    slot = {};
-                    photoDrawQueue[photoDrawCount] = slot;
-                }
-                slot.m11 = m11;
-                slot.m12 = m12;
-                slot.tx = tx;
-                slot.ty = ty;
-                slot.sizePx = sizePx;
-                slot.half = sizePx * 0.5;
-                slot.alpha = photo.isActiveTarget ? 0.96 : 0.88;
-                slot.hiResImg = hiResImg;
-                slot.sheetImg = sheetImg;
-                slot.tile = tile;
-                photoDrawCount++;
-            }
-        }
+                const half = sizePx * 0.5;
+                ctx.setTransform(m11, m12, -m12, m11, tx, ty);
 
-        if (photoDrawCount > 0) {
-            // Pass 5a: Batched source-over backing rects (zero blend-mode switches)
-            ctx.fillStyle = denseCatalogMode ? 'rgba(4, 7, 14, 0.44)' : 'rgba(4, 7, 14, 0.62)';
-            for (let i = 0; i < photoDrawCount; i++) {
-                const s = photoDrawQueue[i];
-                ctx.setTransform(s.m11, s.m12, -s.m12, s.m11, s.tx, s.ty);
-                ctx.fillRect(-s.half, -s.half, s.sizePx, s.sizePx);
-            }
+                // Per-tile dark backing rect attenuates overlapping tiles underneath
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.globalAlpha = 1.0;
+                ctx.fillRect(-half, -half, sizePx, sizePx);
 
-            // Pass 5b: Batched screen-blended survey quads (continuous GPU sprite batch)
-            ctx.save();
-            ctx.globalCompositeOperation = 'screen';
-            let curAlpha = -1;
-            for (let i = 0; i < photoDrawCount; i++) {
-                const s = photoDrawQueue[i];
-                ctx.setTransform(s.m11, s.m12, -s.m12, s.m11, s.tx, s.ty);
-                if (s.alpha !== curAlpha) {
-                    ctx.globalAlpha = s.alpha;
-                    curAlpha = s.alpha;
-                }
-                if (s.hiResImg) {
-                    ctx.drawImage(s.hiResImg, -s.half, -s.half, s.sizePx, s.sizePx);
-                } else if (s.sheetImg && s.tile) {
-                    const tl = s.tile;
+                // Screen-blend this tile onto the darkened backing
+                ctx.globalCompositeOperation = 'screen';
+                ctx.globalAlpha = photo.isActiveTarget ? 0.96 : 0.88;
+                if (hiResImg) {
+                    ctx.drawImage(hiResImg, -half, -half, sizePx, sizePx);
+                } else if (sheetImg && tile) {
                     ctx.drawImage(
-                        s.sheetImg,
-                        tl.u + 0.5,
-                        tl.v + 0.5,
-                        tl.w - 1,
-                        tl.h - 1,
-                        -s.half,
-                        -s.half,
-                        s.sizePx,
-                        s.sizePx
+                        sheetImg,
+                        tile.u + 0.5,
+                        tile.v + 0.5,
+                        tile.w - 1,
+                        tile.h - 1,
+                        -half,
+                        -half,
+                        sizePx,
+                        sizePx
                     );
                 }
             }
-            ctx.restore();
         }
 
-        // Pass 5c: Optional single hover highlight (only for the target directly under cursor)
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 1.0;
+
+        // Optional single hover highlight (only for the target directly under cursor)
         if (hoveredHighlight) {
             const hh = hoveredHighlight;
             const half = hh.boxSz * 0.5;
