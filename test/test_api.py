@@ -852,6 +852,70 @@ def test_filter_and_object_settings_persistence():
     save_settings(TEST_SETTINGS)
 
 
+def test_list_cached_sky_images_and_endpoint(tmp_path):
+    """Verify cached sky survey images across standard, custom-FOV, and custom-RA/Dec folders resolve RA/Dec/FOV accurately."""
+    from backend.image_service import (
+        get_cache_status_info,
+        list_cached_sky_images,
+        save_custom_image_meta,
+    )
+
+    std_hash = "fov_2.00_1.50_p1.15_r1024_dss2r"
+    std_dir = tmp_path / std_hash
+    std_dir.mkdir()
+    (std_dir / f"M_42_{std_hash}.jpg").write_bytes(b"fakejpg1")
+
+    cfov_hash = "fov_custom_4.50_r2048_dss2r"
+    cfov_dir = tmp_path / cfov_hash
+    cfov_dir.mkdir()
+    (cfov_dir / f"M_31_{cfov_hash}.jpg").write_bytes(b"fakejpg2")
+
+    custom_hash = "custom_abcdef123456"
+    custom_dir = tmp_path / custom_hash
+    custom_dir.mkdir()
+    (custom_dir / f"RADEC_83.822_-5.391_{custom_hash}.jpg").write_bytes(b"fakejpg3")
+    save_custom_image_meta(
+        setup_hash=custom_hash,
+        ra=83.822,
+        dec=-5.391,
+        fov=3.25,
+        resolution=1024,
+        source="dss2r",
+        cache_dir=str(tmp_path),
+    )
+
+    # Sidecar meta.json must not inflate image cache count
+    status_info = get_cache_status_info(str(tmp_path), setup_hash=custom_hash)
+    assert status_info["count"] == 3
+    assert status_info["setup_count"] == 1
+
+    imgs = list_cached_sky_images(
+        cache_dir=str(tmp_path), active_setup_hash=std_hash
+    )
+    assert len(imgs) == 3
+
+    by_name = {i["name"]: i for i in imgs}
+    assert "M 42" in by_name
+    assert by_name["M 42"]["common_name"] == "Orion Nebula"
+    assert abs(by_name["M 42"]["fov"] - 2.3) < 0.01
+    assert by_name["M 42"]["is_active_setup"] is True
+
+    assert "M 31" in by_name
+    assert abs(by_name["M 31"]["fov"] - 4.5) < 0.01
+
+    custom_items = [i for i in imgs if i["is_custom"]]
+    assert len(custom_items) == 1
+    assert abs(custom_items[0]["fov"] - 3.25) < 0.01
+    assert abs(custom_items[0]["ra"] - 83.822) < 0.01
+
+    # Also verify FastAPI endpoint returns valid payload
+    res = client.get("/api/cache/sky-images")
+    assert res.status_code == 200
+    assert "images" in res.json()
+    assert isinstance(res.json()["images"], list)
+
+
+
 def test_background_downloads_continue_without_client_and_stop():
     """Verify background downloads run independently of HTTP/SSE connections and can be stopped."""
     import asyncio

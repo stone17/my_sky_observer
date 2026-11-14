@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import SkyContextMap from './SkyContextMap.vue';
 import {
     computeSensorFov,
     computeDefaultImageFov,
@@ -509,7 +510,30 @@ const resetFov = () => {
     emit('update-fov', { fov: defaultImageFov.value, isReset: true });
 };
 
+const showSkyMap = ref(false);
+const skyMapInitialFov = ref(35.0);
+
+const currentBaseImageFov = computed(() => {
+    const val = parseFloat(props.object?.image_fov || localFov.value || defaultImageFov.value);
+    return Number.isFinite(val) && val > 0 ? val : 1.0;
+});
+
+const openSkyMap = (targetFov = null) => {
+    const base = currentBaseImageFov.value;
+    skyMapInitialFov.value =
+        targetFov !== null && Number.isFinite(targetFov)
+            ? Math.max(targetFov, base * 1.12)
+            : Math.max(35.0, base * 4.0);
+    showSkyMap.value = true;
+};
+
+const closeSkyMap = () => {
+    showSkyMap.value = false;
+    zoomLevel.value = 1.0;
+};
+
 const onWheel = (e) => {
+    if (showSkyMap.value) return;
     if (e.shiftKey) {
         // Shift + Wheel rotates sensor
         const dir = e.deltaY < 0 ? 2 : -2;
@@ -519,7 +543,11 @@ const onWheel = (e) => {
     if (e.deltaY < 0) {
         zoomLevel.value = Math.min(zoomLevel.value * 1.1, 10.0);
     } else if (e.deltaY > 0) {
-        zoomLevel.value = Math.max(zoomLevel.value / 1.1, 0.5);
+        if (zoomLevel.value <= 1.005) {
+            openSkyMap(currentBaseImageFov.value * 1.18);
+            return;
+        }
+        zoomLevel.value = Math.max(zoomLevel.value / 1.1, 1.0);
     }
 };
 
@@ -577,10 +605,18 @@ const onViewportTouchStart = (e) => {
 };
 
 const onViewportTouchMove = (e) => {
+    if (showSkyMap.value) return;
     if (e.touches.length === 2 && pinchStartDist.value > 0) {
         const dist = getTouchDistance(e.touches[0], e.touches[1]);
         const scale = dist / pinchStartDist.value;
-        zoomLevel.value = Math.min(Math.max(pinchStartZoom.value * scale, 0.5), 10.0);
+        const candidateZoom = pinchStartZoom.value * scale;
+        if (candidateZoom < 0.86) {
+            pinchStartDist.value = 0;
+            openSkyMap(currentBaseImageFov.value * 1.25);
+            e.preventDefault();
+            return;
+        }
+        zoomLevel.value = Math.min(Math.max(candidateZoom, 1.0), 10.0);
         e.preventDefault();
         return;
     }
@@ -608,6 +644,11 @@ const getCurrentCenterCoordinates = () => {
         dec: centerDec + decOffset
     };
 };
+
+const currentSensorCenter = computed(() => {
+    if (!props.object) return null;
+    return getCurrentCenterCoordinates();
+});
 
 const isZoomModified = computed(() => Math.abs(zoomLevel.value - 1.0) > 0.01);
 
@@ -825,7 +866,37 @@ onUnmounted(() => {
             @touchcancel="stopDrag"
             @wheel.prevent="onWheel"
         >
+            <!-- Wide-Field Interactive Sky Context Map (on zoom-out or Sky Map button) -->
+            <SkyContextMap
+                v-if="showSkyMap && object"
+                :object="object"
+                :objects="objects"
+                :settings="settings"
+                :clientSettings="clientSettings"
+                :sensorFov="systemSensorFov"
+                :comparisonRectangles="activeComparisonRectangles"
+                :sensorCenter="currentSensorCenter"
+                :rotation="rotation"
+                :baseImageFov="currentBaseImageFov"
+                :initialMapFov="skyMapInitialFov"
+                @close="closeSkyMap"
+                @select-object="emit('select-object', $event)"
+            />
+
+            <!-- Top-Left Quick Sky Context Button (in Framing mode) -->
+            <button
+                v-if="!showSkyMap && object"
+                type="button"
+                class="viewport-sky-map-pill"
+                @click="openSkyMap()"
+                title="Zoom out to wide-field Sky Map with constellations, stars, and downloaded photos (or scroll out)"
+            >
+                <span>🌌</span>
+                <span>Sky Map</span>
+            </button>
+
             <div
+                v-show="!showSkyMap"
                 class="image-wrapper"
                 :style="{
                     width: wrapperSize + 'px',
@@ -925,7 +996,7 @@ onUnmounted(() => {
             </div>
 
             <!-- Top-Right Telemetry Readout -->
-            <div class="osd-overlay">
+            <div v-show="!showSkyMap" class="osd-overlay">
                 <div class="osd-title">
                     <span class="osd-title-lbl">Profile:</span>
                     <strong class="osd-title-val">{{ settings?.active_profile || 'Custom' }}</strong>
@@ -965,7 +1036,7 @@ onUnmounted(() => {
             </div>
 
             <!-- Bottom Floating Canvas HUD Toolbar -->
-            <div class="canvas-hud">
+            <div v-show="!showSkyMap" class="canvas-hud">
                 <!-- Selected Optics Readout -->
                 <div
                     class="hud-group hud-optics-readout"
@@ -1117,6 +1188,15 @@ onUnmounted(() => {
                             </div>
                         </div>
                     </div>
+
+                    <button
+                        type="button"
+                        class="hud-btn"
+                        @click="openSkyMap()"
+                        title="Zoom out to wide-field Sky Map with constellations, stars, and downloaded photos"
+                    >
+                        🌌 Sky Map
+                    </button>
 
                     <button
                         type="button"
@@ -1989,5 +2069,35 @@ onUnmounted(() => {
         flex: 1 1 auto;
         text-align: center;
     }
+}
+
+.viewport-sky-map-pill {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 22;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    margin: 0;
+    border-radius: 7px;
+    background: rgba(13, 18, 28, 0.82);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    color: #e2e8f0;
+    font-size: 0.78rem;
+    font-weight: 500;
+    line-height: 1.2;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.42);
+}
+
+.viewport-sky-map-pill:hover {
+    background: rgba(14, 116, 144, 0.34);
+    border-color: rgba(56, 189, 248, 0.65);
+    color: #ffffff;
 }
 </style>

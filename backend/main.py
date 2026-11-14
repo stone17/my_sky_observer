@@ -35,8 +35,10 @@ from .image_service import (
     get_cache_status_info,
     get_custom_coord_hash,
     get_setup_hash,
+    list_cached_sky_images,
     purge_image_cache,
     resolve_safe_cache_path,
+    save_custom_image_meta,
 )
 from .models import (
     Camera,
@@ -352,6 +354,32 @@ def get_cache_status(setup_hash: str = ""):
     return get_cache_status_info(CACHE_DIR, setup_hash=effective_hash or None)
 
 
+@app.get("/api/cache/sky-images")
+def get_cached_sky_images(setup_hash: str = ""):
+    settings = load_settings()
+    effective_hash = setup_hash.strip()
+    fallback_fov = 1.0
+    try:
+        telescope = Telescope(**settings.get("telescope", {"focal_length": 400}))
+        camera = Camera(
+            **settings.get("camera", {"sensor_width": 23.5, "sensor_height": 15.6})
+        )
+        fov_info = compute_fov_and_setup(telescope, camera, settings)
+        fallback_fov = float(fov_info.get("default_download_fov") or 1.0)
+        if not effective_hash:
+            effective_hash = fov_info.get("setup_hash", "")
+    except Exception:
+        pass
+
+    images = list_cached_sky_images(
+        cache_dir=CACHE_DIR,
+        settings=settings,
+        active_setup_hash=effective_hash or None,
+        fallback_fov=fallback_fov,
+    )
+    return JSONResponse(content={"images": images})
+
+
 @app.post("/api/cache/purge")
 def purge_cache():
     purge_image_cache(CACHE_DIR)
@@ -383,6 +411,15 @@ async def fetch_custom_image(req: FetchImageRequest):
             resolution=req.resolution,
             source=req.source,
             timeout=req.timeout,
+        )
+        save_custom_image_meta(
+            setup_hash=setup_hash,
+            ra=float(req.ra),
+            dec=float(req.dec),
+            fov=effective_fov,
+            resolution=req.resolution,
+            source=req.source,
+            cache_dir=CACHE_DIR,
         )
         return {"url": url, "status": "cached", "image_fov": effective_fov}
     except Exception as e:

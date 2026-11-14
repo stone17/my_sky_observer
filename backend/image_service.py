@@ -1,8 +1,10 @@
 import asyncio
 import hashlib
+import json
 import os
+import re
 import shutil
-from typing import Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 import httpx
 from astropy.coordinates import SkyCoord
 import astropy.units as u
@@ -105,19 +107,23 @@ def get_custom_coord_hash(
     return "custom_" + hashlib.md5(coord_hash_str.encode()).hexdigest()[:12]
 
 
-def get_cache_info(
-    object_name: str, setup_hash: str, cache_dir: str = CACHE_DIR
-) -> Tuple[str, str, str]:
+def sanitize_cache_object_name(object_name: str) -> str:
     invalid_chars = '<>:"/\\|?*'
-    sanitized_name = object_name
+    sanitized_name = str(object_name)
     for char in invalid_chars:
         sanitized_name = sanitized_name.replace(char, "")
-    sanitized_name = (
+    return (
         sanitized_name.replace(" ", "_")
         .replace("°", "d")
         .replace("'", "m")
         .replace("..", "_")
     )
+
+
+def get_cache_info(
+    object_name: str, setup_hash: str, cache_dir: str = CACHE_DIR
+) -> Tuple[str, str, str]:
+    sanitized_name = sanitize_cache_object_name(object_name)
 
     filename = f"{sanitized_name}_{setup_hash}.jpg"
     setup_dir = resolve_safe_cache_path(cache_dir, setup_hash)
@@ -266,6 +272,11 @@ async def download_image(
             _INFLIGHT_DOWNLOADS.pop(filepath, None)
 
 
+def _is_cached_image_file(filename: str) -> bool:
+    lower = filename.lower()
+    return lower.endswith((".jpg", ".jpeg", ".png", ".webp"))
+
+
 def get_cache_status_info(
     cache_dir: str = CACHE_DIR, setup_hash: Optional[str] = None
 ) -> dict:
@@ -281,8 +292,14 @@ def get_cache_status_info(
         os.path.getsize(os.path.join(r, f))
         for r, _, files in os.walk(cache_dir)
         for f in files
+        if _is_cached_image_file(f)
     )
-    count = sum(len(files) for _, _, files in os.walk(cache_dir))
+    count = sum(
+        1
+        for _, _, files in os.walk(cache_dir)
+        for f in files
+        if _is_cached_image_file(f)
+    )
 
     setup_count = 0
     setup_size = 0
@@ -292,7 +309,7 @@ def get_cache_status_info(
             if os.path.isdir(setup_dir):
                 for f in os.listdir(setup_dir):
                     fp = os.path.join(setup_dir, f)
-                    if os.path.isfile(fp):
+                    if os.path.isfile(fp) and _is_cached_image_file(f):
                         setup_count += 1
                         setup_size += os.path.getsize(fp)
         except ValueError:
@@ -312,3 +329,270 @@ def purge_image_cache(cache_dir: str = CACHE_DIR) -> dict:
         shutil.rmtree(cache_dir)
     os.makedirs(cache_dir, exist_ok=True)
     return {"status": "purged"}
+
+
+_SETUP_FOV_RE = re.compile(
+    r"^fov_([0-9]+(?:\.[0-9]+)?)_([0-9]+(?:\.[0-9]+)?)_p([0-9]+(?:\.[0-9]+)?)_r(\d+)_([a-z0-9]+)$"
+)
+_CUSTOM_FOV_RE = re.compile(
+    r"^fov_custom_([0-9]+(?:\.[0-9]+)?)_r(\d+)_([a-z0-9]+)$"
+)
+_RADEC_PREFIX_RE = re.compile(
+    r"^RADEC_(-?[0-9]+(?:\.[0-9]+)?)_(-?[0-9]+(?:\.[0-9]+)?)$"
+)
+_SAN_CATALOG_LOOKUP: Optional[Dict[str, dict]] = None
+
+
+def parse_setup_hash_fov(setup_hash: str) -> Tuple[Optional[float], int]:
+    """Parse (download_fov_deg, resolution_px) from a standard setup_hash folder name."""
+    m = _SETUP_FOV_RE.match(setup_hash)
+    if m:
+        fov_w = float(m.group(1))
+        fov_h = float(m.group(2))
+        padding = float(m.group(3))
+        res = int(m.group(4))
+        return max(max(fov_w, fov_h) * padding, 0.25), res
+    m2 = _CUSTOM_FOV_RE.match(setup_hash)
+    if m2:
+        eff = float(m2.group(1))
+        res = int(m2.group(2))
+        return max(eff, 0.25), res
+    return None, 1024
+
+
+def save_custom_image_meta(
+    setup_hash: str,
+    ra: float,
+    dec: float,
+    fov: float,
+    resolution: int,
+    source: str,
+    cache_dir: str = CACHE_DIR,
+) -> None:
+    """Write sidecar metadata for a custom-coordinate sky survey image."""
+    try:
+        setup_dir = resolve_safe_cache_path(cache_dir, setup_hash)
+        os.makedirs(setup_dir, exist_ok=True)
+        meta_path = resolve_safe_cache_path(cache_dir, setup_hash, "meta.json")
+        payload = {
+            "ra": round(float(ra), 5),
+            "dec": round(float(dec), 5),
+            "fov": round(max(float(fov), 0.25), 4),
+            "resolution": int(resolution),
+            "source": str(source),
+        }
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+    except Exception:
+        pass
+
+
+def _get_sanitized_catalog_lookup() -> Dict[str, dict]:
+    """Build and cache a fast lookup from sanitized catalog object name -> metadata."""
+    global _SAN_CATALOG_LOOKUP
+    if _SAN_CATALOG_LOOKUP is not None:
+        return _SAN_CATALOG_LOOKUP
+
+    from .data_manager import CATALOG_PRIORITY, CatalogManager
+
+    lookup: Dict[str, dict] = {}
+    avail = CatalogManager.get_available_catalogs()
+    ordered = sorted(avail, key=lambda c: (CATALOG_PRIORITY.get(c.upper(), 99), c))
+    for cat in ordered:
+        try:
+            df = CatalogManager.get_catalog(cat)
+        except Exception:
+            continue
+        for row in df.to_dict("records"):
+            obj_id = str(row.get("id", "")).strip()
+            if not obj_id:
+                continue
+            san = sanitize_cache_object_name(obj_id)
+            if san in lookup:
+                continue
+            try:
+                ra = float(row.get("ra"))
+                dec = float(row.get("dec"))
+            except (TypeError, ValueError):
+                continue
+            raw_common = row.get("name", "N/A")
+            common_name = (
+                ""
+                if raw_common is None or str(raw_common).strip() in ("", "N/A", "nan")
+                else str(raw_common).strip()
+            )
+            lookup[san] = {
+                "name": obj_id,
+                "common_name": common_name,
+                "ra": round(ra, 5),
+                "dec": round(dec, 5),
+                "type": str(row.get("type", "") or ""),
+            }
+
+    _SAN_CATALOG_LOOKUP = lookup
+    return lookup
+
+
+def list_cached_sky_images(
+    cache_dir: str = CACHE_DIR,
+    settings: Optional[dict] = None,
+    active_setup_hash: Optional[str] = None,
+    fallback_fov: float = 1.0,
+) -> List[dict]:
+    """Scan cache_dir and return all cached sky survey images with celestial RA/Dec/FOV."""
+    if not os.path.isdir(cache_dir):
+        return []
+
+    catalog_lookup = _get_sanitized_catalog_lookup()
+
+    # Build lookup for custom_framed entries saved in client_settings.object_settings
+    url_meta_lookup: Dict[str, dict] = {}
+    if isinstance(settings, dict):
+        obj_settings = (
+            (settings.get("client_settings") or {}).get("object_settings") or {}
+        )
+        if isinstance(obj_settings, dict):
+            for obj_name, cfg in obj_settings.items():
+                if not isinstance(cfg, dict):
+                    continue
+                raw_url = str(cfg.get("image_url") or "").split("?")[0]
+                if raw_url.startswith("/cache/"):
+                    url_meta_lookup[raw_url] = {
+                        "name": str(obj_name),
+                        "ra": cfg.get("center_ra"),
+                        "dec": cfg.get("center_dec"),
+                        "fov": cfg.get("fov"),
+                    }
+
+    dedup: Dict[Tuple[str, float], dict] = {}
+
+    for entry in sorted(os.listdir(cache_dir)):
+        try:
+            setup_dir = resolve_safe_cache_path(cache_dir, entry)
+        except ValueError:
+            continue
+        if not os.path.isdir(setup_dir):
+            continue
+
+        setup_fov, setup_res = parse_setup_hash_fov(entry)
+        sidecar_meta: Optional[dict] = None
+        if setup_fov is None and entry.startswith("custom_"):
+            try:
+                meta_path = resolve_safe_cache_path(cache_dir, entry, "meta.json")
+                if os.path.isfile(meta_path):
+                    with open(meta_path, "r", encoding="utf-8") as mf:
+                        sidecar_meta = json.load(mf)
+            except Exception:
+                sidecar_meta = None
+
+        suffix = f"_{entry}.jpg"
+        for fname in os.listdir(setup_dir):
+            if not _is_cached_image_file(fname):
+                continue
+            try:
+                fpath = resolve_safe_cache_path(cache_dir, entry, fname)
+            except ValueError:
+                continue
+            if not os.path.isfile(fpath):
+                continue
+
+            url = f"/cache/{entry}/{fname}"
+            if fname.endswith(suffix):
+                san_prefix = fname[: -len(suffix)]
+            else:
+                san_prefix = os.path.splitext(fname)[0]
+
+            ra: Optional[float] = None
+            dec: Optional[float] = None
+            fov: Optional[float] = setup_fov
+            res_px: int = setup_res
+            obj_name = san_prefix.replace("_", " ")
+            common_name = ""
+            obj_type = ""
+            is_custom = False
+
+            cat_entry = catalog_lookup.get(san_prefix)
+            if cat_entry is not None:
+                obj_name = cat_entry["name"]
+                common_name = cat_entry["common_name"]
+                obj_type = cat_entry["type"]
+                ra = cat_entry["ra"]
+                dec = cat_entry["dec"]
+            else:
+                is_custom = True
+                if sidecar_meta:
+                    try:
+                        ra = float(sidecar_meta["ra"])
+                        dec = float(sidecar_meta["dec"])
+                        fov = float(sidecar_meta["fov"])
+                        res_px = int(sidecar_meta.get("resolution", 1024))
+                    except (KeyError, TypeError, ValueError):
+                        pass
+
+                saved_cfg = url_meta_lookup.get(url)
+                if saved_cfg:
+                    if saved_cfg.get("name"):
+                        obj_name = saved_cfg["name"]
+                        cat_by_saved = catalog_lookup.get(
+                            sanitize_cache_object_name(obj_name)
+                        )
+                        if cat_by_saved:
+                            common_name = cat_by_saved["common_name"]
+                            obj_type = cat_by_saved["type"]
+                    if ra is None and saved_cfg.get("ra") is not None:
+                        try:
+                            ra = float(saved_cfg["ra"])
+                            dec = float(saved_cfg["dec"])
+                        except (TypeError, ValueError):
+                            pass
+                    if fov is None and saved_cfg.get("fov") is not None:
+                        try:
+                            fov = max(float(saved_cfg["fov"]), 0.25)
+                        except (TypeError, ValueError):
+                            pass
+
+                if ra is None or dec is None:
+                    m_rd = _RADEC_PREFIX_RE.match(san_prefix)
+                    if m_rd:
+                        try:
+                            ra = float(m_rd.group(1))
+                            dec = float(m_rd.group(2))
+                            obj_name = f"RA {ra:.2f}° Dec {dec:+.2f}°"
+                        except ValueError:
+                            pass
+
+                if fov is None:
+                    fov = max(float(fallback_fov or 1.0), 0.25)
+
+            if ra is None or dec is None or fov is None or fov <= 0:
+                continue
+
+            is_active = bool(active_setup_hash and entry == active_setup_hash)
+            item = {
+                "name": obj_name,
+                "common_name": common_name,
+                "type": obj_type,
+                "ra": round(float(ra), 5),
+                "dec": round(float(dec), 5),
+                "fov": round(float(fov), 4),
+                "url": url,
+                "setup_hash": entry,
+                "resolution": res_px,
+                "is_active_setup": is_active,
+                "is_custom": is_custom,
+            }
+
+            key = (f"{item['ra']:.3f}_{item['dec']:.3f}", round(item["fov"], 2))
+            existing = dedup.get(key)
+            if existing is None or (
+                (item["is_active_setup"], item["resolution"])
+                > (existing["is_active_setup"], existing["resolution"])
+            ):
+                dedup[key] = item
+
+    # Sort widest FOV first so narrower, higher-detail cutouts render cleanly on top
+    return sorted(
+        dedup.values(),
+        key=lambda x: (-x["fov"], x["is_active_setup"], x["name"]),
+    )
+
