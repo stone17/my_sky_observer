@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import traceback
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import astropy.units as u
 import numpy as np
@@ -407,6 +407,96 @@ def apply_stream_query_overrides(
     return settings
 
 
+def _resolve_single_object_sync(
+    obj_id: str,
+    settings: dict,
+    location: Location,
+    catalog_manager: CatalogManager = catalogs,
+) -> Optional[Tuple[dict, Time, Time, Dict[str, List[str]]]]:
+    """Fast single-object catalog lookup + session/twilight preparation without sorting all 14k rows."""
+    raw_objects = catalog_manager.get_all_objects(
+        settings.get("catalogs") or CatalogManager.get_available_catalogs()
+    )
+    if raw_objects.empty:
+        return None
+
+    norm_req = CatalogManager.normalize_designation(obj_id)
+    compact_req = norm_req.replace(" ", "")
+    matched_row = None
+
+    # 1. Exact ID match first (O(N) C-level Series comparison, <0.5ms)
+    exact_mask = raw_objects["id"] == obj_id
+    if exact_mask.any():
+        matched_row = raw_objects[exact_mask].iloc[0]
+    elif norm_req:
+        # 2. Normalized designation or space-insensitive alias match
+        for _, row in raw_objects.iterrows():
+            rid = str(row.get("id", ""))
+            norm_rid = CatalogManager.normalize_designation(rid)
+            if norm_rid == norm_req or norm_rid.replace(" ", "") == compact_req:
+                matched_row = row
+                break
+            aliases_raw = str(row.get("aliases", "") or "")
+            if aliases_raw:
+                for a in aliases_raw.split(","):
+                    if not a.strip():
+                        continue
+                    norm_a = CatalogManager.normalize_designation(a)
+                    if norm_a == norm_req or norm_a.replace(" ", "") == compact_req:
+                        matched_row = row
+                        break
+                if matched_row is not None:
+                    break
+
+    if matched_row is None:
+        return None
+
+    clean_series = matched_row.replace([np.nan, np.inf, -np.inf], None)
+    obj = clean_series.to_dict()
+
+    ra_val = float(obj.get("ra") or 0.0)
+    dec_val = float(obj.get("dec") or 0.0)
+    obj["ra"] = ra_val
+    obj["dec"] = dec_val
+
+    max_alt_arr = calculator.batch_get_max_altitude(
+        np.array([dec_val], dtype=float), location.latitude
+    )
+    obj["max_altitude"] = float(max_alt_arr[0]) if len(max_alt_arr) > 0 else 0.0
+
+    raw_mag = obj.get("mag")
+    try:
+        mag_val = round(float(raw_mag), 2) if raw_mag is not None else 99
+    except (TypeError, ValueError):
+        mag_val = 99
+    obj["magnitude"] = mag_val
+
+    raw_maj = obj.get("maj_ax") or 0
+    try:
+        maj_val = round(float(raw_maj), 2)
+    except (TypeError, ValueError):
+        maj_val = 0
+    size_str = f"{maj_val}'"
+    raw_min = obj.get("min_ax") or 0
+    try:
+        min_val = round(float(raw_min), 2)
+    except (TypeError, ValueError):
+        min_val = 0
+    if min_val > 0:
+        size_str += f" x {min_val}'"
+    obj["maj_ax"] = maj_val
+    obj["size_formatted"] = size_str
+
+    observer = Observer(
+        location=EarthLocation(
+            lat=location.latitude * u.deg, lon=location.longitude * u.deg
+        )
+    )
+    session_start, session_end = calculator.get_observing_session(observer, Time.now())
+    twilight = calculator.get_twilight_periods(location, session_start)
+    return obj, session_start, session_end, twilight
+
+
 async def build_single_object_details(
     obj_id: str,
     settings: dict,
@@ -419,40 +509,18 @@ async def build_single_object_details(
         **settings.get("camera", {"sensor_width": 23.5, "sensor_height": 15.6})
     )
 
-    all_objects = get_sorted_objects(
-        settings, location, telescope, camera, catalog_manager=catalog_manager
+    resolved = await asyncio.to_thread(
+        _resolve_single_object_sync, obj_id, settings, location, catalog_manager
     )
-    norm_req = CatalogManager.normalize_designation(obj_id)
-    obj = next(
-        (
-            o
-            for o in all_objects
-            if o["id"] == obj_id
-            or CatalogManager.normalize_designation(o["id"]) == norm_req
-            or any(
-                CatalogManager.normalize_designation(a) == norm_req
-                for a in str(o.get("aliases", "")).split(",")
-                if a.strip()
-            )
-        ),
-        None,
-    )
-    if not obj:
+    if not resolved:
         raise HTTPException(status_code=404, detail="Object not found")
 
+    obj, session_start, session_end, twilight = resolved
     fov_info = compute_fov_and_setup(telescope, camera, settings)
-
-    observer = Observer(
-        location=EarthLocation(
-            lat=location.latitude * u.deg, lon=location.longitude * u.deg
-        )
-    )
-    session_start, session_end = calculator.get_observing_session(observer, Time.now())
-    twilight = calculator.get_twilight_periods(location, session_start)
     tw_cfg = _extract_time_window_settings(settings)
     min_hours_alt = _extract_min_hours_altitude(settings)
 
-    return await compute_object_detail_payload(
+    detail = await compute_object_detail_payload(
         obj=obj,
         location=location,
         session_start=session_start,
@@ -466,6 +534,18 @@ async def build_single_object_details(
         time_window_end=tw_cfg["end"],
         tz_offset_minutes=tw_cfg["tz_offset"],
     )
+    detail.setdefault("common_name", obj.get("name") or "N/A")
+    detail.setdefault("type", obj.get("type") or "")
+    detail.setdefault("constellation", obj.get("constellation") or "")
+    detail.setdefault("other_id", obj.get("other_id") or "")
+    detail.setdefault("ra", obj["ra"])
+    detail.setdefault("dec", obj["dec"])
+    detail.setdefault("mag", obj.get("magnitude", 99))
+    detail.setdefault("size", obj.get("size_formatted", "0'"))
+    detail.setdefault("maj_ax", obj.get("maj_ax", 0))
+    detail.setdefault("max_altitude", round(float(obj.get("max_altitude") or 0.0), 1))
+    detail["hours_visible"] = detail.get("hours_above_min", 0.0)
+    return detail
 
 
 def _filter_objects_by_settings(all_objects: List[dict], settings: dict):

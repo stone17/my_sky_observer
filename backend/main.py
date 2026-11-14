@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+from typing import Optional
 
 import astropy.units as u
 import httpx
@@ -336,10 +337,26 @@ async def stop_background_downloads():
     return JSONResponse(content={"status": "stopped", **status})
 
 
-@app.get("/api/object-details/{obj_id}")
-async def get_object_details(obj_id: str):
+@app.get("/api/object-details/{obj_id:path}")
+async def get_object_details(
+    obj_id: str,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    tz_offset: Optional[float] = None,
+    min_hours_altitude: Optional[float] = None,
+):
     settings = load_settings()
     settings.pop("catalogs", None)
+    if latitude is not None and longitude is not None:
+        settings["location"] = {"latitude": latitude, "longitude": longitude}
+    if tz_offset is not None:
+        settings["tz_offset"] = tz_offset
+        settings.setdefault("client_settings", {})["tz_offset"] = tz_offset
+    if min_hours_altitude is not None:
+        settings["min_hours_altitude"] = min_hours_altitude
+        settings.setdefault("client_settings", {})["min_hours_altitude"] = (
+            min_hours_altitude
+        )
     return await build_single_object_details(
         obj_id, settings, catalog_manager=catalogs
     )

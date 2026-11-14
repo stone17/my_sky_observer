@@ -1823,6 +1823,13 @@ const allSkyPhotos = computed(() => {
 let preparedDsos = [];
 let objectByNameMap = new Map();
 
+const normCatalogKey = (s) => (s ? String(s).toLowerCase().replace(/\s+/g, '') : '');
+
+const lookupCatalogObject = (name) => {
+    if (!name) return null;
+    return objectByNameMap.get(name) || objectByNameMap.get(normCatalogKey(name)) || null;
+};
+
 const rebuildDsoIndex = () => {
     const objs = props.objects;
     const byName = new Map();
@@ -1838,6 +1845,19 @@ const rebuildDsoIndex = () => {
             const obj = objs[i];
             if (!obj || !obj.name) continue;
             byName.set(obj.name, obj);
+            const normName = normCatalogKey(obj.name);
+            if (normName && !byName.has(normName)) {
+                byName.set(normName, obj);
+            }
+            if (obj.aliases) {
+                const parts = String(obj.aliases).split(',');
+                for (let p = 0; p < parts.length; p++) {
+                    const nk = normCatalogKey(parts[p]);
+                    if (nk && !byName.has(nk)) {
+                        byName.set(nk, obj);
+                    }
+                }
+            }
 
             const ra = parseFloat(obj.ra);
             const dec = parseFloat(obj.dec);
@@ -2257,7 +2277,7 @@ const drawSkyCanvas = () => {
                     x: px,
                     y: py,
                     hitR: Math.max(sizePx * 0.5, 9),
-                    refObj: objectByNameMap.get(photo.name) || null,
+                    refObj: lookupCatalogObject(photo.name),
                     isCustom: photo.isCustom
                 });
             }
@@ -2841,7 +2861,19 @@ const handleItemClick = async (item, closeMapAfterSelect = false) => {
     }
     if (!item.isCustom && item.name) {
         try {
-            const res = await fetch(`/api/object-details/${encodeURIComponent(item.name)}`);
+            const qp = new URLSearchParams();
+            const loc = props.settings?.location;
+            if (loc && loc.latitude !== undefined && loc.longitude !== undefined) {
+                qp.set('latitude', String(loc.latitude));
+                qp.set('longitude', String(loc.longitude));
+            }
+            qp.set('tz_offset', String(new Date().getTimezoneOffset()));
+            const minHrsAlt = props.clientSettings?.min_hours_altitude ?? props.settings?.min_altitude;
+            if (minHrsAlt !== undefined && minHrsAlt !== null) {
+                qp.set('min_hours_altitude', String(minHrsAlt));
+            }
+            const qs = qp.toString();
+            const res = await fetch(`/api/object-details/${encodeURIComponent(item.name)}${qs ? `?${qs}` : ''}`);
             if (res.ok) {
                 const details = await res.json();
                 if (details?.name) {

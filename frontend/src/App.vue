@@ -41,6 +41,8 @@ const clientSettings = ref({
 });
 const objects = ref([]);
 const selectedObject = ref(null);
+const pinnedTopObjectId = ref('');
+const pinnedTopSeq = ref(0);
 const streamStatus = ref('Idle');
 const nightTimes = ref({});
 const isDownloading = ref(false);
@@ -233,10 +235,131 @@ watch(equipmentSignature, (newSig, oldSig) => {
     }
 });
 
+// --- ON-DEMAND OBJECT DETAILS (Altitude / Moon / Sun Graphs) ---
+const pendingDetailRequests = new Set();
+
+const mergeObjectDetailsPayload = (d, insertIfMissing = false) => {
+    if (!d || !d.name) return null;
+    let o = objectMap.get(d.name) || objects.value.find(obj => obj.name === d.name);
+
+    if (!o && insertIfMissing) {
+        applySavedStateToObject(d);
+        objects.value.push(d);
+        o = objects.value[objects.value.length - 1];
+        objectMap.set(o.name, o);
+    }
+
+    if (o) {
+        const targetFov = isManualFov.value ? activeFov.value : systemFov.value;
+        const keepCurrentImage =
+            o.status === 'downloading' ||
+            (o.image_url && o.custom_framed) ||
+            (o.image_url && isManualFov.value && Math.abs((o.image_fov || 0) - targetFov) < 0.01) ||
+            (o.image_url && !d.image_url && Math.abs((o.image_fov || 0) - (d.image_fov || 0)) < 0.01);
+
+        const savedUrl = o.image_url;
+        const savedFov = o.image_fov;
+        const savedStatus = o.status;
+        const savedCenterRa = o.center_ra;
+        const savedCenterDec = o.center_dec;
+        const savedCustomFramed = o.custom_framed;
+
+        Object.assign(o, d);
+        applySavedStateToObject(o);
+
+        if (keepCurrentImage) {
+            o.image_url = savedUrl;
+            o.image_fov = savedFov;
+            o.status = savedStatus;
+            if (savedCenterRa !== undefined) o.center_ra = savedCenterRa;
+            if (savedCenterDec !== undefined) o.center_dec = savedCenterDec;
+            if (savedCustomFramed !== undefined) o.custom_framed = savedCustomFramed;
+        }
+    }
+
+    if (selectedObject.value && selectedObject.value.name === d.name) {
+        if (o && selectedObject.value !== o) {
+            Object.assign(selectedObject.value, o);
+            selectedObject.value = o;
+        } else if (!o) {
+            Object.assign(selectedObject.value, d);
+        }
+    }
+    return o || selectedObject.value;
+};
+
+const ensureObjectDetails = async (targetObj) => {
+    const objName = targetObj?.name;
+    if (!objName) return;
+    if (Array.isArray(targetObj.altitude_graph) && targetObj.altitude_graph.length > 0) return;
+
+    const canonical = objectMap.get(objName);
+    if (canonical && Array.isArray(canonical.altitude_graph) && canonical.altitude_graph.length > 0) {
+        if (targetObj !== canonical) {
+            Object.assign(targetObj, canonical);
+        }
+        return;
+    }
+
+    if (pendingDetailRequests.has(objName)) return;
+    pendingDetailRequests.add(objName);
+
+    try {
+        const qp = new URLSearchParams();
+        const loc = settings.value?.location;
+        if (loc && loc.latitude !== undefined && loc.longitude !== undefined) {
+            qp.set('latitude', String(loc.latitude));
+            qp.set('longitude', String(loc.longitude));
+        }
+        qp.set('tz_offset', String(new Date().getTimezoneOffset()));
+        const minHrsAlt = clientSettings.value?.min_hours_altitude ?? settings.value?.min_altitude;
+        if (minHrsAlt !== undefined && minHrsAlt !== null) {
+            qp.set('min_hours_altitude', String(minHrsAlt));
+        }
+        const qs = qp.toString();
+        const url = `/api/object-details/${encodeURIComponent(objName)}${qs ? `?${qs}` : ''}`;
+        const res = await fetch(url);
+        if (res.ok) {
+            const details = await res.json();
+            mergeObjectDetailsPayload(details, true);
+        }
+    } catch (err) {
+        console.error('Failed to fetch object details on demand:', err);
+    } finally {
+        pendingDetailRequests.delete(objName);
+    }
+};
+
+const handleExternalSelectObject = (incomingObj) => {
+    if (!incomingObj || !incomingObj.name) return;
+    let canonical = objectMap.get(incomingObj.name) || objects.value.find(o => o.name === incomingObj.name);
+    if (!canonical) {
+        canonical = mergeObjectDetailsPayload(incomingObj, true) || incomingObj;
+    } else if (incomingObj !== canonical && Array.isArray(incomingObj.altitude_graph) && incomingObj.altitude_graph.length > 0 && !canonical.altitude_graph) {
+        Object.assign(canonical, incomingObj);
+    }
+    pinnedTopObjectId.value = canonical.name;
+    pinnedTopSeq.value += 1;
+    selectedObject.value = canonical;
+    ensureObjectDetails(canonical);
+};
+
+const handleListSelectObject = (item) => {
+    if (!item) return;
+    if (pinnedTopObjectId.value && item.name !== pinnedTopObjectId.value) {
+        pinnedTopObjectId.value = '';
+    }
+    const canonical = objectMap.get(item.name) || item;
+    selectedObject.value = canonical;
+    ensureObjectDetails(canonical);
+};
+
 // Watcher 2: Object Selection
 watch(selectedObject, (newVal, oldVal) => {
     if (!newVal) return;
     const isSameObject = newVal?.name === oldVal?.name;
+
+    ensureObjectDetails(newVal);
 
     if (clientSettings.value.selected_object !== newVal.name) {
         clientSettings.value.selected_object = newVal.name;
@@ -418,6 +541,9 @@ const handleObjectSettingsUpdate = ({ name, patch }) => {
 
 const handleSearchUpdate = (val) => {
     const clean = val ?? '';
+    if (clean && pinnedTopObjectId.value) {
+        pinnedTopObjectId.value = '';
+    }
     searchQuery.value = clean;
     if (clientSettings.value.search_query !== clean) {
         clientSettings.value.search_query = clean;
@@ -845,7 +971,6 @@ const startStream = (mode = 'selected') => {
             lastStreamLocationKey = locKey;
             lastStreamEquipmentSig = equipSig;
 
-            const nextMap = new Map();
             const streamTargetFov = systemFov.value;
 
             for (const item of newObjects) {
@@ -882,21 +1007,25 @@ const startStream = (mode = 'selected') => {
                         item.custom_framed = prevObj.custom_framed;
                     }
                 }
-                nextMap.set(item.name, item);
             }
 
-            objectMap = nextMap;
             objects.value = newObjects;
+            const reactiveMap = new Map();
+            for (const reactiveItem of objects.value) {
+                reactiveMap.set(reactiveItem.name, reactiveItem);
+            }
+            objectMap = reactiveMap;
 
             if (currentId) {
                 const found = objectMap.get(currentId);
                 if (found) {
-                    if (prevSelected && prevSelected.altitude_graph && !found.altitude_graph) {
+                    if (sameLocation && prevSelected && prevSelected.altitude_graph && !found.altitude_graph) {
                         found.altitude_graph = prevSelected.altitude_graph;
                         found.moon_graph = prevSelected.moon_graph;
                         found.sun_graph = prevSelected.sun_graph;
                     }
                     selectedObject.value = found;
+                    ensureObjectDetails(found);
                 } else if (prevSelected) {
                     selectedObject.value = null;
                 }
@@ -910,38 +1039,7 @@ const startStream = (mode = 'selected') => {
     eventSource.addEventListener('object_details', (e) => {
         try {
             const d = JSON.parse(e.data);
-            const o = objectMap.get(d.name) || objects.value.find(obj => obj.name === d.name);
-            if (o) {
-                const targetFov = isManualFov.value ? activeFov.value : systemFov.value;
-                const keepCurrentImage =
-                    o.status === 'downloading' ||
-                    (o.image_url && o.custom_framed) ||
-                    (o.image_url && isManualFov.value && Math.abs((o.image_fov || 0) - targetFov) < 0.01) ||
-                    (o.image_url && !d.image_url && Math.abs((o.image_fov || 0) - (d.image_fov || 0)) < 0.01);
-
-                const savedUrl = o.image_url;
-                const savedFov = o.image_fov;
-                const savedStatus = o.status;
-                const savedCenterRa = o.center_ra;
-                const savedCenterDec = o.center_dec;
-                const savedCustomFramed = o.custom_framed;
-
-                Object.assign(o, d);
-                applySavedStateToObject(o);
-
-                if (keepCurrentImage) {
-                    o.image_url = savedUrl;
-                    o.image_fov = savedFov;
-                    o.status = savedStatus;
-                    if (savedCenterRa !== undefined) o.center_ra = savedCenterRa;
-                    if (savedCenterDec !== undefined) o.center_dec = savedCenterDec;
-                    if (savedCustomFramed !== undefined) o.custom_framed = savedCustomFramed;
-                }
-
-                if (selectedObject.value && selectedObject.value.name === o.name && selectedObject.value !== o) {
-                    Object.assign(selectedObject.value, o);
-                }
-            }
+            mergeObjectDetailsPayload(d, false);
         } catch (err) { }
     });
 
@@ -1222,7 +1320,7 @@ watch(clientSettings, () => {
                         :activeFov="activeFov"
                         @update-fov="handleFovUpdate"
                         @update-search="handleSearchUpdate"
-                        @select-object="selectedObject = $event"
+                        @select-object="handleExternalSelectObject"
                         @update-settings="saveSettings"
                         @update-client-settings="updateClientSettings"
                         @update-object-settings="handleObjectSettingsUpdate"
@@ -1274,13 +1372,15 @@ watch(clientSettings, () => {
                     <ObjectList
                         :objects="objects"
                         :selectedId="selectedObject?.name"
+                        :pinnedId="pinnedTopObjectId"
+                        :pinnedSeq="pinnedTopSeq"
                         :settings="settings"
                         :searchQuery="searchQuery"
                         :clientSettings="clientSettings"
                         :nightTimes="nightTimes"
                         :isDownloading="isDownloading"
                         :downloadProgress="downloadProgress"
-                        @select="selectedObject = $event"
+                        @select="handleListSelectObject"
                         @update-search="handleSearchUpdate"
                         @update-settings="saveSettings"
                         @update-client-settings="updateClientSettings"

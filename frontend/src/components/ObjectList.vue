@@ -14,6 +14,8 @@ import {
 const props = defineProps([
     'objects',
     'selectedId',
+    'pinnedId',
+    'pinnedSeq',
     'settings',
     'clientSettings',
     'nightTimes',
@@ -34,6 +36,7 @@ const emit = defineEmits([
 const showInfoModal = ref(false);
 const infoObject = ref(null);
 const showSuggestions = ref(false);
+const scrollableListRef = ref(null);
 
 const localSettings = ref({});
 const localClientSettings = ref({});
@@ -113,8 +116,26 @@ const toggleFavoritesFilter = () => {
     emit('update-client-settings', updated);
 };
 
+const scrollListToTop = () => {
+    nextTick(() => {
+        if (scrollableListRef.value) {
+            scrollableListRef.value.scrollTop = 0;
+        }
+    });
+};
+
+watch(() => props.pinnedSeq, () => {
+    if (props.pinnedId) {
+        scrollListToTop();
+    }
+});
+
 watch(() => props.selectedId, (newId) => {
     if (newId) {
+        if (props.pinnedId && newId === props.pinnedId) {
+            scrollListToTop();
+            return;
+        }
         const idx = filteredAndSortedObjects.value.findIndex(o => o.name === newId);
         if (idx >= renderedLimit.value) {
             renderedLimit.value = idx + 20;
@@ -199,11 +220,13 @@ const filteredAndSortedObjects = computed(() => {
 
     const onlyFavs = Boolean(localClientSettings.value.filter_favorites_only);
     const favSet = favoritesSet.value;
+    const pinnedName = props.pinnedId || '';
 
     let result = [];
 
     for (const o of props.objects) {
-        if (onlyFavs && !favSet.has(o.name)) continue;
+        const isPinned = Boolean(pinnedName && o.name === pinnedName);
+        if (!isPinned && onlyFavs && !favSet.has(o.name)) continue;
 
         if (o._normId === undefined) o._normId = (o.name || '').toLowerCase().replace(/\s+/g, '');
         if (o._normCommon === undefined) o._normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
@@ -232,8 +255,8 @@ const filteredAndSortedObjects = computed(() => {
             effectiveHrs = Math.round(validCount * stepHours * 10) / 10;
         }
 
-        // If it's not a search match, apply normal filters.
-        if (!isMatch) {
+        // If it's not a search match or Sky-Map-pinned target, apply normal filters.
+        if (!isMatch && !isPinned) {
             if (activeHrs) {
                 const isNaHrs = effectiveHrs === undefined || effectiveHrs === null;
                 if (isNaHrs) {
@@ -277,10 +300,14 @@ const filteredAndSortedObjects = computed(() => {
 
         o._dynamicHours = effectiveHrs || 0;
         o._isSearchMatch = isMatch;
+        o._isPinned = isPinned;
         result.push(o);
     }
 
     result.sort((a, b) => {
+        if (a._isPinned && !b._isPinned) return -1;
+        if (!a._isPinned && b._isPinned) return 1;
+
         if (normQ) {
             if (a._isSearchMatch && !b._isSearchMatch) return -1;
             if (!a._isSearchMatch && b._isSearchMatch) return 1;
@@ -373,21 +400,9 @@ const onScroll = (e) => {
     }
 };
 
-const handleObjectClick = async (item) => {
-    emit('select', item);
+const handleObjectClick = (item) => {
     if (!item) return;
-
-    if (!item.altitude_graph) {
-        try {
-            const res = await fetch(`/api/object-details/${encodeURIComponent(item.name)}`);
-            if (res.ok) {
-                const details = await res.json();
-                Object.assign(item, details);
-            }
-        } catch (e) {
-            console.error("Failed to fetch object details on demand:", e);
-        }
-    }
+    emit('select', item);
 };
 
 const miniThresholdY = computed(() => {
@@ -546,7 +561,7 @@ onUnmounted(() => {
             </div>
 
             <!-- Scrollable Target Cards -->
-            <div class="scrollable-list" @scroll="onScroll">
+            <div ref="scrollableListRef" class="scrollable-list" @scroll="onScroll">
                 <div
                     v-for="item in displayedObjects"
                     :key="item.name"
