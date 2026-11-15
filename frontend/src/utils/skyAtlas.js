@@ -8,28 +8,32 @@ export const skyAtlasReady = ref(false);
 export const skyAtlasSectorMode = ref(false);
 export const skyAtlasMeta = shallowRef({
     available: false,
-    version: 2,
+    version: 3,
     mode: 'sectors',
     count: 0,
     sheets: 0,
-    tileSize: 240,
+    tileSize: 256,
     generatedAt: ''
 });
 export const skyAtlasItems = shallowRef([]);
+export const skyAtlasTargets = shallowRef([]);
 export const skyAtlasLod0Sectors = shallowRef([]);
 export const skyAtlasLod1Sectors = shallowRef([]);
+export const skyAtlasLod2Sectors = shallowRef([]);
 
 let loadPromise = null;
 let sheetMetaByIndex = new Map();
 let sheetImageCache = new Map();
 let itemByNormName = new Map();
 let decBuckets = new Map();
+let sheetTouchClock = 0;
 
-// Bounded async WebP sheet decode queue so rapid zooming never saturates main/GPU threads
+// Bounded async WebP sheet decode queue + LRU GPU ImageBitmap cache
 const decodeQueue = [];
 const queuedSheetSet = new Set();
 let activeSheetDecodes = 0;
 const MAX_CONCURRENT_SHEET_DECODES = 2;
+const MAX_CACHED_DETAIL_SHEETS = 24;
 
 const normalizeTargetKey = (name) => {
     if (!name) return '';
@@ -82,16 +86,39 @@ export const makeTangentBasis = (raDeg, decDeg) => {
     };
 };
 
+const disposeSheetRecord = (rec) => {
+    if (rec?.isBitmap && rec.img && typeof rec.img.close === 'function') {
+        try {
+            rec.img.close();
+        } catch {
+            // Ignore already-closed ImageBitmap
+        }
+    }
+};
+
 const disposeSheetCache = (cacheMap) => {
     if (!cacheMap) return;
     for (const rec of cacheMap.values()) {
-        if (rec?.isBitmap && rec.img && typeof rec.img.close === 'function') {
-            try {
-                rec.img.close();
-            } catch {
-                // Ignore already-closed ImageBitmap
-            }
-        }
+        disposeSheetRecord(rec);
+    }
+};
+
+const evictLruDetailSheets = () => {
+    const readyDetails = [];
+    for (const [idx, rec] of sheetImageCache.entries()) {
+        if (!rec || rec.status !== 'ready') continue;
+        const meta = sheetMetaByIndex.get(idx);
+        if (!meta || meta.lod === 0) continue; // Keep LOD 0 wide-sky sheet pinned permanently
+        readyDetails.push({ idx, rec });
+    }
+    if (readyDetails.length <= MAX_CACHED_DETAIL_SHEETS) return;
+
+    readyDetails.sort((a, b) => (a.rec.lastTouch || 0) - (b.rec.lastTouch || 0));
+    const excess = readyDetails.length - MAX_CACHED_DETAIL_SHEETS;
+    for (let i = 0; i < excess; i++) {
+        const victim = readyDetails[i];
+        disposeSheetRecord(victim.rec);
+        sheetImageCache.delete(victim.idx);
     }
 };
 
@@ -101,12 +128,22 @@ const decodeSheetNow = (sheetIndex) => {
 
     const existing = sheetImageCache.get(sheetIndex);
     if (existing && (existing.status === 'ready' || existing.promise)) {
+        if (existing.status === 'ready') {
+            existing.lastTouch = ++sheetTouchClock;
+        }
         return existing.promise || Promise.resolve(existing.img);
     }
 
     const cacheRef = sheetImageCache;
-    const record = existing || { img: null, status: 'loading', isBitmap: false, promise: null };
+    const record = existing || {
+        img: null,
+        status: 'loading',
+        isBitmap: false,
+        promise: null,
+        lastTouch: ++sheetTouchClock
+    };
     record.status = 'loading';
+    record.lastTouch = ++sheetTouchClock;
     cacheRef.set(sheetIndex, record);
 
     const loadViaHtmlImage = () =>
@@ -121,6 +158,8 @@ const decodeSheetNow = (sheetIndex) => {
                 record.img = img;
                 record.isBitmap = false;
                 record.status = 'ready';
+                record.lastTouch = ++sheetTouchClock;
+                evictLruDetailSheets();
                 skyAtlasVersion.value++;
                 resolve(img);
             };
@@ -150,6 +189,8 @@ const decodeSheetNow = (sheetIndex) => {
                 record.img = bitmap;
                 record.isBitmap = true;
                 record.status = 'ready';
+                record.lastTouch = ++sheetTouchClock;
+                evictLruDetailSheets();
                 skyAtlasVersion.value++;
                 return bitmap;
             } catch {
@@ -262,6 +303,50 @@ const prepareSectorList = (rawSectors, defaultTileSize, lodLevel, validSheets) =
     return out;
 };
 
+const prepareTargetsList = (rawTargets) => {
+    const out = [];
+    if (!Array.isArray(rawTargets)) return out;
+
+    for (let i = 0; i < rawTargets.length; i++) {
+        const row = rawTargets[i];
+        if (!row) continue;
+        if (Array.isArray(row)) {
+            const name = String(row[0] || '');
+            const commonName = String(row[1] || '');
+            const ra = Number(row[2]);
+            const dec = Number(row[3]);
+            const fov = Math.max(Number(row[4]) || 1.0, 0.2);
+            if (!name || !Number.isFinite(ra) || !Number.isFinite(dec)) continue;
+            out.push({
+                name,
+                normName: normalizeTargetKey(name),
+                commonName,
+                ra,
+                dec,
+                fov,
+                isCustom: Boolean(row[5])
+            });
+        } else if (typeof row === 'object') {
+            const name = String(row.name || '');
+            const commonName = String(row.common || row.commonName || '');
+            const ra = Number(row.ra);
+            const dec = Number(row.dec);
+            const fov = Math.max(Number(row.fov) || 1.0, 0.2);
+            if (!name || !Number.isFinite(ra) || !Number.isFinite(dec)) continue;
+            out.push({
+                name,
+                normName: normalizeTargetKey(name),
+                commonName,
+                ra,
+                dec,
+                fov,
+                isCustom: Boolean(row.custom || row.isCustom)
+            });
+        }
+    }
+    return out;
+};
+
 const resetState = () => {
     const prevCache = sheetImageCache;
     decodeQueue.length = 0;
@@ -272,16 +357,18 @@ const resetState = () => {
     itemByNormName = new Map();
     decBuckets = new Map();
     skyAtlasItems.value = [];
+    skyAtlasTargets.value = [];
     skyAtlasLod0Sectors.value = [];
     skyAtlasLod1Sectors.value = [];
+    skyAtlasLod2Sectors.value = [];
     skyAtlasSectorMode.value = false;
     skyAtlasMeta.value = {
         available: false,
-        version: 2,
+        version: 3,
         mode: 'sectors',
         count: 0,
         sheets: 0,
-        tileSize: 240,
+        tileSize: 256,
         generatedAt: ''
     };
     skyAtlasReady.value = false;
@@ -318,26 +405,44 @@ const indexManifest = (data) => {
 
     const isSectorV2 = Number(data?.version) >= 2 || data?.mode === 'sectors';
     if (isSectorV2) {
-        const lod0TileSize = Number(data?.lod0?.tile_size) || 240;
-        const lod1TileSize = Number(data?.lod1?.tile_size) || 512;
-        const lod0Sectors = prepareSectorList(data?.lod0?.sectors, lod0TileSize, 0, nextSheets);
-        const lod1Sectors = prepareSectorList(data?.lod1?.sectors, lod1TileSize, 1, nextSheets);
-        const hasAny = lod0Sectors.length > 0 || lod1Sectors.length > 0;
-        const sourceCount = Number(data?.source_count) || lod1Sectors.length || lod0Sectors.length;
+        const rawLods = Array.isArray(data?.lods) ? data.lods : null;
+        const lod0Node = data?.lod0 || (rawLods ? rawLods.find((l) => Number(l?.level) === 0) : null);
+        const lod1Node = data?.lod1 || (rawLods ? rawLods.find((l) => Number(l?.level) === 1) : null);
+        const lod2Node = data?.lod2 || (rawLods ? rawLods.find((l) => Number(l?.level) === 2) : null);
+
+        const lod0TileSize = Number(lod0Node?.tile_size) || 256;
+        const lod1TileSize = Number(lod1Node?.tile_size) || 512;
+        const lod2TileSize = Number(lod2Node?.tile_size) || 512;
+        const lod0Sectors = prepareSectorList(lod0Node?.sectors, lod0TileSize, 0, nextSheets);
+        const lod1Sectors = prepareSectorList(lod1Node?.sectors, lod1TileSize, 1, nextSheets);
+        const lod2Sectors = prepareSectorList(lod2Node?.sectors, lod2TileSize, 2, nextSheets);
+        const parsedTargets = prepareTargetsList(data?.targets);
+
+        const hasAny = lod0Sectors.length > 0 || lod1Sectors.length > 0 || lod2Sectors.length > 0;
+        const sourceCount =
+            Number(data?.source_count) ||
+            parsedTargets.length ||
+            lod2Sectors.length ||
+            lod1Sectors.length ||
+            lod0Sectors.length;
 
         itemByNormName = new Map();
         decBuckets = new Map();
         skyAtlasItems.value = [];
+        skyAtlasTargets.value = parsedTargets;
         skyAtlasLod0Sectors.value = lod0Sectors;
         skyAtlasLod1Sectors.value = lod1Sectors;
+        skyAtlasLod2Sectors.value = lod2Sectors;
         skyAtlasSectorMode.value = hasAny;
         skyAtlasMeta.value = {
             available: hasAny,
-            version: 2,
+            version: Number(data?.version) || (lod2Sectors.length > 0 ? 3 : 2),
             mode: 'sectors',
             count: sourceCount,
+            targetCount: parsedTargets.length,
             lod0Count: lod0Sectors.length,
             lod1Count: lod1Sectors.length,
+            lod2Count: lod2Sectors.length,
             sheets: nextSheets.size,
             tileSize: lod0TileSize,
             generatedAt: genTag
@@ -346,7 +451,7 @@ const indexManifest = (data) => {
         skyAtlasVersion.value++;
 
         // Eagerly preload ONLY LOD 0 wide-sky sheet(s) (1 sheet = entire celestial sphere).
-        // LOD 1 detail sheets stay on disk until zoomed into their sky region.
+        // LOD 1 and LOD 2 detail sheets stream on demand when zoomed into their sky region.
         for (const [idx, meta] of nextSheets.entries()) {
             if (meta.lod === 0) {
                 enqueueSheetDecode(idx, true);
@@ -413,8 +518,10 @@ const indexManifest = (data) => {
 
     itemByNormName = nextByName;
     decBuckets = nextBuckets;
+    skyAtlasTargets.value = [];
     skyAtlasLod0Sectors.value = [];
     skyAtlasLod1Sectors.value = [];
+    skyAtlasLod2Sectors.value = [];
     skyAtlasSectorMode.value = false;
     skyAtlasItems.value = preparedItems;
     skyAtlasMeta.value = {
@@ -462,13 +569,21 @@ export const ensureSkyAtlasLoaded = (forceReload = false) => {
 
 export const isAtlasSheetReady = (sheetIndex) => {
     const existing = sheetImageCache.get(sheetIndex);
-    return Boolean(existing && existing.status === 'ready' && existing.img);
+    if (existing && existing.status === 'ready' && existing.img) {
+        existing.lastTouch = ++sheetTouchClock;
+        return true;
+    }
+    return false;
 };
 
 export const ensureAtlasSheetImage = (sheetIndex, requestLoad = true, highPriority = false) => {
     const existing = sheetImageCache.get(sheetIndex);
     if (existing) {
-        return existing.status === 'ready' ? existing.img : null;
+        if (existing.status === 'ready' && existing.img) {
+            existing.lastTouch = ++sheetTouchClock;
+            return existing.img;
+        }
+        return null;
     }
     if (requestLoad) {
         enqueueSheetDecode(sheetIndex, highPriority);
@@ -537,10 +652,33 @@ export const findSkyAtlasTile = (target) => {
     return bestTile;
 };
 
+const collectOverlappingSectors = (sectors, fx, fy, fz, frameRad, cosF, sinF, requestLoad, highPriority) => {
+    const allHits = [];
+    const readyHits = [];
+    let anyPending = false;
+
+    for (let i = 0; i < sectors.length; i++) {
+        const sec = sectors[i];
+        if (frameRad + sec.radiusRad < Math.PI) {
+            const thresh = cosF * sec.cosR - sinF * sec.sinR;
+            if (fx * sec.tx + fy * sec.ty + fz * sec.tz < thresh) continue;
+        }
+        allHits.push(sec);
+        const ready = ensureAtlasSheetImage(sec.s, requestLoad, highPriority);
+        if (ready) {
+            readyHits.push(sec);
+        } else {
+            anyPending = true;
+        }
+    }
+
+    return { allHits, readyHits, anyPending };
+};
+
 /**
  * Return all pre-baked Sky Atlas sectors (or v1 tiles) overlapping a square framing window.
- * In v2 sector mode, returns LOD 1 sectors (and progressive LOD 0 fallback sectors underneath
- * if any overlapping LOD 1 sheet is still decoding) for instant zero-latency Framing previews.
+ * In multi-LOD sector mode, cascades LOD 2 -> LOD 1 -> LOD 0 so close-up Framing previews
+ * get crisp ~155 px/deg LOD 2 imagery with instant progressive fallback while sheets decode.
  */
 export const findOverlappingAtlasTiles = (ra, dec, frameFov, primaryTarget = null) => {
     if (!skyAtlasReady.value || !Number.isFinite(ra) || !Number.isFinite(dec)) return [];
@@ -559,37 +697,41 @@ export const findOverlappingAtlasTiles = (ra, dec, frameFov, primaryTarget = nul
         const cosF = Math.cos(frameRad);
         const sinF = Math.sin(frameRad);
 
+        const lod2 = skyAtlasLod2Sectors.value;
         const lod1 = skyAtlasLod1Sectors.value;
-        const lod1Hits = [];
-        let anyLod1Pending = false;
+        const lod0 = skyAtlasLod0Sectors.value;
 
-        for (let i = 0; i < lod1.length; i++) {
-            const sec = lod1[i];
-            if (frameRad + sec.radiusRad < Math.PI) {
-                const thresh = cosF * sec.cosR - sinF * sec.sinR;
-                if (fx * sec.tx + fy * sec.ty + fz * sec.tz < thresh) continue;
+        // Close-up framing / zoom: prefer LOD 2 (~3 deg, ~155 px/deg)
+        if (fov <= 22.0 && lod2.length > 0) {
+            const l2 = collectOverlappingSectors(lod2, fx, fy, fz, frameRad, cosF, sinF, true, true);
+            if (l2.allHits.length > 0 && !l2.anyPending) {
+                return l2.readyHits;
             }
-            lod1Hits.push(sec);
-            const ready = ensureAtlasSheetImage(sec.s, true, true);
-            if (!ready) anyLod1Pending = true;
+            // While LOD 2 sheets decode, composite already-ready LOD 1 sectors (without queueing unnecessary LOD 1 decodes if LOD 2 covers it)
+            const requestLod1 = l2.allHits.length === 0;
+            const l1 = lod1.length > 0
+                ? collectOverlappingSectors(lod1, fx, fy, fz, frameRad, cosF, sinF, requestLod1, true)
+                : { allHits: [], readyHits: [], anyPending: true };
+            if (l1.allHits.length > 0 && !l1.anyPending) {
+                return l1.readyHits.concat(l2.readyHits);
+            }
+            const l0 = collectOverlappingSectors(lod0, fx, fy, fz, frameRad, cosF, sinF, true, true);
+            return l0.allHits.concat(l1.readyHits, l2.readyHits);
         }
 
-        if (lod1Hits.length === 0 || anyLod1Pending) {
-            const lod0 = skyAtlasLod0Sectors.value;
-            const lod0Hits = [];
-            for (let i = 0; i < lod0.length; i++) {
-                const sec = lod0[i];
-                if (frameRad + sec.radiusRad < Math.PI) {
-                    const thresh = cosF * sec.cosR - sinF * sec.sinR;
-                    if (fx * sec.tx + fy * sec.ty + fz * sec.tz < thresh) continue;
-                }
-                ensureAtlasSheetImage(sec.s, true, true);
-                lod0Hits.push(sec);
+        // Mid-field: prefer LOD 1 (~6 deg)
+        if (fov <= 55.0 && lod1.length > 0) {
+            const l1 = collectOverlappingSectors(lod1, fx, fy, fz, frameRad, cosF, sinF, true, true);
+            if (l1.allHits.length > 0 && !l1.anyPending) {
+                return l1.readyHits;
             }
-            return lod0Hits.concat(lod1Hits);
+            const l0 = collectOverlappingSectors(lod0, fx, fy, fz, frameRad, cosF, sinF, true, true);
+            return l0.allHits.concat(l1.readyHits);
         }
 
-        return lod1Hits;
+        // Wide-field: LOD 0
+        const l0 = collectOverlappingSectors(lod0, fx, fy, fz, frameRad, cosF, sinF, true, true);
+        return l0.allHits;
     }
 
     // Legacy v1 fallback

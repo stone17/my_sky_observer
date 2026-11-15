@@ -4,14 +4,15 @@ Build pre-composited spherical Sky Atlas sector sheets (WebP) + coordinate manif
 from downloaded sky survey images in `image_cache/`.
 
 This offline developer script reprojects and seamlessly blends overlapping target cutouts
-onto a 2-tier spherical RA/Dec tangent-plane grid:
-  - LOD 0 (~12° sectors, 240x240 px): fits the entire sky onto a single 4096x4096 WebP sheet
+onto a 3-tier spherical RA/Dec tangent-plane grid:
+  - LOD 0 (~12.85° sectors, 256x256 px): fits the entire sky onto a single 4096x4096 WebP sheet
     for instantaneous 60 FPS wide-field rendering with zero overlap.
-  - LOD 1 (~7.5° sectors, 512x512 px): spatially grouped sheets loaded on demand when zoomed in.
+  - LOD 1 (~6.0° sectors, 512x512 px): spatially grouped sheets loaded on demand at mid zoom.
+  - LOD 2 (~3.0° sectors, 512x512 px): crisp close-up sheets (~155 px/deg) loaded on demand when zoomed in.
 
 Usage:
     python scripts/build_sky_atlas.py
-    python scripts/build_sky_atlas.py --cache-dir ./image_cache --quality 80
+    python scripts/build_sky_atlas.py --cache-dir ./image_cache --quality 84
 """
 
 import argparse
@@ -31,6 +32,8 @@ from backend.sky_atlas import (
     DEFAULT_LOD0_TILE_SIZE,
     DEFAULT_LOD1_STEP_DEG,
     DEFAULT_LOD1_TILE_SIZE,
+    DEFAULT_LOD2_STEP_DEG,
+    DEFAULT_LOD2_TILE_SIZE,
     DEFAULT_SHEET_SIZE,
     DEFAULT_WEBP_QUALITY,
     build_sky_atlas,
@@ -76,6 +79,18 @@ def main() -> int:
         type=float,
         default=DEFAULT_LOD1_STEP_DEG,
         help=f"Angular step in degrees for LOD 1 sectors (default: {DEFAULT_LOD1_STEP_DEG})",
+    )
+    parser.add_argument(
+        "--lod2-tile-size",
+        type=int,
+        default=DEFAULT_LOD2_TILE_SIZE,
+        help=f"Pixel width/height per close-up LOD 2 sector (default: {DEFAULT_LOD2_TILE_SIZE})",
+    )
+    parser.add_argument(
+        "--lod2-step-deg",
+        type=float,
+        default=DEFAULT_LOD2_STEP_DEG,
+        help=f"Angular step in degrees for LOD 2 sectors (default: {DEFAULT_LOD2_STEP_DEG})",
     )
     parser.add_argument(
         "--sheet-size",
@@ -133,6 +148,8 @@ def main() -> int:
         lod0_step_deg=args.lod0_step_deg,
         lod1_tile_size=args.lod1_tile_size,
         lod1_step_deg=args.lod1_step_deg,
+        lod2_tile_size=args.lod2_tile_size,
+        lod2_step_deg=args.lod2_step_deg,
         sheet_size=args.sheet_size,
         quality=args.quality,
         include_custom=args.include_custom,
@@ -154,6 +171,8 @@ def main() -> int:
         f"({args.lod0_tile_size}x{args.lod0_tile_size} px, ~{args.lod0_step_deg:g} deg)\n"
         f"  LOD 1 mid-field    : {result['lod1_sectors']} sectors across {result['lod1_sheets']} sheet(s) "
         f"({args.lod1_tile_size}x{args.lod1_tile_size} px, ~{args.lod1_step_deg:g} deg)\n"
+        f"  LOD 2 close-up     : {result['lod2_sectors']} sectors across {result['lod2_sheets']} sheet(s) "
+        f"({args.lod2_tile_size}x{args.lod2_tile_size} px, ~{args.lod2_step_deg:g} deg)\n"
         f"  Total WebP + JSON  : {result['size_mb']} MB\n"
         f"  Written to         : {', '.join(result['written_dirs'])}"
     )

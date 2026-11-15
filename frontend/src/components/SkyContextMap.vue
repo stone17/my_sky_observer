@@ -5,6 +5,8 @@ import {
     skyAtlasSectorMode,
     skyAtlasLod0Sectors,
     skyAtlasLod1Sectors,
+    skyAtlasLod2Sectors,
+    skyAtlasTargets,
     skyAtlasItems,
     ensureSkyAtlasLoaded,
     ensureAtlasSheetImage
@@ -1839,6 +1841,12 @@ let photoIndexByName = new Map();
 let photoByNormName = new Map();
 let photoByKey = new Map();
 
+// Zero-draw individual target footprints for hover/click selection in multi-LOD sector mode
+let atlasTargetList = [];
+let atlasTargetSoA = new Float32Array(0);    // [x, y, z, halfTan] * T
+let atlasTargetPatchIds = new Uint8Array(0); // patchId (0..47) * T
+const hitPatchMask = new Uint8Array(PATCH_COUNT);
+
 let preparedDsos = [];
 let dsoSoA = new Float32Array(0);        // [x, y, z, majHalfRad] * M
 let dsoPatchIds = new Uint8Array(0);     // patchId (0..47) * M
@@ -1899,7 +1907,8 @@ const rebuildPhotoSoA = () => {
     photoSoA = soa;
     photoPatchIds = patches;
     photoIndexByName = idxMap;
-    skyPhotoCount.value = n;
+    skyPhotoCount.value =
+        skyAtlasSectorMode.value && atlasTargetList.length > 0 ? atlasTargetList.length : n;
 };
 
 const rebuildSceneIndex = () => {
@@ -1988,7 +1997,51 @@ const rebuildSceneIndex = () => {
         }
     };
 
-    if (!skyAtlasSectorMode.value) {
+    if (skyAtlasSectorMode.value) {
+        const rawTargets = skyAtlasTargets.value;
+        const tLen = rawTargets.length;
+        const tList = new Array(tLen);
+        const tSoa = new Float32Array(tLen * 4);
+        const tPatches = new Uint8Array(tLen);
+
+        for (let i = 0; i < tLen; i++) {
+            const rt = rawTargets[i];
+            if (rt.name) cachedNames.add(rt.name);
+            const a = rt.ra * DEG2RAD;
+            const d = rt.dec * DEG2RAD;
+            const cd = Math.cos(d);
+            const x = cd * Math.cos(a);
+            const y = cd * Math.sin(a);
+            const z = Math.sin(d);
+            const halfTan = Math.tan(0.5 * rt.fov * DEG2RAD);
+            const o = i * 4;
+            tSoa[o] = x;
+            tSoa[o + 1] = y;
+            tSoa[o + 2] = z;
+            tSoa[o + 3] = halfTan;
+            tPatches[i] = getSkyPatchId(rt.ra, rt.dec);
+            tList[i] = {
+                name: rt.name,
+                commonName: rt.commonName || '',
+                ra: rt.ra,
+                dec: rt.dec,
+                x,
+                y,
+                z,
+                fov: rt.fov,
+                halfTan,
+                refObj: lookupCatalogObject(rt.name),
+                isCustom: Boolean(rt.isCustom)
+            };
+        }
+        atlasTargetList = tList;
+        atlasTargetSoA = tSoa;
+        atlasTargetPatchIds = tPatches;
+    } else {
+        atlasTargetList = [];
+        atlasTargetSoA = new Float32Array(0);
+        atlasTargetPatchIds = new Uint8Array(0);
+
         const atlasList = skyAtlasItems.value;
         for (let i = 0; i < atlasList.length; i++) {
             const at = atlasList[i];
@@ -2083,6 +2136,9 @@ const rebuildSceneIndex = () => {
     photoByKey = byKey;
     photoByNormName = byNorm;
     rebuildPhotoSoA();
+    if (skyAtlasSectorMode.value && atlasTargetList.length > 0) {
+        skyPhotoCount.value = atlasTargetList.length;
+    }
 
     // Step 3: Build pre-sorted DSO table + contiguous SoA & patch IDs
     const dsoList = [];
@@ -2445,9 +2501,9 @@ const drawSkyCanvas = () => {
         ctx.restore();
     }
 
-    // 2.5 Pre-Composited Multi-LOD Spherical Sky Survey Sector Map (Zero Overdraw, Zero Seams)
+    // 2.5 Pre-Composited 3-Tier Multi-LOD Spherical Sky Survey Sector Map (Zero Overdraw, Zero Seams)
     if (showCachedPhotos.value && skyAtlasSectorMode.value) {
-        const collectAndDrawSectors = (sectors, highPriority, drawDirectly) => {
+        const collectAndDrawSectors = (sectors, allowQueue, highPriority, drawDirectly) => {
             let anyMissingSheet = false;
             const nSec = sectors.length;
             for (let i = 0; i < nSec; i++) {
@@ -2489,7 +2545,7 @@ const drawSkyCanvas = () => {
                 const maxY = Math.max(yL, yR, yT, yB);
                 if (maxX < -16 || minX > w + 16 || maxY < -16 || minY > h + 16) continue;
 
-                const sheetImg = ensureAtlasSheetImage(sec.s, true, highPriority);
+                const sheetImg = ensureAtlasSheetImage(sec.s, allowQueue, highPriority);
                 if (!sheetImg) {
                     anyMissingSheet = true;
                     continue;
@@ -2512,21 +2568,8 @@ const drawSkyCanvas = () => {
             return anyMissingSheet;
         };
 
-        ctx.globalCompositeOperation = 'source-over';
-        ctx.globalAlpha = 1.0;
-
-        const lod0 = skyAtlasLod0Sectors.value;
-        const lod1 = skyAtlasLod1Sectors.value;
-
-        if (fov > 48.0 || lod1.length === 0) {
-            collectAndDrawSectors(lod0, true, true);
-        } else {
-            visibleSectorCount = 0;
-            const missingLod1 = collectAndDrawSectors(lod1, !isPanning.value, false);
-            if (missingLod1 && lod0.length > 0) {
-                collectAndDrawSectors(lod0, true, true);
-            }
-            for (let i = 0; i < visibleSectorCount; i++) {
+        const flushSectorRange = (startIdx, endIdx) => {
+            for (let i = startIdx; i < endIdx; i++) {
                 const s = visibleSectorPool[i];
                 ctx.setTransform(
                     dpr * s.ux,
@@ -2538,6 +2581,39 @@ const drawSkyCanvas = () => {
                 );
                 ctx.drawImage(s.img, s.sec.u, s.sec.v, s.sec.w, s.sec.h, -0.5, -0.5, 1.0, 1.0);
             }
+        };
+
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 1.0;
+
+        const lod0 = skyAtlasLod0Sectors.value;
+        const lod1 = skyAtlasLod1Sectors.value;
+        const lod2 = skyAtlasLod2Sectors.value;
+
+        if (fov > 50.0 || (lod1.length === 0 && lod2.length === 0)) {
+            collectAndDrawSectors(lod0, true, true, true);
+        } else if (fov > 19.0 || lod2.length === 0) {
+            visibleSectorCount = 0;
+            const missingLod1 = collectAndDrawSectors(lod1, true, !isPanning.value, false);
+            if (missingLod1 && lod0.length > 0) {
+                collectAndDrawSectors(lod0, true, true, true);
+            }
+            flushSectorRange(0, visibleSectorCount);
+        } else {
+            visibleSectorCount = 0;
+            const missingLod2 = collectAndDrawSectors(lod2, true, !isPanning.value, false);
+            const lod2End = visibleSectorCount;
+            if (missingLod2) {
+                const lod1Start = visibleSectorCount;
+                const missingLod1 =
+                    lod1.length > 0 ? collectAndDrawSectors(lod1, false, false, false) : true;
+                const lod1End = visibleSectorCount;
+                if (missingLod1 && lod0.length > 0) {
+                    collectAndDrawSectors(lod0, true, true, true);
+                }
+                flushSectorRange(lod1Start, lod1End);
+            }
+            flushSectorRange(0, lod2End);
         }
 
         // Optional close-up HD inlay for the single selected active target when zoomed deep in (< ~7° FOV)
@@ -2685,10 +2761,61 @@ const drawSkyCanvas = () => {
         ctx.stroke();
     }
 
-    // 5. Fallback Individual Sky Photos (only used when v2 spherical Sky Atlas sector map is absent)
+    // 5. Hovered Individual Tile Frame (Sector Mode) or Fallback Individual Sky Photos
     const hovered = hoveredItem.value;
     const photoCount = skyPhotosList.length;
-    if (showCachedPhotos.value && !skyAtlasSectorMode.value && photoCount > 0) {
+    if (
+        showCachedPhotos.value &&
+        skyAtlasSectorMode.value &&
+        hovered?.kind === 'photo' &&
+        !isPanning.value
+    ) {
+        const ha = hovered.ra * DEG2RAD;
+        const hd = hovered.dec * DEG2RAD;
+        const hcd = Math.cos(hd);
+        const hx = hcd * Math.cos(ha);
+        const hy = hcd * Math.sin(ha);
+        const hz = Math.sin(hd);
+        const hCosC = hx * cam.Cx + hy * cam.Cy + hz * cam.Cz;
+        if (hCosC > 0.05) {
+            const hk = 2.0 / (1.0 + hCosC);
+            const hfk = cam.f * hk;
+            const boxSz = Math.max((hovered.fov || 1.0) * DEG2RAD * hfk, 8.0);
+            const hu = hx * cam.Ex + hy * cam.Ey;
+            const hv = hx * cam.Nx + hy * cam.Ny + hz * cam.Nz;
+            const hpx = cam.halfW - hfk * hu;
+            const hpy = cam.halfH - hfk * hv;
+
+            const hvx = -hx * hz;
+            const hvy = -hy * hz;
+            const hvz = 1.0 - hz * hz;
+            let cosA = 1.0;
+            let sinA = 0.0;
+            if (hvz > 1e-8) {
+                const vDotC = hvx * cam.Cx + hvy * cam.Cy + hvz * cam.Cz;
+                const vDotE = hvx * cam.Ex + hvy * cam.Ey;
+                const vDotN = hvx * cam.Nx + hvy * cam.Ny + hvz * cam.Nz;
+                const halfKVC = 0.5 * hk * vDotC;
+                const dxN = halfKVC * hu - vDotE;
+                const dyN = halfKVC * hv - vDotN;
+                const len = Math.hypot(dxN, dyN);
+                if (len > 1e-9) {
+                    cosA = -dyN / len;
+                    sinA = dxN / len;
+                }
+            }
+
+            const half = boxSz * 0.5;
+            ctx.setTransform(dpr * cosA, dpr * sinA, -dpr * sinA, dpr * cosA, hpx * dpr, hpy * dpr);
+            ctx.strokeStyle = 'rgba(251, 191, 36, 0.26)';
+            ctx.lineWidth = 4.0;
+            ctx.strokeRect(-half, -half, boxSz, boxSz);
+            ctx.strokeStyle = 'rgba(251, 191, 36, 0.92)';
+            ctx.lineWidth = 1.6;
+            ctx.strokeRect(-half, -half, boxSz, boxSz);
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        }
+    } else if (showCachedPhotos.value && !skyAtlasSectorMode.value && photoCount > 0) {
         const denseCatalogMode = photoCount > 120;
         const minRenderPx = denseCatalogMode ? 3.2 : 2.5;
         const minHitPx = denseCatalogMode ? 4.5 : 3.0;
@@ -3389,6 +3516,108 @@ const onWheel = (e) => {
     applyZoomFactor(factor, px, py);
 };
 
+const findAtlasTargetHit = (px, py) => {
+    const n = atlasTargetList.length;
+    if (n === 0 || !showCachedPhotos.value || !skyAtlasSectorMode.value) return null;
+
+    const skyPt = screenToSky(px, py);
+    const qa = skyPt.ra * DEG2RAD;
+    const qd = skyPt.dec * DEG2RAD;
+    const qcd = Math.cos(qd);
+    const qx = qcd * Math.cos(qa);
+    const qy = qcd * Math.sin(qa);
+    const qz = Math.sin(qd);
+
+    // Pre-cull 48 spherical sky patches around cursor unit vector Q (~94% of 13k targets skipped)
+    for (let p = 0; p < PATCH_COUNT; p++) {
+        const limitRad = patchRadius[p] + 0.08;
+        if (limitRad >= Math.PI) {
+            hitPatchMask[p] = 1;
+        } else {
+            const thresh = Math.cos(limitRad);
+            hitPatchMask[p] =
+                qx * patchCx[p] + qy * patchCy[p] + qz * patchCz[p] >= thresh ? 1 : 0;
+        }
+    }
+
+    const activeName = props.object?.name || '';
+    let bestTarget = null;
+    let bestDot = -2.0;
+
+    for (let i = 0; i < n; i++) {
+        if (!hitPatchMask[atlasTargetPatchIds[i]]) continue;
+
+        const o = i * 4;
+        const tx = atlasTargetSoA[o];
+        const ty = atlasTargetSoA[o + 1];
+        const tz = atlasTargetSoA[o + 2];
+        const dot = qx * tx + qy * ty + qz * tz;
+        if (dot <= 0.15 || dot <= bestDot) continue;
+
+        const halfTan = atlasTargetSoA[o + 3];
+        // Tight gnomonic circumcircle filter: xi^2 + eta^2 = 1/dot^2 - 1 <= 2 * halfTan^2
+        if (dot * dot * (1.0 + 2.0 * halfTan * halfTan) < 1.0) continue;
+
+        const tgt = atlasTargetList[i];
+        if (tgt.name === activeName) continue;
+
+        // Exact gnomonic tangent-plane square check |xi| <= halfTan && |eta| <= halfTan
+        const cosDecSq = 1.0 - tz * tz;
+        let ex = 0.0;
+        let ey = 1.0;
+        let nx = tz >= 0 ? -1.0 : 1.0;
+        let ny = 0.0;
+        let nz = 0.0;
+        if (cosDecSq > 1e-8) {
+            const cd = Math.sqrt(cosDecSq);
+            const invCd = 1.0 / cd;
+            ex = -ty * invCd;
+            ey = tx * invCd;
+            nx = -tz * tx * invCd;
+            ny = -tz * ty * invCd;
+            nz = cd;
+        }
+
+        const invDot = 1.0 / dot;
+        const xi = (qx * ex + qy * ey) * invDot;
+        if (xi < -halfTan || xi > halfTan) continue;
+        const eta = (qx * nx + qy * ny + qz * nz) * invDot;
+        if (eta < -halfTan || eta > halfTan) continue;
+
+        bestDot = dot;
+        bestTarget = tgt;
+    }
+
+    if (!bestTarget) return null;
+
+    const cam = makeCameraBasis(
+        viewRa.value,
+        viewDec.value,
+        viewportW.value,
+        viewportH.value,
+        mapFovDeg.value
+    );
+    const proj = projectRaDecWithBasis(bestTarget.ra, bestTarget.dec, cam);
+    if (!proj) return null;
+
+    const sizePx = bestTarget.fov * DEG2RAD * proj.f * proj.k;
+    if (sizePx < 3.5) return null;
+
+    return {
+        kind: 'photo',
+        name: bestTarget.name,
+        commonName: bestTarget.commonName,
+        fov: bestTarget.fov,
+        ra: bestTarget.ra,
+        dec: bestTarget.dec,
+        x: proj.x,
+        y: proj.y,
+        hitR: Math.max(sizePx * 0.5, 8.0),
+        refObj: bestTarget.refObj || lookupCatalogObject(bestTarget.name),
+        isCustom: bestTarget.isCustom
+    };
+};
+
 const findHitItem = (px, py) => {
     let best = null;
     let bestDistSq = Infinity;
@@ -3402,7 +3631,8 @@ const findHitItem = (px, py) => {
             bestDistSq = dSq;
         }
     }
-    return best;
+    if (best) return best;
+    return findAtlasTargetHit(px, py);
 };
 
 const flushPointerFrame = () => {
@@ -3432,7 +3662,11 @@ const flushPointerFrame = () => {
     updateStatusReadout(skyPt.ra, skyPt.dec);
 
     const hit = findHitItem(ptr.px, ptr.py);
-    if (hit?.name !== hoveredItem.value?.name || hit?.kind !== hoveredItem.value?.kind) {
+    if (
+        hit?.name !== hoveredItem.value?.name ||
+        hit?.kind !== hoveredItem.value?.kind ||
+        hit?.ra !== hoveredItem.value?.ra
+    ) {
         hoveredItem.value = hit ? { ...hit } : null;
         drawSkyCanvas();
     } else if (hit && hoveredItem.value) {
@@ -3603,7 +3837,12 @@ const onKeyDown = (e) => {
 
 // --- LIGHTWEIGHT WATCHERS & LIFECYCLE ---
 watch(
-    () => [props.objects?.length, skyAtlasItems.value.length, skyAtlasSectorMode.value],
+    () => [
+        props.objects?.length,
+        skyAtlasItems.value.length,
+        skyAtlasTargets.value.length,
+        skyAtlasSectorMode.value
+    ],
     () => {
         rebuildSceneIndex();
         scheduleDraw();
@@ -3779,7 +4018,9 @@ onUnmounted(() => {
                 @click="showCachedPhotos = !showCachedPhotos"
                 title="Toggle pre-composited sky survey map at true celestial coordinates"
             >
-                <span v-if="skyAtlasSectorMode">📷 Sky Survey</span>
+                <span v-if="skyAtlasSectorMode">
+                    📷 Sky Survey{{ skyPhotoCount > 0 ? ` (${skyPhotoCount.toLocaleString()})` : '' }}
+                </span>
                 <span v-else>📷 Photos ({{ skyPhotoCount }})</span>
             </button>
             <button

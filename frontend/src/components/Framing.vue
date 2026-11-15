@@ -139,7 +139,7 @@ const renderAtlasPreviewCanvas = () => {
     const spec = previewFrameSpec.value;
     if (!canvas || !spec || !spec.tiles.length) return;
 
-    const size = 384;
+    const size = 512;
     if (canvas.width !== size) canvas.width = size;
     if (canvas.height !== size) canvas.height = size;
 

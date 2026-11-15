@@ -21,12 +21,14 @@ ATLAS_CACHE_SUBDIR = "_sky_atlas"
 MANIFEST_FILENAME = "sky_atlas.json"
 LICENSE_NOTICE_FILENAME = "LICENSE-ASSETS.md"
 
-DEFAULT_LOD0_TILE_SIZE = 240
-DEFAULT_LOD0_STEP_DEG = 12.0
+DEFAULT_LOD0_TILE_SIZE = 256
+DEFAULT_LOD0_STEP_DEG = 12.85
 DEFAULT_LOD1_TILE_SIZE = 512
-DEFAULT_LOD1_STEP_DEG = 7.5
+DEFAULT_LOD1_STEP_DEG = 6.0
+DEFAULT_LOD2_TILE_SIZE = 512
+DEFAULT_LOD2_STEP_DEG = 3.0
 DEFAULT_SHEET_SIZE = 4096
-DEFAULT_WEBP_QUALITY = 80
+DEFAULT_WEBP_QUALITY = 84
 
 DEG2RAD = math.pi / 180.0
 RAD2DEG = 180.0 / math.pi
@@ -129,13 +131,25 @@ def _read_manifest_summary(atlas_dir: str) -> Optional[dict]:
                 return None
 
         version = int(data.get("version") or 1)
+        lod_count = 1
         if version >= 2 and data.get("mode") == "sectors":
-            lod0_sectors = (data.get("lod0") or {}).get("sectors") or []
-            lod1_sectors = (data.get("lod1") or {}).get("sectors") or []
-            if not isinstance(lod0_sectors, list) or not isinstance(lod1_sectors, list):
-                return None
+            raw_lods = data.get("lods")
+            if isinstance(raw_lods, list) and raw_lods:
+                lod_count = len(raw_lods)
+                max_sectors = max(
+                    (len(l.get("sectors") or []) for l in raw_lods if isinstance(l, dict)),
+                    default=0,
+                )
+            else:
+                lod0_sectors = (data.get("lod0") or {}).get("sectors") or []
+                lod1_sectors = (data.get("lod1") or {}).get("sectors") or []
+                lod2_sectors = (data.get("lod2") or {}).get("sectors") or []
+                if not isinstance(lod0_sectors, list) or not isinstance(lod1_sectors, list):
+                    return None
+                lod_count = 3 if (isinstance(lod2_sectors, list) and lod2_sectors) else 2
+                max_sectors = max(len(lod0_sectors), len(lod1_sectors), len(lod2_sectors) if isinstance(lod2_sectors, list) else 0)
             source_count = int(data.get("source_count") or 0)
-            count_metric = max(source_count, len(lod1_sectors))
+            count_metric = max(source_count, max_sectors)
         elif isinstance(data.get("items"), list):
             count_metric = len(data["items"])
         else:
@@ -145,6 +159,7 @@ def _read_manifest_summary(atlas_dir: str) -> Optional[dict]:
         return {
             "manifest": data,
             "version": version,
+            "lod_count": lod_count,
             "count": count_metric,
             "sheets_count": len(sheets),
             "generated_at": str(data.get("generated_at") or ""),
@@ -159,18 +174,18 @@ def resolve_active_atlas_dir(
 ) -> Tuple[Optional[str], Optional[str], Optional[dict]]:
     """
     Pick the best valid sky_atlas directory across public, dist, and runtime cache.
-    Prefers v2 pre-composited sector atlases, then higher coverage count, then newer mtime.
+    Prefers v2 pre-composited sector atlases, higher LOD tier depth, higher coverage count, then newer mtime.
     """
     best_label: Optional[str] = None
     best_dir: Optional[str] = None
     best_summary: Optional[dict] = None
-    best_rank = (-1, -1, -1.0)
+    best_rank = (-1, -1, -1, -1.0)
 
     for label, path in get_candidate_atlas_dirs(cache_dir):
         summary = _read_manifest_summary(path)
         if summary is None:
             continue
-        rank = (summary["version"], summary["count"], summary["mtime"])
+        rank = (summary["version"], summary["lod_count"], summary["count"], summary["mtime"])
         if rank > best_rank:
             best_rank = rank
             best_label = label
@@ -374,14 +389,16 @@ def _generate_sector_grid(step_deg: float, tile_px: int) -> List[dict]:
     return sectors
 
 
-def _load_cutout_array(filepath: str, fov_deg: float) -> Optional[np.ndarray]:
-    """Decode JPEG cutout using libjpeg DCT draft scaling matched to LOD 1 angular resolution."""
-    target_px = min(1024, max(256, int(math.ceil(fov_deg * 80.0))))
+def _load_cutout_array(
+    filepath: str, fov_deg: float, max_px_per_deg: float = 192.0
+) -> Optional[np.ndarray]:
+    """Decode JPEG cutout using libjpeg DCT draft scaling matched to finest LOD angular resolution."""
+    target_px = min(1024, max(256, int(math.ceil(fov_deg * max_px_per_deg))))
     try:
         with Image.open(filepath) as im:
             im.draft("RGB", (target_px, target_px))
             rgb = im.convert("RGB")
-            if rgb.width > target_px * 1.4 or rgb.height > target_px * 1.4:
+            if rgb.width > target_px * 1.18 or rgb.height > target_px * 1.18:
                 rgb = rgb.resize((target_px, target_px), Image.Resampling.BILINEAR)
             return np.asarray(rgb, dtype=np.uint8)
     except Exception:
@@ -623,7 +640,7 @@ def _pack_sectors_into_sheets(
                 else f"sky_atlas_lod0_{local_s}.webp"
             )
         else:
-            sheet_filename = f"sky_atlas_{local_s}.webp"
+            sheet_filename = f"sky_atlas_lod{lod_level}_{local_s}.webp"
 
         for i, (sec, tile_im) in enumerate(batch):
             col = i % cols
@@ -786,23 +803,30 @@ def build_sky_atlas(
     lod0_step_deg: float = DEFAULT_LOD0_STEP_DEG,
     lod1_tile_size: int = DEFAULT_LOD1_TILE_SIZE,
     lod1_step_deg: float = DEFAULT_LOD1_STEP_DEG,
+    lod2_tile_size: int = DEFAULT_LOD2_TILE_SIZE,
+    lod2_step_deg: float = DEFAULT_LOD2_STEP_DEG,
     sheet_size: int = DEFAULT_SHEET_SIZE,
     quality: int = DEFAULT_WEBP_QUALITY,
     include_custom: bool = False,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """
-    Build a 2-tier multi-resolution pre-composited celestial sector map (LOD 0 + LOD 1)
-    from all downloaded sky survey cutouts in `cache_dir`.
+    Build a 3-tier multi-resolution pre-composited celestial sector map (LOD 0 + LOD 1 + LOD 2)
+    plus a compact individual target footprint table from downloaded sky survey cutouts.
 
-    - LOD 0 (~12 deg sectors, 240x240 px): fits the entire sky onto a single 4096x4096 WebP sheet
-      for instant, overlap-free zoomed-out Sky Map rendering.
-    - LOD 1 (~7.5 deg sectors, 512x512 px): spatially grouped 4096x4096 WebP sheets for crisp
-      mid/close Sky Map zooming and instant Framing previews.
+    - LOD 0 (~12.85 deg sectors, 256x256 px): fits the entire sky onto a single 4096x4096 WebP sheet
+      for instant, overlap-free wide-sky rendering.
+    - LOD 1 (~6.0 deg sectors, 512x512 px): regional 4096x4096 WebP sheets for crisp mid-field zoom.
+    - LOD 2 (~3.0 deg sectors, 512x512 px): high-resolution regional 4096x4096 WebP sheets for sharp
+      close-up Sky Map zooming and instant Framing previews.
     """
     lod0_tile_size = max(64, min(512, int(lod0_tile_size)))
     lod1_tile_size = max(128, min(1024, int(lod1_tile_size)))
-    sheet_size = max(lod1_tile_size, int(sheet_size))
+    enable_lod2 = int(lod2_tile_size or 0) > 0 and float(lod2_step_deg or 0.0) > 0.0
+    if enable_lod2:
+        lod2_tile_size = max(128, min(1024, int(lod2_tile_size)))
+    max_tile_px = max(lod0_tile_size, lod1_tile_size, lod2_tile_size if enable_lod2 else 0)
+    sheet_size = max(max_tile_px, int(sheet_size))
     quality = max(40, min(95, int(quality)))
 
     if output_dir is None:
@@ -854,8 +878,9 @@ def build_sky_atlas(
         if prev is None or _candidate_rank(item) > _candidate_rank(prev[0]):
             best_by_key[dedup_key] = (item, filepath)
 
-    # Prepare geometric metadata for all unique cached cutouts
+    # Prepare geometric metadata for all unique cached cutouts + compact hit-test target footprints
     cutout_metas: List[dict] = []
+    manifest_targets: List[list] = []
     for k in sorted(best_by_key.keys()):
         item, fpath = best_by_key[k]
         ra = float(item["ra"]) % 360.0
@@ -879,6 +904,21 @@ def build_sky_atlas(
             }
         )
 
+        raw_name = str(item.get("name") or "").strip()
+        raw_common = str(item.get("common_name") or "").strip()
+        if raw_common in ("N/A", raw_name):
+            raw_common = ""
+        target_row: list = [
+            raw_name,
+            raw_common,
+            round(ra, 4),
+            round(dec, 4),
+            round(fov, 3),
+        ]
+        if item.get("is_custom"):
+            target_row.append(1)
+        manifest_targets.append(target_row)
+
     source_count = len(cutout_metas)
     if source_count == 0:
         return {
@@ -888,9 +928,11 @@ def build_sky_atlas(
             "count": 0,
             "lod0_sectors": 0,
             "lod1_sectors": 0,
+            "lod2_sectors": 0,
             "sheets": 0,
             "lod0_sheets": 0,
             "lod1_sheets": 0,
+            "lod2_sheets": 0,
             "size_mb": 0.0,
             "generated_at": None,
             "written_dirs": [],
@@ -904,16 +946,26 @@ def build_sky_atlas(
 
     max_workers = min(16, max(4, (os.cpu_count() or 4) * 2))
 
-    rendered_lod0: List[Tuple[dict, Image.Image]] = []
-    rendered_lod1: List[Tuple[dict, Image.Image]] = []
+    # Match source JPEG decode scale to finest active LOD angular density
+    finest_px_per_deg = max(
+        lod0_tile_size / max(lod0_step_deg, 0.5),
+        lod1_tile_size / max(lod1_step_deg, 0.5),
+        (lod2_tile_size / max(lod2_step_deg, 0.5)) if enable_lod2 else 0.0,
+    )
+    max_px_per_deg = max(80.0, finest_px_per_deg * 1.12)
+
+    rendered_by_lod: Dict[int, List[Tuple[dict, Image.Image]]] = {0: [], 1: [], 2: []}
 
     lod0_grid = _generate_sector_grid(lod0_step_deg, lod0_tile_size)
     lod1_grid = _generate_sector_grid(lod1_step_deg, lod1_tile_size)
+    lod2_grid = _generate_sector_grid(lod2_step_deg, lod2_tile_size) if enable_lod2 else []
 
     cutout_t = np.array([m["basis"][0] for m in cutout_metas], dtype=np.float64)
     cutout_cones = np.array([m["cone_rad"] for m in cutout_metas], dtype=np.float64)
 
     def _match_sectors(grid: List[dict]) -> List[Tuple[dict, List[int]]]:
+        if not grid:
+            return []
         sec_t = np.array([s["basis"][0] for s in grid], dtype=np.float64)
         sec_cones = np.array([s["cone_rad"] for s in grid], dtype=np.float64)
         dots = sec_t @ cutout_t.T  # (S, N)
@@ -930,20 +982,22 @@ def build_sky_atlas(
 
     active_lod0 = _match_sectors(lod0_grid)
     active_lod1 = _match_sectors(lod1_grid)
+    active_lod2 = _match_sectors(lod2_grid) if enable_lod2 else []
 
-    # Group both LODs into 12 Declination sweep strips (-90..+90) so each JPEG is decoded once
-    # and evicted once the sweep passes north of all sectors referencing it.
-    num_strips = 12
+    # Group all LODs into 18 Declination sweep strips (10 deg each, -90..+90) so each JPEG is
+    # decoded once and evicted immediately once the sweep passes north of all sectors referencing it.
+    num_strips = 18
+    strip_span_deg = 180.0 / num_strips
     strip_tasks: List[List[Tuple[int, dict, List[int]]]] = [
         [] for _ in range(num_strips)
     ]
     last_strip_for_cutout = np.full(source_count, -1, dtype=np.int32)
 
-    for lod_lvl, active_list in ((0, active_lod0), (1, active_lod1)):
+    for lod_lvl, active_list in ((0, active_lod0), (1, active_lod1), (2, active_lod2)):
         for sec, c_ids in active_list:
             s_bin = min(
                 num_strips - 1,
-                max(0, int((sec["dec0"] + 90.0) / (180.0 / num_strips))),
+                max(0, int((sec["dec0"] + 90.0) / strip_span_deg)),
             )
             strip_tasks[s_bin].append((lod_lvl, sec, c_ids))
             for cid in c_ids:
@@ -958,8 +1012,8 @@ def build_sky_atlas(
             if not tasks:
                 continue
 
-            dec_lo = -90 + s_bin * 15
-            dec_hi = dec_lo + 15
+            dec_lo = -90.0 + s_bin * strip_span_deg
+            dec_hi = dec_lo + strip_span_deg
             needed_new = sorted(
                 {
                     cid
@@ -970,7 +1024,7 @@ def build_sky_atlas(
             )
             if progress_callback:
                 progress_callback(
-                    f"  [Strip {s_bin + 1:2d}/{num_strips} | Dec {dec_lo:+3d}°..{dec_hi:+3d}°] "
+                    f"  [Strip {s_bin + 1:2d}/{num_strips} | Dec {dec_lo:+5.1f}°..{dec_hi:+5.1f}°] "
                     f"decoding {len(needed_new)} cutouts, compositing {len(tasks)} sectors..."
                 )
 
@@ -978,7 +1032,9 @@ def build_sky_atlas(
 
                 def _decode_one(cid: int) -> Tuple[int, Optional[np.ndarray]]:
                     m = cutout_metas[cid]
-                    return cid, _load_cutout_array(m["filepath"], m["fov"])
+                    return cid, _load_cutout_array(
+                        m["filepath"], m["fov"], max_px_per_deg=max_px_per_deg
+                    )
 
                 for cid, arr in pool.map(_decode_one, needed_new):
                     if arr is not None:
@@ -993,10 +1049,7 @@ def build_sky_atlas(
 
             for lod_lvl, sec, im in pool.map(_render_task, tasks):
                 if im is not None:
-                    if lod_lvl == 0:
-                        rendered_lod0.append((sec, im))
-                    else:
-                        rendered_lod1.append((sec, im))
+                    rendered_by_lod[lod_lvl].append((sec, im))
 
             # Evict cutouts no longer needed by any subsequent northern declination strip
             to_evict = [
@@ -1007,12 +1060,24 @@ def build_sky_atlas(
             for cid in to_evict:
                 decoded_images.pop(cid, None)
 
-    # Sort LOD 0 cleanly South-to-North, and LOD 1 by 45x45 deg sky region so nearby sectors share sheets
+    rendered_lod0 = rendered_by_lod[0]
+    rendered_lod1 = rendered_by_lod[1]
+    rendered_lod2 = rendered_by_lod[2]
+
+    # Sort LOD 0 South-to-North, LOD 1 by 36x36 deg sky region, and LOD 2 by 18x18 deg sky region
     rendered_lod0.sort(key=lambda pair: (pair[0]["b"], pair[0]["c"]))
     rendered_lod1.sort(
         key=lambda pair: (
-            int((pair[0]["dec0"] + 90.0) // 45.0),
-            int((pair[0]["ra0"] % 360.0) // 45.0),
+            int((pair[0]["dec0"] + 90.0) // 36.0),
+            int((pair[0]["ra0"] % 360.0) // 36.0),
+            pair[0]["b"],
+            pair[0]["c"],
+        )
+    )
+    rendered_lod2.sort(
+        key=lambda pair: (
+            int((pair[0]["dec0"] + 90.0) // 18.0),
+            int((pair[0]["ra0"] % 360.0) // 18.0),
             pair[0]["b"],
             pair[0]["c"],
         )
@@ -1036,30 +1101,65 @@ def build_sky_atlas(
         start_sheet_index=len(lod0_sheets),
         max_workers=max_workers,
     )
+    lod2_entries, lod2_sheets, lod2_encoded = (
+        _pack_sectors_into_sheets(
+            rendered_sectors=rendered_lod2,
+            tile_px=lod2_tile_size,
+            sheet_size=sheet_size,
+            quality=quality,
+            lod_level=2,
+            start_sheet_index=len(lod0_sheets) + len(lod1_sheets),
+            max_workers=max_workers,
+        )
+        if enable_lod2 and rendered_lod2
+        else ([], [], [])
+    )
 
-    all_sheets = lod0_sheets + lod1_sheets
-    all_encoded = lod0_encoded + lod1_encoded
+    all_sheets = lod0_sheets + lod1_sheets + lod2_sheets
+    all_encoded = lod0_encoded + lod1_encoded + lod2_encoded
+
+    lods_list = [
+        {
+            "lod": 0,
+            "tile_size": lod0_tile_size,
+            "step_deg": lod0_step_deg,
+            "sectors": lod0_entries,
+        },
+        {
+            "lod": 1,
+            "tile_size": lod1_tile_size,
+            "step_deg": lod1_step_deg,
+            "sectors": lod1_entries,
+        },
+    ]
+    if enable_lod2 and lod2_entries:
+        lods_list.append(
+            {
+                "lod": 2,
+                "tile_size": lod2_tile_size,
+                "step_deg": lod2_step_deg,
+                "sectors": lod2_entries,
+            }
+        )
 
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     manifest_payload = {
         "version": 2,
         "mode": "sectors",
+        "lod_count": len(lods_list),
         "generated_at": generated_at,
         "license": ATLAS_LICENSE,
         "attribution": ATLAS_ATTRIBUTION,
         "source_count": source_count,
         "sheets": all_sheets,
-        "lod0": {
-            "tile_size": lod0_tile_size,
-            "step_deg": lod0_step_deg,
-            "sectors": lod0_entries,
-        },
-        "lod1": {
-            "tile_size": lod1_tile_size,
-            "step_deg": lod1_step_deg,
-            "sectors": lod1_entries,
-        },
+        "lods": lods_list,
+        "lod0": lods_list[0],
+        "lod1": lods_list[1],
+        "targets": manifest_targets,
     }
+    if enable_lod2 and lod2_entries:
+        manifest_payload["lod2"] = lods_list[2]
+
     manifest_bytes = json.dumps(
         manifest_payload, ensure_ascii=False, separators=(",", ":")
     ).encode("utf-8")
@@ -1086,9 +1186,11 @@ def build_sky_atlas(
         "count": source_count,
         "lod0_sectors": len(lod0_entries),
         "lod1_sectors": len(lod1_entries),
+        "lod2_sectors": len(lod2_entries),
         "sheets": len(all_sheets),
         "lod0_sheets": len(lod0_sheets),
         "lod1_sheets": len(lod1_sheets),
+        "lod2_sheets": len(lod2_sheets),
         "size_mb": round(total_bytes / (1024 * 1024), 2),
         "generated_at": generated_at,
         "written_dirs": written_dirs,

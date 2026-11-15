@@ -34,6 +34,8 @@ def test_validate_atlas_filename_security():
     assert validate_atlas_filename("sky_atlas.json") == "sky_atlas.json"
     assert validate_atlas_filename("sky_atlas_lod0.webp") == "sky_atlas_lod0.webp"
     assert validate_atlas_filename("sky_atlas_lod0_1.webp") == "sky_atlas_lod0_1.webp"
+    assert validate_atlas_filename("sky_atlas_lod1_0.webp") == "sky_atlas_lod1_0.webp"
+    assert validate_atlas_filename("sky_atlas_lod2_0.webp") == "sky_atlas_lod2_0.webp"
     assert validate_atlas_filename("sky_atlas_0.webp") == "sky_atlas_0.webp"
     assert validate_atlas_filename("LICENSE-ASSETS.md") == "LICENSE-ASSETS.md"
 
@@ -79,6 +81,8 @@ def test_build_sky_atlas_sectors_overlap_and_cache_isolation(tmp_path):
         lod0_step_deg=15.0,
         lod1_tile_size=256,
         lod1_step_deg=8.0,
+        lod2_tile_size=256,
+        lod2_step_deg=4.0,
         sheet_size=1024,
         quality=80,
     )
@@ -88,27 +92,36 @@ def test_build_sky_atlas_sectors_overlap_and_cache_isolation(tmp_path):
     assert result["source_count"] == 3
     assert result["lod0_sectors"] >= 2
     assert result["lod1_sectors"] >= 2
+    assert result["lod2_sectors"] >= 2
     assert result["lod0_sheets"] == 1
     assert result["lod1_sheets"] >= 1
+    assert result["lod2_sheets"] >= 1
 
     assert (atlas_cache_dir / MANIFEST_FILENAME).is_file()
     assert (atlas_cache_dir / "sky_atlas_lod0.webp").is_file()
-    assert (atlas_cache_dir / "sky_atlas_0.webp").is_file()
+    assert (atlas_cache_dir / "sky_atlas_lod1_0.webp").is_file()
+    assert (atlas_cache_dir / "sky_atlas_lod2_0.webp").is_file()
     assert (atlas_cache_dir / "LICENSE-ASSETS.md").is_file()
 
     # Verify mirrored public directory received identical artifacts
     assert (public_dir / MANIFEST_FILENAME).is_file()
     assert (public_dir / "sky_atlas_lod0.webp").is_file()
-    assert (public_dir / "sky_atlas_0.webp").is_file()
+    assert (public_dir / "sky_atlas_lod1_0.webp").is_file()
+    assert (public_dir / "sky_atlas_lod2_0.webp").is_file()
 
     manifest = json.loads(
         (atlas_cache_dir / MANIFEST_FILENAME).read_text(encoding="utf-8")
     )
     assert manifest["version"] == 2
     assert manifest["mode"] == "sectors"
+    assert manifest["lod_count"] == 3
     assert manifest["source_count"] == 3
     assert len(manifest["lod0"]["sectors"]) == result["lod0_sectors"]
     assert len(manifest["lod1"]["sectors"]) == result["lod1_sectors"]
+    assert len(manifest["lod2"]["sectors"]) == result["lod2_sectors"]
+    assert len(manifest["targets"]) == 3
+    target_names = {entry[0] for entry in manifest["targets"]}
+    assert target_names == {"M 42", "M 43", "M 31"}
 
     # Verify _sky_atlas directory is excluded from raw JPEG cache count & purge
     status_before = get_cache_status_info(str(cache_dir), setup_hash=setup_hash)
@@ -147,11 +160,14 @@ def test_build_sky_atlas_accepts_direct_setup_subfolder(tmp_path):
         output_dir=str(out_dir),
         lod0_tile_size=128,
         lod1_tile_size=256,
+        lod2_tile_size=256,
         sheet_size=1024,
     )
     assert result["status"] == "ok"
     assert result["source_count"] == 1
     assert (out_dir / "sky_atlas_lod0.webp").is_file()
+    assert (out_dir / "sky_atlas_lod1_0.webp").is_file()
+    assert (out_dir / "sky_atlas_lod2_0.webp").is_file()
 
 
 def test_user_facing_atlas_builder_routes_removed():

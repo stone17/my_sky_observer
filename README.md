@@ -114,7 +114,7 @@ To generate or refresh the bundled multi-LOD celestial RA/Dec sky survey map (`f
 python scripts/build_sky_atlas.py
 ```
 
-This composites overlapping cutouts onto seamless `LOD 0` (`12°` wide-sky) and `LOD 1` (`7.5°` detail) spherical sector sheets (`sky_atlas_lod0.webp`, `sky_atlas_*.webp`, `sky_atlas.json`, and `LICENSE-ASSETS.md`) inside `frontend/public/sky_atlas/`.
+This composites overlapping cutouts onto a seamless 3-tier multi-LOD spherical sector pyramid (`LOD 0` `~12.85°` wide-sky, `LOD 1` `6°` mid-field, and `LOD 2` `3°` close-up WebP sheets `sky_atlas_lod*.webp` + `sky_atlas.json` with clickable per-cutout footprints and `LICENSE-ASSETS.md`) inside `frontend/public/sky_atlas/`.
 
 ## 🤝 Contributing
 
