@@ -460,6 +460,7 @@ const indexManifest = (data) => {
     const prevCache = sheetImageCache;
     decodeQueue.length = 0;
     queuedSheetSet.clear();
+    thumbUrlCache.clear();
     sheetMetaByIndex = nextSheets;
     sheetImageCache = new Map();
     disposeSheetCache(prevCache);
@@ -870,4 +871,268 @@ export const findOverlappingAtlasTiles = (ra, dec, frameFov, primaryTarget = nul
     });
 
     return hits.map((h) => h.tile);
+};
+
+/**
+ * Render an array of overlapping Sky Atlas sectors/tiles onto a square 2D canvas
+ * using gnomonic tangent-plane projection (North up, East left).
+ */
+export const drawAtlasFrameToCanvas = (
+    canvas,
+    ra,
+    dec,
+    fov,
+    tiles,
+    {
+        size = 512,
+        requestLoad = true,
+        highPriority = true,
+        smoothingQuality = 'high'
+    } = {}
+) => {
+    if (!canvas || !tiles || tiles.length === 0) return false;
+    if (canvas.width !== size) canvas.width = size;
+    if (canvas.height !== size) canvas.height = size;
+
+    const ctx = canvas.getContext('2d', { alpha: false });
+    if (!ctx) return false;
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#050912';
+    ctx.fillRect(0, 0, size, size);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = smoothingQuality;
+
+    const cosDec = Math.max(Math.cos(dec * DEG2RAD), 0.01);
+    const frameBasis = makeTangentBasis(ra, dec);
+    const halfTanFrame = Math.tan(0.5 * Math.min(fov, 130.0) * DEG2RAD);
+    const invSpanScale = size / (2.0 * Math.max(halfTanFrame, 1e-5));
+
+    const projectGnomonicX = (px, py, pz, invD) =>
+        size * 0.5 -
+        (px * frameBasis.ex + py * frameBasis.ey + pz * frameBasis.ez) * invD * invSpanScale;
+    const projectGnomonicY = (px, py, pz, invD) =>
+        size * 0.5 -
+        (px * frameBasis.nx + py * frameBasis.ny + pz * frameBasis.nz) * invD * invSpanScale;
+
+    let drewAny = false;
+
+    for (let i = 0; i < tiles.length; i++) {
+        const tile = tiles[i];
+        const sheetImg = ensureAtlasSheetImage(tile.s, requestLoad, highPriority);
+        if (!sheetImg) continue;
+
+        if (tile.isSector) {
+            const d0 = tile.tx * frameBasis.tx + tile.ty * frameBasis.ty + tile.tz * frameBasis.tz;
+            const dL = tile.lx * frameBasis.tx + tile.ly * frameBasis.ty + tile.lz * frameBasis.tz;
+            const dR = tile.rx * frameBasis.tx + tile.ry * frameBasis.ty + tile.rz * frameBasis.tz;
+            const dT = tile.topX * frameBasis.tx + tile.topY * frameBasis.ty + tile.topZ * frameBasis.tz;
+            const dB = tile.botX * frameBasis.tx + tile.botY * frameBasis.ty + tile.botZ * frameBasis.tz;
+            if (d0 <= 0.05 || dL <= 0.05 || dR <= 0.05 || dT <= 0.05 || dB <= 0.05) continue;
+
+            const inv0 = 1.0 / d0;
+            const invL = 1.0 / dL;
+            const invR = 1.0 / dR;
+            const invT = 1.0 / dT;
+            const invB = 1.0 / dB;
+
+            const x0 = projectGnomonicX(tile.tx, tile.ty, tile.tz, inv0);
+            const y0 = projectGnomonicY(tile.tx, tile.ty, tile.tz, inv0);
+            const xL = projectGnomonicX(tile.lx, tile.ly, tile.lz, invL);
+            const yL = projectGnomonicY(tile.lx, tile.ly, tile.lz, invL);
+            const xR = projectGnomonicX(tile.rx, tile.ry, tile.rz, invR);
+            const yR = projectGnomonicY(tile.rx, tile.ry, tile.rz, invR);
+            const xT = projectGnomonicX(tile.topX, tile.topY, tile.topZ, invT);
+            const yT = projectGnomonicY(tile.topX, tile.topY, tile.topZ, invT);
+            const xB = projectGnomonicX(tile.botX, tile.botY, tile.botZ, invB);
+            const yB = projectGnomonicY(tile.botX, tile.botY, tile.botZ, invB);
+
+            const ux = xR - xL;
+            const uy = yR - yL;
+            const vx = xB - xT;
+            const vy = yB - yT;
+            const cx = x0 + 0.22 * (xL + xR + xT + xB - 4.0 * x0);
+            const cy = y0 + 0.22 * (yL + yR + yT + yB - 4.0 * y0);
+
+            ctx.setTransform(ux, uy, vx, vy, cx, cy);
+            ctx.drawImage(sheetImg, tile.u, tile.v, tile.w, tile.h, -0.5, -0.5, 1.0, 1.0);
+            drewAny = true;
+            continue;
+        }
+
+        let dRa = tile.ra - ra;
+        if (dRa > 180) dRa -= 360;
+        if (dRa < -180) dRa += 360;
+
+        const dxDeg = -dRa * cosDec;
+        const dyDeg = -(tile.dec - dec);
+
+        const destSize = (tile.fov / fov) * size;
+        const destCx = size * 0.5 + (dxDeg / fov) * size;
+        const destCy = size * 0.5 + (dyDeg / fov) * size;
+
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(
+            sheetImg,
+            tile.u + 0.5,
+            tile.v + 0.5,
+            tile.w - 1,
+            tile.h - 1,
+            destCx - destSize * 0.5,
+            destCy - destSize * 0.5,
+            destSize,
+            destSize
+        );
+        drewAny = true;
+    }
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    return drewAny;
+};
+
+// --- SHARED ZERO-JANK THUMBNAIL SNAPSHOT GENERATOR & LRU CACHE ---
+let sharedThumbCanvas = null;
+const THUMB_SIZE = 72;
+const THUMB_CACHE_MAX = 650;
+const thumbUrlCache = new Map();
+
+export const clearAtlasThumbnailCache = () => {
+    thumbUrlCache.clear();
+};
+
+const getSharedThumbCanvas = () => {
+    if (!sharedThumbCanvas && typeof document !== 'undefined') {
+        sharedThumbCanvas = document.createElement('canvas');
+        sharedThumbCanvas.width = THUMB_SIZE;
+        sharedThumbCanvas.height = THUMB_SIZE;
+    }
+    return sharedThumbCanvas;
+};
+
+/**
+ * Generate or retrieve an on-the-fly FOV-cropped thumbnail snapshot (72x72 JPEG data URL)
+ * from already-loaded Sky Atlas data without blocking scrolling or flooding sheet decodes.
+ *
+ * Returns `{ url: string, complete: boolean } | null`.
+ * - Instant pass (`allowLoadDetail = false`): uses already-resident LOD 0 + any resident LOD 1/2 sheets (0 network requests).
+ * - Idle settle pass (`allowLoadDetail = true`): if `fov < 3.2°`, queues low-priority LOD 1 sheet decode so narrow-FOV
+ *   list thumbnails upgrade to crisp ~85 px/deg detail without touching the 73 close-up LOD 2 sheets.
+ */
+export const getAtlasThumbnailSnapshot = (
+    targetKey,
+    ra,
+    dec,
+    frameFov,
+    { allowLoadDetail = false, primaryTarget = null } = {}
+) => {
+    if (!skyAtlasReady.value || !Number.isFinite(ra) || !Number.isFinite(dec)) return null;
+
+    const fov = Math.max(Number(frameFov) || 1.0, 0.15);
+    const fovBucket = fov.toFixed(2);
+    const coordKey = `${targetKey || ''}|${ra.toFixed(3)}_${dec.toFixed(3)}|${fovBucket}`;
+
+    const cached = thumbUrlCache.get(coordKey);
+    if (cached && (cached.complete || !allowLoadDetail)) {
+        // Refresh LRU position
+        thumbUrlCache.delete(coordKey);
+        thumbUrlCache.set(coordKey, cached);
+        return cached;
+    }
+
+    const canvas = getSharedThumbCanvas();
+    if (!canvas) return null;
+
+    let tilesToDraw = [];
+    let isComplete = true;
+
+    if (skyAtlasSectorMode.value) {
+        const a = ra * DEG2RAD;
+        const d = dec * DEG2RAD;
+        const cd = Math.cos(d);
+        const fx = cd * Math.cos(a);
+        const fy = cd * Math.sin(a);
+        const fz = Math.sin(d);
+        const halfTanF = Math.tan(0.5 * Math.min(fov, 130.0) * DEG2RAD);
+        const frameRad = Math.atan(Math.SQRT2 * halfTanF) + 0.02;
+        const cosF = Math.cos(frameRad);
+        const sinF = Math.sin(frameRad);
+
+        const lod0 = skyAtlasLod0Sectors.value;
+        const lod1 = skyAtlasLod1Sectors.value;
+        const lod2 = skyAtlasLod2Sectors.value;
+
+        const l0 = collectOverlappingSectors(lod0, fx, fy, fz, frameRad, cosF, sinF, true, false);
+        if (l0.allHits.length === 0 && lod1.length === 0) {
+            return null;
+        }
+
+        if (fov >= 3.2 || lod1.length === 0) {
+            tilesToDraw = l0.readyHits;
+            isComplete = !l0.anyPending && l0.readyHits.length > 0;
+        } else {
+            // Check if any LOD 2 sectors happen to be resident in RAM already (free sharpness, never request load)
+            const l2Resident =
+                lod2.length > 0
+                    ? collectOverlappingSectors(lod2, fx, fy, fz, frameRad, cosF, sinF, false, false)
+                    : { allHits: [], readyHits: [], anyPending: false };
+
+            if (l2Resident.allHits.length > 0 && !l2Resident.anyPending) {
+                tilesToDraw = l2Resident.readyHits;
+                isComplete = true;
+            } else {
+                const l1 = collectOverlappingSectors(
+                    lod1,
+                    fx,
+                    fy,
+                    fz,
+                    frameRad,
+                    cosF,
+                    sinF,
+                    allowLoadDetail,
+                    false
+                );
+                if (l1.allHits.length > 0 && !l1.anyPending) {
+                    tilesToDraw = l1.readyHits.concat(l2Resident.readyHits);
+                    isComplete = true;
+                } else {
+                    tilesToDraw = l0.readyHits.concat(l1.readyHits, l2Resident.readyHits);
+                    isComplete = l1.allHits.length === 0 && !l0.anyPending;
+                }
+            }
+        }
+    } else {
+        tilesToDraw = findOverlappingAtlasTiles(ra, dec, fov, primaryTarget);
+        isComplete = tilesToDraw.length > 0;
+    }
+
+    if (tilesToDraw.length === 0) {
+        return cached || null;
+    }
+
+    // If we already cached an incomplete LOD 0 preview and detail sheets are still decoding, reuse it instead of re-encoding
+    if (cached && !isComplete) {
+        return cached;
+    }
+
+    const drew = drawAtlasFrameToCanvas(canvas, ra, dec, fov, tilesToDraw, {
+        size: THUMB_SIZE,
+        requestLoad: false,
+        highPriority: false,
+        smoothingQuality: 'medium'
+    });
+    if (!drew) return cached || null;
+
+    const url = canvas.toDataURL('image/jpeg', 0.82);
+    const entry = { url, complete: isComplete };
+
+    if (thumbUrlCache.has(coordKey)) {
+        thumbUrlCache.delete(coordKey);
+    } else if (thumbUrlCache.size >= THUMB_CACHE_MAX) {
+        const oldestKey = thumbUrlCache.keys().next().value;
+        if (oldestKey !== undefined) {
+            thumbUrlCache.delete(oldestKey);
+        }
+    }
+    thumbUrlCache.set(coordKey, entry);
+    return entry;
 };

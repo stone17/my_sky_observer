@@ -10,10 +10,18 @@ import {
     resolveEffectiveTimeWindow,
     isTimestampInTimeWindow
 } from '../utils/timeWindow.js';
+import { computeDefaultImageFov, normalizeImageFov } from '../utils/fov.js';
+import {
+    skyAtlasReady,
+    skyAtlasVersion,
+    ensureSkyAtlasLoaded,
+    getAtlasThumbnailSnapshot
+} from '../utils/skyAtlas.js';
 
 const props = defineProps([
     'objects',
     'selectedId',
+    'activeFov',
     'pinnedId',
     'pinnedSeq',
     'settings',
@@ -391,7 +399,302 @@ watch(filteredAndSortedObjects, (newList) => {
     }
 }, { immediate: true });
 
+// --- LAZY FOV-AWARE SKY ATLAS THUMBNAILS ---
+// Uses a single IntersectionObserver on .scrollable-list + a frame-budgeted idle queue
+// (max 3 thumbnails / 3.0ms per slice) so scrolling 13k targets stays locked at 60fps.
+const atlasThumbUrls = ref({});
+const atlasThumbMeta = new Map(); // name -> { key: string, complete: boolean }
+const cardElByName = new Map();
+const visibleCardNames = new Set();
+const displayedItemByName = new Map();
+
+const pendingThumbQueue = [];
+const pendingThumbSet = new Set();
+let cardObserver = null;
+let thumbPumpHandle = null;
+let thumbPumpIsIdleCb = false;
+let isActivelyScrolling = false;
+let scrollIdleTimer = null;
+
+const defaultSetupFov = computed(() => {
+    return computeDefaultImageFov(
+        props.settings?.telescope,
+        props.settings?.camera,
+        props.settings?.image_padding
+    );
+});
+
+const equipmentSig = computed(() => {
+    const fl = Number(props.settings?.telescope?.focal_length) || 0;
+    const sw = Number(props.settings?.camera?.sensor_width) || 0;
+    const sh = Number(props.settings?.camera?.sensor_height) || 0;
+    if (!fl || !sw || !sh) return '';
+    return `${fl.toFixed(2)}_${sw.toFixed(2)}_${sh.toFixed(2)}`;
+});
+
+const resolveItemThumbParams = (item) => {
+    if (!item) return null;
+    const rawSaved = localClientSettings.value?.object_settings?.[item.name];
+    const saved =
+        rawSaved && (!rawSaved.equipment_sig || !equipmentSig.value || rawSaved.equipment_sig === equipmentSig.value)
+            ? rawSaved
+            : null;
+
+    let fov = defaultSetupFov.value;
+    if (item.name === props.selectedId && Number(props.activeFov) > 0) {
+        fov = normalizeImageFov(props.activeFov, defaultSetupFov.value);
+    } else if (item.image_fov !== undefined && item.image_fov !== null && Number(item.image_fov) > 0) {
+        fov = normalizeImageFov(item.image_fov, defaultSetupFov.value);
+    } else if (saved?.is_manual_fov && Number(saved?.fov) > 0) {
+        fov = normalizeImageFov(saved.fov, defaultSetupFov.value);
+    }
+
+    let ra = Number(item.ra);
+    let dec = Number(item.dec);
+    if (item.custom_framed && Number.isFinite(Number(item.center_ra)) && Number.isFinite(Number(item.center_dec))) {
+        ra = Number(item.center_ra);
+        dec = Number(item.center_dec);
+    } else if (saved?.custom_framed && Number.isFinite(Number(saved?.center_ra)) && Number.isFinite(Number(saved?.center_dec))) {
+        ra = Number(saved.center_ra);
+        dec = Number(saved.center_dec);
+    }
+
+    if (!Number.isFinite(ra) || !Number.isFinite(dec)) return null;
+    return { fov, ra, dec };
+};
+
+const getServerThumbUrl = (item) => {
+    if (!item?.image_url) return null;
+    const params = resolveItemThumbParams(item);
+    if (!params) return item.image_url;
+    if (item.image_fov !== undefined && item.image_fov !== null) {
+        if (Math.abs(Number(item.image_fov) - params.fov) >= 0.03) {
+            return null;
+        }
+    }
+    return item.image_url;
+};
+
+const cancelThumbPump = () => {
+    if (thumbPumpHandle === null) return;
+    if (thumbPumpIsIdleCb && typeof window !== 'undefined' && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(thumbPumpHandle);
+    } else if (typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(thumbPumpHandle);
+    }
+    thumbPumpHandle = null;
+    thumbPumpIsIdleCb = false;
+};
+
+const scheduleThumbPump = () => {
+    if (thumbPumpHandle !== null || pendingThumbQueue.length === 0 || !skyAtlasReady.value) return;
+    if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+        thumbPumpIsIdleCb = true;
+        thumbPumpHandle = window.requestIdleCallback(processThumbQueueSlice, { timeout: 90 });
+    } else if (typeof requestAnimationFrame === 'function') {
+        thumbPumpIsIdleCb = false;
+        thumbPumpHandle = requestAnimationFrame(() => processThumbQueueSlice(null));
+    }
+};
+
+const processThumbQueueSlice = (deadline) => {
+    thumbPumpHandle = null;
+    thumbPumpIsIdleCb = false;
+    if (!skyAtlasReady.value || pendingThumbQueue.length === 0) return;
+
+    const startMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const allowDetail = !isActivelyScrolling;
+    let processed = 0;
+    let changed = false;
+    const batch = {};
+
+    while (pendingThumbQueue.length > 0 && processed < 3) {
+        if (processed > 0) {
+            const elapsed = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - startMs;
+            if (elapsed >= 3.0) break;
+            if (deadline && typeof deadline.timeRemaining === 'function' && !deadline.didTimeout && deadline.timeRemaining() < 2) {
+                break;
+            }
+        }
+
+        const name = pendingThumbQueue.shift();
+        pendingThumbSet.delete(name);
+        if (!name || !visibleCardNames.has(name)) continue;
+
+        const item = displayedItemByName.get(name);
+        if (!item || getServerThumbUrl(item)) continue;
+
+        const params = resolveItemThumbParams(item);
+        if (!params) continue;
+
+        const coordKey = `${params.ra.toFixed(3)}_${params.dec.toFixed(3)}_${params.fov.toFixed(2)}`;
+        const prevMeta = atlasThumbMeta.get(name);
+        if (prevMeta && prevMeta.key === coordKey && (prevMeta.complete || !allowDetail) && atlasThumbUrls.value[name]) {
+            continue;
+        }
+
+        const snap = getAtlasThumbnailSnapshot(item.name, params.ra, params.dec, params.fov, {
+            allowLoadDetail: allowDetail,
+            primaryTarget: item.name
+        });
+        processed++;
+
+        if (snap && snap.url) {
+            atlasThumbMeta.set(name, { key: coordKey, complete: Boolean(snap.complete) });
+            if (atlasThumbUrls.value[name] !== snap.url) {
+                batch[name] = snap.url;
+                changed = true;
+            }
+        }
+    }
+
+    if (changed) {
+        const merged = { ...atlasThumbUrls.value, ...batch };
+        const keys = Object.keys(merged);
+        if (keys.length > 420) {
+            let toRemove = keys.length - 360;
+            for (let i = 0; i < keys.length && toRemove > 0; i++) {
+                const k = keys[i];
+                if (!visibleCardNames.has(k) && k !== props.selectedId) {
+                    delete merged[k];
+                    atlasThumbMeta.delete(k);
+                    toRemove--;
+                }
+            }
+        }
+        atlasThumbUrls.value = merged;
+    }
+
+    if (pendingThumbQueue.length > 0) {
+        scheduleThumbPump();
+    }
+};
+
+const enqueueThumbWork = (name, highPriority = false) => {
+    if (!name || !skyAtlasReady.value) return;
+    const item = displayedItemByName.get(name);
+    if (!item || getServerThumbUrl(item)) return;
+
+    const params = resolveItemThumbParams(item);
+    if (!params) return;
+    const coordKey = `${params.ra.toFixed(3)}_${params.dec.toFixed(3)}_${params.fov.toFixed(2)}`;
+    const prevMeta = atlasThumbMeta.get(name);
+    if (prevMeta && prevMeta.key === coordKey && (prevMeta.complete || isActivelyScrolling) && atlasThumbUrls.value[name]) {
+        return;
+    }
+
+    if (pendingThumbSet.has(name)) {
+        if (highPriority) {
+            const idx = pendingThumbQueue.indexOf(name);
+            if (idx > 0) {
+                pendingThumbQueue.splice(idx, 1);
+                pendingThumbQueue.unshift(name);
+            }
+        }
+        return;
+    }
+
+    pendingThumbSet.add(name);
+    if (highPriority) {
+        pendingThumbQueue.unshift(name);
+    } else {
+        pendingThumbQueue.push(name);
+    }
+    scheduleThumbPump();
+};
+
+const enqueueVisibleThumbs = () => {
+    if (!skyAtlasReady.value) return;
+    for (const name of visibleCardNames) {
+        enqueueThumbWork(name, name === props.selectedId);
+    }
+};
+
+const setCardRef = (el, name) => {
+    const prev = cardElByName.get(name);
+    if (prev && prev !== el) {
+        if (cardObserver) cardObserver.unobserve(prev);
+        cardElByName.delete(name);
+        visibleCardNames.delete(name);
+    }
+    if (el) {
+        cardElByName.set(name, el);
+        if (cardObserver) cardObserver.observe(el);
+    }
+};
+
+const initCardObserver = () => {
+    if (cardObserver) {
+        cardObserver.disconnect();
+        cardObserver = null;
+    }
+    if (typeof IntersectionObserver === 'undefined') return;
+    cardObserver = new IntersectionObserver(
+        (entries) => {
+            for (let i = 0; i < entries.length; i++) {
+                const entry = entries[i];
+                const name = entry.target?.dataset?.objName;
+                if (!name) continue;
+                if (entry.isIntersecting) {
+                    visibleCardNames.add(name);
+                    enqueueThumbWork(name, name === props.selectedId);
+                } else {
+                    visibleCardNames.delete(name);
+                }
+            }
+        },
+        {
+            root: scrollableListRef.value || null,
+            rootMargin: '160px 0px',
+            threshold: 0.01
+        }
+    );
+    for (const el of cardElByName.values()) {
+        cardObserver.observe(el);
+    }
+};
+
+watch(
+    displayedObjects,
+    (list) => {
+        displayedItemByName.clear();
+        for (let i = 0; i < list.length; i++) {
+            const item = list[i];
+            if (item?.name) displayedItemByName.set(item.name, item);
+        }
+        nextTick(() => {
+            enqueueVisibleThumbs();
+        });
+    },
+    { immediate: true }
+);
+
+watch([skyAtlasReady, skyAtlasVersion], () => {
+    enqueueVisibleThumbs();
+});
+
+watch(defaultSetupFov, () => {
+    enqueueVisibleThumbs();
+});
+
+watch(
+    () => [props.selectedId, props.activeFov],
+    ([selId]) => {
+        if (selId && visibleCardNames.has(selId)) {
+            enqueueThumbWork(selId, true);
+        }
+    }
+);
+
 const onScroll = (e) => {
+    isActivelyScrolling = true;
+    if (scrollIdleTimer) clearTimeout(scrollIdleTimer);
+    scrollIdleTimer = setTimeout(() => {
+        scrollIdleTimer = null;
+        isActivelyScrolling = false;
+        enqueueVisibleThumbs();
+    }, 180);
+
     const { scrollTop, scrollHeight, clientHeight } = e.target;
     if (scrollTop + clientHeight >= scrollHeight - 300) {
         if (renderedLimit.value < filteredAndSortedObjects.value.length) {
@@ -445,10 +748,25 @@ const handleKeydown = (e) => {
 
 onMounted(() => {
     window.addEventListener('keydown', handleKeydown);
+    ensureSkyAtlasLoaded();
+    nextTick(() => {
+        initCardObserver();
+    });
 });
 
 onUnmounted(() => {
     window.removeEventListener('keydown', handleKeydown);
+    cancelThumbPump();
+    if (scrollIdleTimer) {
+        clearTimeout(scrollIdleTimer);
+        scrollIdleTimer = null;
+    }
+    if (cardObserver) {
+        cardObserver.disconnect();
+        cardObserver = null;
+    }
+    cardElByName.clear();
+    visibleCardNames.clear();
 });
 </script>
 
@@ -566,13 +884,33 @@ onUnmounted(() => {
                     v-for="item in displayedObjects"
                     :key="item.name"
                     :id="`obj-card-${item.name}`"
+                    :ref="(el) => setCardRef(el, item.name)"
+                    :data-obj-name="item.name"
                     class="object-card"
                     :class="{ active: selectedId === item.name, 'search-match': item._isSearchMatch }"
                     @click="handleObjectClick(item)"
                 >
                     <div class="card-content">
                         <div class="img-col">
-                            <img v-if="item.image_url" :src="item.image_url" class="list-thumb" loading="lazy" />
+                            <img
+                                v-if="getServerThumbUrl(item)"
+                                :src="getServerThumbUrl(item)"
+                                class="list-thumb"
+                                loading="lazy"
+                                decoding="async"
+                            />
+                            <div
+                                v-else-if="atlasThumbUrls[item.name]"
+                                class="atlas-thumb-wrap"
+                                title="Live FOV snapshot from Sky Atlas"
+                            >
+                                <img
+                                    :src="atlasThumbUrls[item.name]"
+                                    class="list-thumb atlas-live-thumb"
+                                    decoding="async"
+                                />
+                                <span class="atlas-thumb-dot" aria-hidden="true"></span>
+                            </div>
                             <div v-else class="img-placeholder">
                                 <span>✦</span>
                             </div>
@@ -995,12 +1333,36 @@ onUnmounted(() => {
     align-items: center;
     justify-content: center;
     overflow: hidden;
+    position: relative;
 }
 
 .list-thumb {
     width: 100%;
     height: 100%;
     object-fit: cover;
+}
+
+.atlas-thumb-wrap {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    display: flex;
+}
+
+.atlas-live-thumb {
+    opacity: 0.94;
+}
+
+.atlas-thumb-dot {
+    position: absolute;
+    left: 4px;
+    bottom: 4px;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: #38bdf8;
+    box-shadow: 0 0 4px rgba(56, 189, 248, 0.85), 0 0 0 1px rgba(15, 23, 42, 0.9);
+    pointer-events: none;
 }
 
 .img-placeholder {

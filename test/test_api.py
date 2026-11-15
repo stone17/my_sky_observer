@@ -852,6 +852,62 @@ def test_filter_and_object_settings_persistence():
     save_settings(TEST_SETTINGS)
 
 
+def test_download_object_resolution_override():
+    """Verify per-request resolution override on compute_fov_and_setup and /api/download-object."""
+    from backend.models import Camera, Telescope
+    from backend.stream_service import compute_fov_and_setup
+
+    base_settings = load_settings()
+    fov_hi = compute_fov_and_setup(
+        Telescope(focal_length=800),
+        Camera(sensor_width=17.5, sensor_height=13.0),
+        base_settings,
+        override_fov=2.5,
+        override_resolution=2048,
+    )
+    assert fov_hi["img_res"] == 2048
+    assert "_r2048_" in fov_hi["setup_hash"]
+    assert abs(fov_hi["download_fov"] - 2.5) < 1e-6
+
+    with pytest.raises(ValueError):
+        compute_fov_and_setup(
+            Telescope(focal_length=800),
+            Camera(sensor_width=17.5, sensor_height=13.0),
+            base_settings,
+            override_resolution=9999,
+        )
+
+    with patch("backend.main.download_image", new_callable=AsyncMock) as mock_dl:
+        mock_dl.return_value = f"/cache/{fov_hi['setup_hash']}/M_31.jpg"
+        res_ok = client.post(
+            "/api/download-object",
+            json={
+                "object": {"name": "M 31", "ra": 10.6847, "dec": 41.269},
+                "settings": base_settings,
+                "fov": 2.5,
+                "resolution": 2048,
+            },
+        )
+        assert res_ok.status_code == 200
+        payload = res_ok.json()
+        assert payload["status"] == "cached"
+        assert payload["resolution"] == 2048
+        assert "_r2048_" in payload["url"]
+        assert "_r2048_" in payload["setup_hash"]
+        assert mock_dl.await_args.kwargs["resolution"] == 2048
+
+    res_bad = client.post(
+        "/api/download-object",
+        json={
+            "object": {"name": "M 31", "ra": 10.6847, "dec": 41.269},
+            "settings": base_settings,
+            "resolution": 8192,
+        },
+    )
+    assert res_bad.status_code == 400
+
+
+
 def test_list_cached_sky_images_and_endpoint(tmp_path):
     """Verify cached sky survey images across standard, custom-FOV, and custom-RA/Dec folders resolve RA/Dec/FOV accurately."""
     from backend.image_service import (

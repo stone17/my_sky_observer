@@ -31,10 +31,19 @@ def compute_fov_and_setup(
     camera: Camera,
     settings: dict,
     override_fov: Optional[float] = None,
+    override_resolution: Optional[int] = None,
 ) -> dict:
     """Compute FOV geometry, download FOV, FOV rectangle, and image setup hash."""
     img_srv = settings.get("image_server") if isinstance(settings.get("image_server"), dict) else {}
     img_res = int(img_srv.get("resolution", settings.get("image_resolution", 1024)))
+    if override_resolution is not None:
+        try:
+            parsed_res = int(override_resolution)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid resolution override: {override_resolution}") from exc
+        if parsed_res < 64 or parsed_res > 4096:
+            raise ValueError(f"Resolution must be between 64 and 4096 (got {parsed_res})")
+        img_res = parsed_res
     img_source = validate_image_source(
         img_srv.get("source", settings.get("image_source", "dss2r"))
     )

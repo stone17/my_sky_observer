@@ -94,7 +94,7 @@ const equipmentSignature = computed(() => {
 });
 
 // --- CORE DOWNLOAD LOGIC ---
-const downloadImage = async (obj, explicitFov = null) => {
+const downloadImage = async (obj, explicitFov = null, explicitResolution = null) => {
     if (!obj) return;
 
     const targetName = obj.name;
@@ -102,35 +102,49 @@ const downloadImage = async (obj, explicitFov = null) => {
         explicitFov !== null ? explicitFov : (isManualFov.value ? activeFov.value : systemFov.value),
         systemFov.value
     );
+    const defaultRes = Number(settings.value?.image_server?.resolution) || 1024;
+    const requestedRes =
+        explicitResolution !== null && Number.isFinite(Number(explicitResolution))
+            ? Number(explicitResolution)
+            : null;
 
     obj.status = 'downloading';
+    obj.downloading_resolution = requestedRes || defaultRes;
 
     try {
+        const reqBody = {
+            object: {
+                name: obj.name,
+                ra: obj.ra,
+                dec: obj.dec
+            },
+            fov: requestedFov,
+            settings: {
+                ...settings.value,
+                fov: requestedFov
+            }
+        };
+        if (requestedRes !== null) {
+            reqBody.resolution = requestedRes;
+        }
+
         const res = await fetch('/api/download-object', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                object: {
-                    name: obj.name,
-                    ra: obj.ra,
-                    dec: obj.dec
-                },
-                fov: requestedFov,
-                settings: {
-                    ...settings.value,
-                    fov: requestedFov
-                }
-            })
+            body: JSON.stringify(reqBody)
         });
 
         if (res.ok) {
             const data = await res.json();
             const effectiveFov = data.image_fov || requestedFov;
+            const effectiveRes = Number(data.resolution) || requestedRes || defaultRes;
             const applyResult = (targetObj) => {
                 if (!targetObj) return;
                 targetObj.image_url = data.url;
                 targetObj.status = data.status || 'cached';
                 targetObj.image_fov = effectiveFov;
+                targetObj.image_resolution = effectiveRes;
+                delete targetObj.downloading_resolution;
                 if (data.sensor_fov) targetObj.sensor_fov = data.sensor_fov;
                 if (data.fov_rectangle) targetObj.fov_rectangle = data.fov_rectangle;
                 if (data.setup_hash) targetObj.setup_hash = data.setup_hash;
@@ -149,27 +163,39 @@ const downloadImage = async (obj, explicitFov = null) => {
             ) {
                 applyResult(selectedObject.value);
             }
-            if (isManualFov.value && selectedObject.value?.name === targetName) {
+            if (
+                (isManualFov.value || effectiveRes > defaultRes) &&
+                selectedObject.value?.name === targetName
+            ) {
                 updateObjectSettingsEntry(targetName, {
                     fov: effectiveFov,
-                    is_manual_fov: true,
-                    image_url: data.url
+                    is_manual_fov: isManualFov.value,
+                    image_url: data.url,
+                    image_resolution: effectiveRes
                 });
             }
         } else {
             obj.status = 'error';
+            delete obj.downloading_resolution;
         }
     } catch (e) {
         console.error(e);
         obj.status = 'error';
+        delete obj.downloading_resolution;
     }
 };
 
-const fetchCustomFramedImageForObject = async (obj, centerRa, centerDec, fov) => {
+const fetchCustomFramedImageForObject = async (obj, centerRa, centerDec, fov, explicitResolution = null) => {
     if (!obj) return;
     const targetName = obj.name;
     const requestedFov = normalizeImageFov(fov, systemFov.value);
+    const defaultRes = Number(settings.value.image_server?.resolution) || 1024;
+    const requestedRes =
+        explicitResolution !== null && Number.isFinite(Number(explicitResolution))
+            ? Number(explicitResolution)
+            : defaultRes;
     obj.status = 'downloading';
+    obj.downloading_resolution = requestedRes;
     try {
         const res = await fetch('/api/fetch-custom-image', {
             method: 'POST',
@@ -178,7 +204,7 @@ const fetchCustomFramedImageForObject = async (obj, centerRa, centerDec, fov) =>
                 ra: centerRa,
                 dec: centerDec,
                 fov: requestedFov,
-                resolution: settings.value.image_server?.resolution || 1024,
+                resolution: requestedRes,
                 source: settings.value.image_server?.source || 'dss2r',
                 timeout: settings.value.image_server?.timeout || 120
             })
@@ -186,6 +212,7 @@ const fetchCustomFramedImageForObject = async (obj, centerRa, centerDec, fov) =>
         if (res.ok) {
             const data = await res.json();
             const effectiveFov = data.image_fov || requestedFov;
+            const effectiveRes = Number(data.resolution) || requestedRes;
             const applyCustom = (targetObj) => {
                 if (!targetObj) return;
                 targetObj.image_url = data.url;
@@ -193,6 +220,8 @@ const fetchCustomFramedImageForObject = async (obj, centerRa, centerDec, fov) =>
                 targetObj.center_dec = centerDec;
                 targetObj.custom_framed = true;
                 targetObj.image_fov = effectiveFov;
+                targetObj.image_resolution = effectiveRes;
+                delete targetObj.downloading_resolution;
                 targetObj.status = 'cached';
             };
             applyCustom(obj);
@@ -207,14 +236,17 @@ const fetchCustomFramedImageForObject = async (obj, centerRa, centerDec, fov) =>
                 custom_framed: true,
                 center_ra: centerRa,
                 center_dec: centerDec,
-                image_url: data.url
+                image_url: data.url,
+                image_resolution: effectiveRes
             });
         } else {
             obj.status = 'error';
+            delete obj.downloading_resolution;
         }
     } catch (e) {
         console.error(e);
         obj.status = 'error';
+        delete obj.downloading_resolution;
     }
 };
 
@@ -251,14 +283,18 @@ const mergeObjectDetailsPayload = (d, insertIfMissing = false) => {
 
     if (o) {
         const targetFov = isManualFov.value ? activeFov.value : systemFov.value;
+        const baseRes = Number(settings.value?.image_server?.resolution) || 1024;
         const keepCurrentImage =
             o.status === 'downloading' ||
             (o.image_url && o.custom_framed) ||
+            (o.image_url && Number(o.image_resolution) > baseRes && Math.abs((o.image_fov || 0) - targetFov) < 0.01) ||
             (o.image_url && isManualFov.value && Math.abs((o.image_fov || 0) - targetFov) < 0.01) ||
             (o.image_url && !d.image_url && Math.abs((o.image_fov || 0) - (d.image_fov || 0)) < 0.01);
 
         const savedUrl = o.image_url;
         const savedFov = o.image_fov;
+        const savedRes = o.image_resolution;
+        const savedDownloadingRes = o.downloading_resolution;
         const savedStatus = o.status;
         const savedCenterRa = o.center_ra;
         const savedCenterDec = o.center_dec;
@@ -270,6 +306,8 @@ const mergeObjectDetailsPayload = (d, insertIfMissing = false) => {
         if (keepCurrentImage) {
             o.image_url = savedUrl;
             o.image_fov = savedFov;
+            if (savedRes !== undefined) o.image_resolution = savedRes;
+            if (savedDownloadingRes !== undefined) o.downloading_resolution = savedDownloadingRes;
             o.status = savedStatus;
             if (savedCenterRa !== undefined) o.center_ra = savedCenterRa;
             if (savedCenterDec !== undefined) o.center_dec = savedCenterDec;
@@ -458,6 +496,10 @@ const handleFovUpdate = (payload) => {
     const rawFov = isObj ? payload.fov : payload;
     const isReset = isObj ? Boolean(payload.isReset) : false;
     const skipDownload = isObj ? Boolean(payload.skipDownload) : false;
+    const explicitResolution =
+        isObj && payload.resolution !== undefined && payload.resolution !== null
+            ? Number(payload.resolution)
+            : null;
 
     if (isReset) {
         isManualFov.value = false;
@@ -467,6 +509,7 @@ const handleFovUpdate = (payload) => {
             selectedObject.value.custom_framed = false;
             delete selectedObject.value.center_ra;
             delete selectedObject.value.center_dec;
+            delete selectedObject.value.image_resolution;
             updateObjectSettingsEntry(objName, {
                 fov: null,
                 is_manual_fov: false,
@@ -474,11 +517,12 @@ const handleFovUpdate = (payload) => {
                 center_ra: null,
                 center_dec: null,
                 image_url: null,
+                image_resolution: null,
                 offset_x_pct: 0,
                 offset_y_pct: 0
             });
             if (!skipDownload) {
-                downloadImage(selectedObject.value, systemFov.value);
+                downloadImage(selectedObject.value, systemFov.value, explicitResolution);
             }
         }
         return;
@@ -494,7 +538,7 @@ const handleFovUpdate = (payload) => {
             is_manual_fov: isManualFov.value
         });
         if (!skipDownload) {
-            downloadImage(selectedObject.value, normalized);
+            downloadImage(selectedObject.value, normalized, explicitResolution);
         }
     }
 };
@@ -536,9 +580,17 @@ const applySavedStateToObject = (item) => {
     if (saved.is_manual_fov && saved.fov) {
         item.image_fov = normalizeImageFov(saved.fov, systemFov.value);
     }
-    if (saved.image_url && (saved.custom_framed || saved.is_manual_fov)) {
+    const baseRes = Number(settings.value?.image_server?.resolution) || 1024;
+    const hasHighResSaved = Number(saved.image_resolution) > baseRes;
+    if (saved.image_resolution) {
+        item.image_resolution = Number(saved.image_resolution);
+    }
+    if (saved.image_url && (saved.custom_framed || saved.is_manual_fov || hasHighResSaved)) {
         item.image_url = saved.image_url;
         item.status = 'cached';
+        if (!item.image_fov && saved.fov) {
+            item.image_fov = normalizeImageFov(saved.fov, systemFov.value);
+        }
     }
 };
 
@@ -1410,6 +1462,7 @@ watch(clientSettings, () => {
                     <ObjectList
                         :objects="objects"
                         :selectedId="selectedObject?.name"
+                        :activeFov="activeFov"
                         :pinnedId="pinnedTopObjectId"
                         :pinnedSeq="pinnedTopSeq"
                         :settings="settings"

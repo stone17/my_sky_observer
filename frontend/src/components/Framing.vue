@@ -14,9 +14,8 @@ import {
 } from '../utils/catalogMeta.js';
 import {
     ensureSkyAtlasLoaded,
-    ensureAtlasSheetImage,
     findOverlappingAtlasTiles,
-    makeTangentBasis,
+    drawAtlasFrameToCanvas,
     skyAtlasVersion
 } from '../utils/skyAtlas.js';
 
@@ -88,12 +87,10 @@ const onHdImageError = () => {
     }
 };
 
-const isHdReady = computed(() => {
-    return Boolean(
-        props.object?.image_url &&
-            loadedHdUrl.value === props.object.image_url &&
-            !isObjectDownloading.value
-    );
+const isImageFovMatched = computed(() => {
+    const imgFov = parseFloat(props.object?.image_fov);
+    if (!Number.isFinite(imgFov) || imgFov <= 0) return false;
+    return Math.abs(imgFov - localFov.value) < 0.02;
 });
 
 const previewFrameSpec = computed(() => {
@@ -110,11 +107,7 @@ const previewFrameSpec = computed(() => {
     if (!Number.isFinite(ra) || !Number.isFinite(dec)) return null;
 
     const fov = parseFloat(
-        (isObjectDownloading.value || !props.object.image_fov
-            ? localFov.value
-            : props.object.image_fov) ||
-            localFov.value ||
-            defaultImageFov.value
+        localFov.value || props.object.image_fov || defaultImageFov.value
     );
     if (!Number.isFinite(fov) || fov <= 0.001) return null;
 
@@ -124,6 +117,26 @@ const previewFrameSpec = computed(() => {
 
 const hasAtlasPreview = computed(() => {
     return Boolean(previewFrameSpec.value && previewFrameSpec.value.tiles.length > 0);
+});
+
+const isHdReady = computed(() => {
+    return Boolean(
+        props.object?.image_url &&
+            loadedHdUrl.value === props.object.image_url &&
+            !isObjectDownloading.value &&
+            (isImageFovMatched.value || !hasAtlasPreview.value)
+    );
+});
+
+const isFetchingSurvey = computed(() => {
+    if (isObjectDownloading.value) return true;
+    // Also true while browser is decoding a newly returned survey image at the current FOV
+    return Boolean(
+        props.object?.image_url &&
+            loadedHdUrl.value !== props.object.image_url &&
+            isImageFovMatched.value &&
+            props.object?.status !== 'error'
+    );
 });
 
 const effectiveDisplayFov = computed(() => {
@@ -139,99 +152,12 @@ const renderAtlasPreviewCanvas = () => {
     const spec = previewFrameSpec.value;
     if (!canvas || !spec || !spec.tiles.length) return;
 
-    const size = 512;
-    if (canvas.width !== size) canvas.width = size;
-    if (canvas.height !== size) canvas.height = size;
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = '#050912';
-    ctx.fillRect(0, 0, size, size);
-    ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
-
-    const deg2rad = Math.PI / 180.0;
-    const cosDec = Math.max(Math.cos(spec.dec * deg2rad), 0.01);
-    const frameBasis = makeTangentBasis(spec.ra, spec.dec);
-    const halfTanFrame = Math.tan(0.5 * Math.min(spec.fov, 130.0) * deg2rad);
-    const invSpanScale = size / (2.0 * Math.max(halfTanFrame, 1e-5));
-
-    const projectGnomonicX = (px, py, pz, invD) =>
-        size * 0.5 - (px * frameBasis.ex + py * frameBasis.ey + pz * frameBasis.ez) * invD * invSpanScale;
-    const projectGnomonicY = (px, py, pz, invD) =>
-        size * 0.5 - (px * frameBasis.nx + py * frameBasis.ny + pz * frameBasis.nz) * invD * invSpanScale;
-
-    for (let i = 0; i < spec.tiles.length; i++) {
-        const tile = spec.tiles[i];
-        const sheetImg = ensureAtlasSheetImage(tile.s, true, true);
-        if (!sheetImg) continue;
-
-        if (tile.isSector) {
-            const d0 = tile.tx * frameBasis.tx + tile.ty * frameBasis.ty + tile.tz * frameBasis.tz;
-            const dL = tile.lx * frameBasis.tx + tile.ly * frameBasis.ty + tile.lz * frameBasis.tz;
-            const dR = tile.rx * frameBasis.tx + tile.ry * frameBasis.ty + tile.rz * frameBasis.tz;
-            const dT = tile.topX * frameBasis.tx + tile.topY * frameBasis.ty + tile.topZ * frameBasis.tz;
-            const dB = tile.botX * frameBasis.tx + tile.botY * frameBasis.ty + tile.botZ * frameBasis.tz;
-            if (d0 <= 0.05 || dL <= 0.05 || dR <= 0.05 || dT <= 0.05 || dB <= 0.05) continue;
-
-            const inv0 = 1.0 / d0;
-            const invL = 1.0 / dL;
-            const invR = 1.0 / dR;
-            const invT = 1.0 / dT;
-            const invB = 1.0 / dB;
-
-            const x0 = projectGnomonicX(tile.tx, tile.ty, tile.tz, inv0);
-            const y0 = projectGnomonicY(tile.tx, tile.ty, tile.tz, inv0);
-            const xL = projectGnomonicX(tile.lx, tile.ly, tile.lz, invL);
-            const yL = projectGnomonicY(tile.lx, tile.ly, tile.lz, invL);
-            const xR = projectGnomonicX(tile.rx, tile.ry, tile.rz, invR);
-            const yR = projectGnomonicY(tile.rx, tile.ry, tile.rz, invR);
-            const xT = projectGnomonicX(tile.topX, tile.topY, tile.topZ, invT);
-            const yT = projectGnomonicY(tile.topX, tile.topY, tile.topZ, invT);
-            const xB = projectGnomonicX(tile.botX, tile.botY, tile.botZ, invB);
-            const yB = projectGnomonicY(tile.botX, tile.botY, tile.botZ, invB);
-
-            const ux = xR - xL;
-            const uy = yR - yL;
-            const vx = xB - xT;
-            const vy = yB - yT;
-            const cx = x0 + 0.22 * (xL + xR + xT + xB - 4.0 * x0);
-            const cy = y0 + 0.22 * (yL + yR + yT + yB - 4.0 * y0);
-
-            ctx.setTransform(ux, uy, vx, vy, cx, cy);
-            ctx.drawImage(sheetImg, tile.u, tile.v, tile.w, tile.h, -0.5, -0.5, 1.0, 1.0);
-            continue;
-        }
-
-        let dRa = tile.ra - spec.ra;
-        if (dRa > 180) dRa -= 360;
-        if (dRa < -180) dRa += 360;
-
-        // Standard astronomical SkyView projection: North is up (-Y), East is left (-X)
-        const dxDeg = -dRa * cosDec;
-        const dyDeg = -(tile.dec - spec.dec);
-
-        const destSize = (tile.fov / spec.fov) * size;
-        const destCx = size * 0.5 + (dxDeg / spec.fov) * size;
-        const destCy = size * 0.5 + (dyDeg / spec.fov) * size;
-
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.drawImage(
-            sheetImg,
-            tile.u + 0.5,
-            tile.v + 0.5,
-            tile.w - 1,
-            tile.h - 1,
-            destCx - destSize * 0.5,
-            destCy - destSize * 0.5,
-            destSize,
-            destSize
-        );
-    }
-
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    drawAtlasFrameToCanvas(canvas, spec.ra, spec.dec, spec.fov, spec.tiles, {
+        size: 512,
+        requestLoad: true,
+        highPriority: true,
+        smoothingQuality: 'high'
+    });
 };
 
 watch(
@@ -870,8 +796,55 @@ const isModified = computed(() => {
     return isFovModified.value;
 });
 
-const updateImage = async () => {
+// --- HIGH-RESOLUTION IMAGE DOWNLOAD SUPPORT ---
+const baseResolution = computed(() => {
+    return Number(props.settings?.image_server?.resolution) || 1024;
+});
+
+const highResTarget = computed(() => {
+    const base = baseResolution.value;
+    if (base < 2048) return 2048;
+    if (base < 3072) return 3072;
+    return 4096;
+});
+
+const currentImageResolution = computed(() => {
+    const explicit = Number(props.object?.image_resolution);
+    if (Number.isFinite(explicit) && explicit >= 64) return explicit;
+    const url = String(props.object?.image_url || '');
+    const match = url.match(/(?:_r|_res)(\d{3,4})(?:_|\/)/);
+    if (match) {
+        const parsed = Number(match[1]);
+        if (Number.isFinite(parsed) && parsed >= 64) return parsed;
+    }
+    return baseResolution.value;
+});
+
+const isHighResLoaded = computed(() => {
+    return Boolean(
+        isHdReady.value &&
+            !isModified.value &&
+            currentImageResolution.value >= highResTarget.value
+    );
+});
+
+const activeFetchingResolution = computed(() => {
+    const dlRes = Number(props.object?.downloading_resolution);
+    if (Number.isFinite(dlRes) && dlRes >= 64) return dlRes;
+    return baseResolution.value;
+});
+
+const isFetchingHighRes = computed(() => {
+    return isFetchingSurvey.value && activeFetchingResolution.value >= highResTarget.value;
+});
+
+const updateImage = async (explicitRes = null) => {
     if (!props.object) return;
+
+    const requestedRes =
+        typeof explicitRes === 'number' && Number.isFinite(explicitRes) && explicitRes >= 64
+            ? Math.min(4096, Math.round(explicitRes))
+            : null;
 
     const targetFov = normalizeImageFov(localFov.value, defaultImageFov.value);
     localFov.value = targetFov;
@@ -881,13 +854,15 @@ const updateImage = async () => {
 
     // If centered on catalog coordinates, use standard object download via App.vue
     if (!isOffCenter) {
-        emit('update-fov', { fov: targetFov });
+        emit('update-fov', { fov: targetFov, resolution: requestedRes });
         return;
     }
 
     const coords = getCurrentCenterCoordinates();
+    const effectiveReqRes = requestedRes || baseResolution.value;
 
     props.object.status = 'downloading';
+    props.object.downloading_resolution = effectiveReqRes;
     emit('update-fov', { fov: targetFov, skipDownload: true });
 
     try {
@@ -898,7 +873,7 @@ const updateImage = async () => {
                 ra: coords.ra,
                 dec: coords.dec,
                 fov: targetFov,
-                resolution: props.settings.image_server?.resolution || 1024,
+                resolution: effectiveReqRes,
                 source: props.settings.image_server?.source || "dss2r",
                 timeout: props.settings.image_server?.timeout || 120
             })
@@ -907,12 +882,15 @@ const updateImage = async () => {
         if (res.ok) {
             const data = await res.json();
             const uniqueUrl = `${data.url}?t=${new Date().getTime()}`;
+            const savedRes = Number(data.resolution) || effectiveReqRes;
 
             props.object.image_url = uniqueUrl;
             props.object.center_ra = coords.ra;
             props.object.center_dec = coords.dec;
             props.object.custom_framed = true;
             props.object.image_fov = data.image_fov || targetFov;
+            props.object.image_resolution = savedRes;
+            delete props.object.downloading_resolution;
             props.object.status = 'cached';
 
             offsetX.value = 0;
@@ -926,17 +904,24 @@ const updateImage = async () => {
                 center_ra: coords.ra,
                 center_dec: coords.dec,
                 image_url: data.url,
+                image_resolution: savedRes,
                 offset_x_pct: 0,
                 offset_y_pct: 0,
                 rotation: rotation.value
             });
         } else {
+            delete props.object.downloading_resolution;
             props.object.status = 'error';
         }
     } catch (e) {
         console.error(e);
+        delete props.object.downloading_resolution;
         props.object.status = 'error';
     }
+};
+
+const downloadHighResImage = () => {
+    updateImage(highResTarget.value);
 };
 
 const ninaStatus = ref("");
@@ -1094,6 +1079,84 @@ onUnmounted(() => {
                 <span>Sky Map</span>
             </button>
 
+            <!-- Top Indeterminate Progress Bar While Fetching Survey -->
+            <div
+                v-if="!showSkyMap && isFetchingSurvey"
+                class="viewport-fetching-bar"
+                role="progressbar"
+                aria-label="Fetching sky survey image"
+            >
+                <div class="viewport-fetching-bar-fill"></div>
+            </div>
+
+            <!-- Prominent Viewport Fetching / Preview Status Banner -->
+            <div
+                v-if="!showSkyMap && object && (isFetchingSurvey || (hasAtlasPreview && !isHdReady) || object.status === 'error')"
+                class="viewport-status-banner"
+                :class="{
+                    'is-fetching': isFetchingSurvey,
+                    'is-highres': isFetchingHighRes,
+                    'is-error': !isFetchingSurvey && object.status === 'error',
+                    'is-preview': !isFetchingSurvey && object.status !== 'error'
+                }"
+            >
+                <template v-if="isFetchingSurvey">
+                    <span class="status-banner-spinner" aria-hidden="true"></span>
+                    <div class="status-banner-copy">
+                        <span class="status-banner-title">
+                            {{
+                                isFetchingHighRes
+                                    ? `Fetching High-Res Survey (${activeFetchingResolution}px)…`
+                                    : `Fetching Full Sky Survey (${activeFetchingResolution}px)…`
+                            }}
+                        </span>
+                        <span v-if="hasAtlasPreview" class="status-banner-sub">
+                            Showing Sky Atlas crop ({{ effectiveDisplayFov.toFixed(2) }}°) · Full image replaces preview automatically
+                        </span>
+                        <span v-else class="status-banner-sub">
+                            Requesting {{ effectiveDisplayFov.toFixed(2) }}° field from survey server…
+                        </span>
+                    </div>
+                </template>
+
+                <template v-else-if="object.status === 'error'">
+                    <span class="status-banner-badge error">!</span>
+                    <div class="status-banner-copy">
+                        <span class="status-banner-title">Survey download failed</span>
+                        <span v-if="hasAtlasPreview" class="status-banner-sub">
+                            Showing Sky Atlas preview ({{ effectiveDisplayFov.toFixed(2) }}°)
+                        </span>
+                    </div>
+                    <button
+                        type="button"
+                        class="status-banner-action"
+                        @click="updateImage()"
+                    >
+                        ↻ Retry
+                    </button>
+                </template>
+
+                <template v-else>
+                    <span class="status-banner-badge preview">PREVIEW</span>
+                    <div class="status-banner-copy">
+                        <span class="status-banner-title">
+                            Sky Atlas Crop ({{ effectiveDisplayFov.toFixed(2) }}°)
+                        </span>
+                        <span class="status-banner-sub">
+                            Instant local preview · Fetch survey for full sharpness
+                        </span>
+                    </div>
+                    <button
+                        type="button"
+                        class="status-banner-action"
+                        @click="updateImage()"
+                        title="Download full-resolution sky survey for this FOV"
+                    >
+                        ↻ Load Survey
+                    </button>
+                </template>
+            </div>
+
             <div
                 v-show="!showSkyMap"
                 class="image-wrapper"
@@ -1107,8 +1170,8 @@ onUnmounted(() => {
                     <canvas
                         v-show="hasAtlasPreview"
                         ref="atlasPreviewCanvasRef"
-                        width="384"
-                        height="384"
+                        width="512"
+                        height="512"
                         class="sky-image sky-atlas-preview-canvas"
                     ></canvas>
                     <img
@@ -1178,24 +1241,7 @@ onUnmounted(() => {
 
                 <div v-if="isObjectDownloading && !hasAtlasPreview" class="download-overlay">
                     <div class="spinner"></div>
-                    <span>Downloading sky survey...</span>
-                </div>
-
-                <div
-                    v-else-if="hasAtlasPreview && !isHdReady"
-                    class="atlas-hd-status-pill"
-                    :class="{ 'is-loading': isObjectDownloading || Boolean(object.image_url) }"
-                >
-                    <span
-                        v-if="isObjectDownloading || Boolean(object.image_url)"
-                        class="atlas-pill-spinner"
-                    ></span>
-                    <span v-if="isObjectDownloading || Boolean(object.image_url)">
-                        Atlas preview · Loading HD survey…
-                    </span>
-                    <span v-else>
-                        Atlas preview (low-res)
-                    </span>
+                    <span>Downloading sky survey ({{ activeFetchingResolution }}px)...</span>
                 </div>
 
                 <!-- Comparison Sensor Rectangles for Other Saved Setups -->
@@ -1263,6 +1309,20 @@ onUnmounted(() => {
                     <span class="osd-lbl">Current View:</span>
                     <strong class="view-val">{{ effectiveDisplayFov.toFixed(2) }}° × {{ effectiveDisplayFov.toFixed(2) }}°</strong>
                 </div>
+                <div class="osd-row" title="Source and pixel resolution of the currently displayed sky image">
+                    <span class="osd-lbl">Image Source:</span>
+                    <strong :class="isHdReady ? (isHighResLoaded ? 'hd-res-val' : 'survey-res-val') : 'preview-res-val'">
+                        {{
+                            isHdReady
+                                ? `Survey ${currentImageResolution}px`
+                                : hasAtlasPreview
+                                    ? 'Atlas Crop Preview'
+                                    : isFetchingSurvey
+                                        ? 'Fetching…'
+                                        : 'None'
+                        }}
+                    </strong>
+                </div>
                 <div v-if="isZoomModified" class="osd-row">
                     <span class="osd-lbl">Canvas Zoom:</span>
                     <strong>{{ zoomLevel.toFixed(1) }}×</strong>
@@ -1303,7 +1363,7 @@ onUnmounted(() => {
                         step="0.05"
                         class="hud-input"
                         @change="onFovInputChange"
-                        @keyup.enter="updateImage"
+                        @keyup.enter="updateImage()"
                     />
                     <button
                         type="button"
@@ -1447,10 +1507,42 @@ onUnmounted(() => {
                         class="hud-btn primary"
                         :class="{ 'modified-warning': isModified }"
                         :disabled="isObjectDownloading"
-                        @click="updateImage"
+                        @click="updateImage()"
                         title="Download new sky survey centered on current sensor rectangle and FOV"
                     >
-                        {{ isObjectDownloading ? 'Fetching...' : (isModified ? '↻ Re-center & Fetch' : '↻ Refresh Image') }}
+                        {{
+                            isObjectDownloading && !isFetchingHighRes
+                                ? 'Fetching...'
+                                : isModified
+                                    ? '↻ Re-center & Fetch'
+                                    : '↻ Refresh Image'
+                        }}
+                    </button>
+
+                    <button
+                        type="button"
+                        class="hud-btn highres-btn"
+                        :class="{
+                            'is-hd-loaded': isHighResLoaded,
+                            'is-hd-fetching': isFetchingHighRes
+                        }"
+                        :disabled="isObjectDownloading"
+                        @click="downloadHighResImage"
+                        :title="
+                            isHighResLoaded
+                                ? `High-resolution ${currentImageResolution}px survey image is active (click to re-fetch)`
+                                : `Download a sharper ${highResTarget}×${highResTarget}px sky survey image for the current view`
+                        "
+                    >
+                        <template v-if="isFetchingHighRes">
+                            ✦ Fetching {{ activeFetchingResolution }}px…
+                        </template>
+                        <template v-else-if="isHighResLoaded">
+                            ✦ HD {{ currentImageResolution }}px ✓
+                        </template>
+                        <template v-else>
+                            ✦ High-Res ({{ highResTarget }}px)
+                        </template>
                     </button>
 
                     <button
@@ -1694,42 +1786,182 @@ onUnmounted(() => {
     opacity: 1;
 }
 
-.atlas-hd-status-pill {
+/* Top Indeterminate Progress Shimmer Bar */
+.viewport-fetching-bar {
     position: absolute;
-    top: 10px;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3.5px;
+    background: rgba(15, 23, 42, 0.75);
+    overflow: hidden;
+    z-index: 120;
+    pointer-events: none;
+}
+
+.viewport-fetching-bar-fill {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 42%;
+    background: linear-gradient(90deg, transparent 0%, #38bdf8 28%, #fbbf24 62%, #34d399 88%, transparent 100%);
+    box-shadow: 0 0 12px rgba(251, 191, 36, 0.75);
+    animation: viewportFetchSlide 1.35s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes viewportFetchSlide {
+    0% {
+        left: -45%;
+    }
+    100% {
+        left: 105%;
+    }
+}
+
+/* Prominent Viewport Fetching / Preview Status Banner */
+.viewport-status-banner {
+    position: absolute;
+    top: 14px;
     left: 50%;
     transform: translateX(-50%);
-    z-index: 22;
+    z-index: 110;
     display: inline-flex;
     align-items: center;
-    gap: 7px;
-    padding: 4px 11px;
-    border-radius: 999px;
-    background: rgba(15, 23, 42, 0.84);
-    backdrop-filter: blur(6px);
-    border: 1px solid rgba(56, 189, 248, 0.45);
-    color: #bae6fd;
-    font-size: 0.72rem;
-    font-weight: 600;
-    letter-spacing: 0.01em;
-    pointer-events: none;
-    white-space: nowrap;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.55);
+    gap: 11px;
+    padding: 8px 16px;
+    border-radius: 10px;
+    background: rgba(10, 16, 30, 0.93);
+    backdrop-filter: blur(10px);
+    border: 1.5px solid rgba(56, 189, 248, 0.65);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.78), 0 0 18px rgba(56, 189, 248, 0.22);
+    max-width: min(560px, calc(100% - 28px));
+    pointer-events: auto;
 }
 
-.atlas-hd-status-pill.is-loading {
-    border-color: rgba(16, 185, 129, 0.55);
-    color: #a7f3d0;
+.viewport-status-banner.is-fetching {
+    border-color: rgba(251, 191, 36, 0.85);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.82), 0 0 22px rgba(245, 158, 11, 0.32);
+    animation: statusBannerPulse 2s ease-in-out infinite;
 }
 
-.atlas-pill-spinner {
-    width: 11px;
-    height: 11px;
+.viewport-status-banner.is-fetching.is-highres {
+    border-color: rgba(168, 85, 247, 0.88);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.82), 0 0 22px rgba(168, 85, 247, 0.36);
+}
+
+.viewport-status-banner.is-error {
+    border-color: rgba(239, 68, 68, 0.82);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.82), 0 0 18px rgba(239, 68, 68, 0.28);
+}
+
+@keyframes statusBannerPulse {
+    0%, 100% {
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.82), 0 0 16px rgba(245, 158, 11, 0.24);
+    }
+    50% {
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.85), 0 0 26px rgba(251, 191, 36, 0.48);
+    }
+}
+
+.status-banner-spinner {
+    width: 18px;
+    height: 18px;
     border-radius: 50%;
-    border: 2px solid rgba(16, 185, 129, 0.28);
-    border-top-color: #34d399;
-    animation: spin 0.85s linear infinite;
+    border: 2.5px solid rgba(251, 191, 36, 0.25);
+    border-top-color: #fbbf24;
+    border-right-color: #38bdf8;
+    animation: spin 0.8s linear infinite;
     flex-shrink: 0;
+}
+
+.viewport-status-banner.is-highres .status-banner-spinner {
+    border-color: rgba(192, 132, 252, 0.25);
+    border-top-color: #e879f9;
+    border-right-color: #38bdf8;
+}
+
+.status-banner-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px 7px;
+    border-radius: 5px;
+    font-size: 0.66rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    flex-shrink: 0;
+}
+
+.status-banner-badge.preview {
+    background: rgba(56, 189, 248, 0.2);
+    border: 1px solid rgba(56, 189, 248, 0.55);
+    color: #7dd3fc;
+}
+
+.status-banner-badge.error {
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border-radius: 50%;
+    background: rgba(239, 68, 68, 0.24);
+    border: 1px solid rgba(239, 68, 68, 0.7);
+    color: #fca5a5;
+    font-size: 0.78rem;
+}
+
+.status-banner-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+}
+
+.status-banner-title {
+    color: #fef3c7;
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    line-height: 1.25;
+}
+
+.viewport-status-banner.is-preview .status-banner-title {
+    color: #e0f2fe;
+}
+
+.viewport-status-banner.is-highres .status-banner-title {
+    color: #f3e8ff;
+}
+
+.viewport-status-banner.is-error .status-banner-title {
+    color: #fecaca;
+}
+
+.status-banner-sub {
+    color: #cbd5e1;
+    font-size: 0.71rem;
+    font-weight: 500;
+    line-height: 1.25;
+}
+
+.status-banner-action {
+    margin: 0 0 0 4px;
+    padding: 4px 10px;
+    height: 26px;
+    border-radius: 6px;
+    border: 1px solid #38bdf8;
+    background: rgba(56, 189, 248, 0.18);
+    color: #e0f2fe;
+    font-size: 0.73rem;
+    font-weight: 700;
+    white-space: nowrap;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.status-banner-action:hover {
+    background: rgba(56, 189, 248, 0.32);
+    border-color: #7dd3fc;
 }
 
 .placeholder-text {
@@ -2093,6 +2325,18 @@ onUnmounted(() => {
     color: #38bdf8;
 }
 
+.osd-overlay strong.survey-res-val {
+    color: #34d399;
+}
+
+.osd-overlay strong.hd-res-val {
+    color: #e879f9;
+}
+
+.osd-overlay strong.preview-res-val {
+    color: #fbbf24;
+}
+
 .hud-optics-badge {
     background: rgba(16, 185, 129, 0.12);
     border: 1px solid rgba(16, 185, 129, 0.35);
@@ -2209,9 +2453,38 @@ onUnmounted(() => {
     background: #374151;
 }
 
+.hud-btn:disabled {
+    opacity: 0.65;
+    cursor: wait;
+}
+
 .hud-btn.primary {
     border-color: #10b981;
     color: #10b981;
+}
+
+.hud-btn.highres-btn {
+    border-color: rgba(168, 85, 247, 0.72);
+    color: #e9d5ff;
+    background: rgba(126, 34, 206, 0.18);
+}
+
+.hud-btn.highres-btn:hover:not(:disabled) {
+    background: rgba(147, 51, 234, 0.32);
+    border-color: #c084fc;
+    color: #faf5ff;
+}
+
+.hud-btn.highres-btn.is-hd-loaded {
+    border-color: #c084fc;
+    color: #f5d0fe;
+    background: rgba(168, 85, 247, 0.28);
+}
+
+.hud-btn.highres-btn.is-hd-fetching {
+    border-color: #e879f9;
+    color: #fae8ff;
+    background: rgba(192, 38, 211, 0.3);
 }
 
 .hud-btn.toggle-active {
@@ -2308,6 +2581,18 @@ onUnmounted(() => {
         font-size: 0.65rem;
         padding: 4px 8px;
         gap: 2px;
+    }
+
+    .viewport-status-banner {
+        top: 44px;
+        max-width: calc(100% - 16px);
+        padding: 5px 10px;
+        gap: 7px;
+        font-size: 0.72rem;
+    }
+
+    .status-banner-sub {
+        display: none;
     }
 
     .osd-title {
