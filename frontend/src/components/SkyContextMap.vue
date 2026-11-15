@@ -14,6 +14,7 @@ import {
 const props = defineProps({
     object: { type: Object, default: null },
     objects: { type: Array, default: () => [] },
+    filteredObjects: { type: Array, default: null },
     settings: { type: Object, default: () => ({}) },
     clientSettings: { type: Object, default: () => ({}) },
     nightTimes: { type: Object, default: () => ({}) },
@@ -163,6 +164,22 @@ const readSavedSkyFrameMode = () => {
 const persistSkyFrameMode = (mode) => {
     try {
         window.localStorage?.setItem(SKY_FRAME_STORAGE_KEY, mode);
+    } catch {
+        // Ignore storage errors
+    }
+};
+
+const SKY_APPLY_FILTERS_STORAGE_KEY = 'sky_observer_sky_apply_filters_v1';
+const readSavedApplyFilters = () => {
+    try {
+        return window.localStorage?.getItem(SKY_APPLY_FILTERS_STORAGE_KEY) === '1';
+    } catch {
+        return false;
+    }
+};
+const persistApplyFilters = (enabled) => {
+    try {
+        window.localStorage?.setItem(SKY_APPLY_FILTERS_STORAGE_KEY, enabled ? '1' : '0');
     } catch {
         // Ignore storage errors
     }
@@ -878,6 +895,34 @@ const showConstellations = ref(true);
 const showGrid = ref(true);
 const showDsos = ref(true);
 const showHorizon = ref(true);
+const applyTargetFilters = ref(readSavedApplyFilters());
+
+const filteredNameSet = computed(() => {
+    const list = Array.isArray(props.filteredObjects) ? props.filteredObjects : props.objects;
+    const set = new Set();
+    if (Array.isArray(list)) {
+        for (let i = 0; i < list.length; i++) {
+            const name = list[i]?.name;
+            if (name) set.add(name);
+        }
+    }
+    return set;
+});
+
+const filteredTargetCount = computed(() => filteredNameSet.value.size);
+
+const toggleApplyTargetFilters = () => {
+    const next = !applyTargetFilters.value;
+    applyTargetFilters.value = next;
+    persistApplyFilters(next);
+    if (next && !showDsos.value) {
+        showDsos.value = true;
+    }
+    if (next && hoveredItem.value && !filteredNameSet.value.has(hoveredItem.value.name)) {
+        hoveredItem.value = null;
+    }
+    scheduleDraw();
+};
 
 // Observer Location, Minimum Altitude & Observation Time State
 const observerLocation = computed(() => {
@@ -3070,7 +3115,12 @@ const drawSkyCanvas = () => {
 
             const photo = skyPhotosList[idx];
 
-            if (!isActiveTarget && buildHitItems && sizePx >= minHitPx) {
+            if (
+                !isActiveTarget &&
+                buildHitItems &&
+                sizePx >= minHitPx &&
+                (!applyTargetFilters.value || filteredNameSet.value.has(photo.name))
+            ) {
                 pushInteractiveItem(
                     'photo',
                     photo.name,
@@ -3363,13 +3413,34 @@ const drawSkyCanvas = () => {
     // 7. Progressive Zoom-Revealed Deep-Sky Objects & Clickable Target Names (FOV-Independent)
     if (showDsos.value && preparedDsos.length > 0) {
         const activeName = props.object?.name || '';
-        const maxMarkers =
-            fov > 55 ? 30 : fov > 32 ? 48 : fov > 18 ? 80 : fov > 9 ? 135 : 220;
+        const filterOnly = applyTargetFilters.value;
+        const allowedNames = filterOnly ? filteredNameSet.value : null;
+        const maxMarkers = filterOnly
+            ? fov > 55
+                ? 48
+                : fov > 32
+                  ? 72
+                  : fov > 18
+                    ? 110
+                    : fov > 9
+                      ? 165
+                      : 240
+            : fov > 55
+              ? 30
+              : fov > 32
+                ? 48
+                : fov > 18
+                  ? 80
+                  : fov > 9
+                    ? 135
+                    : 220;
         const showZoomCommon = fov <= 12;
         visibleDsosCount = 0;
         const dsoTotal = preparedDsos.length;
 
         for (let i = 0; i < dsoTotal; i++) {
+            const d = preparedDsos[i];
+            if (filterOnly && !allowedNames.has(d.name)) continue;
             if (!visPatch[dsoPatchIds[i]]) continue;
 
             const o = i * 4;
@@ -3378,19 +3449,20 @@ const drawSkyCanvas = () => {
             const dz = dsoSoA[o + 2];
             const cosC = dx * cam.Cx + dy * cam.Cy + dz * cam.Cz;
             if (cosC < minPointCos) continue;
-
-            const d = preparedDsos[i];
             if (d.name === activeName) continue;
 
-            // Progressive astronomical reveal by zoom depth (independent of sensor FOV / disk cache)
-            if (fov > 55) {
-                if (!d.isMessier && !d.hasCommon && d.mag > 7.5 && d.maj < 28) continue;
-            } else if (fov > 32) {
-                if (!d.isMessier && !d.hasCommon && d.mag > 8.8 && d.maj < 16) continue;
-            } else if (fov > 18) {
-                if (!d.isMessier && !d.hasCommon && d.mag > 10.6 && d.maj < 8) continue;
-            } else if (fov > 9) {
-                if (!d.isMessier && !d.hasCommon && d.mag > 12.6 && d.maj < 3.5) continue;
+            // Progressive astronomical reveal by zoom depth (bypassed when Apply Filters is active
+            // so even faint/unnamed filtered targets remain visible across wide-field views)
+            if (!filterOnly) {
+                if (fov > 55) {
+                    if (!d.isMessier && !d.hasCommon && d.mag > 7.5 && d.maj < 28) continue;
+                } else if (fov > 32) {
+                    if (!d.isMessier && !d.hasCommon && d.mag > 8.8 && d.maj < 16) continue;
+                } else if (fov > 18) {
+                    if (!d.isMessier && !d.hasCommon && d.mag > 10.6 && d.maj < 8) continue;
+                } else if (fov > 9) {
+                    if (!d.isMessier && !d.hasCommon && d.mag > 12.6 && d.maj < 3.5) continue;
+                }
             }
 
             const fk = (cam.f * 2.0) / (1.0 + cosC);
@@ -4246,6 +4318,8 @@ watch(
         showConstellations.value,
         showGrid.value,
         showDsos.value,
+        applyTargetFilters.value,
+        filteredNameSet.value,
         showHorizon.value,
         observerLocation.value?.lat,
         observerLocation.value?.lon,
@@ -4254,6 +4328,13 @@ watch(
     ([newUrl, newStatus]) => {
         if (newUrl || newStatus === 'cached') {
             upsertLivePhotoFromObject(props.object);
+        }
+        if (
+            applyTargetFilters.value &&
+            hoveredItem.value &&
+            !filteredNameSet.value.has(hoveredItem.value.name)
+        ) {
+            hoveredItem.value = null;
         }
         if (!viewHorizSynced && observerLocation.value) {
             syncHorizFromRaDec(viewRa.value, viewDec.value);
@@ -4428,6 +4509,19 @@ onUnmounted(() => {
                 title="Toggle nearby deep-sky object markers"
             >
                 <span>◎ DSOs</span>
+            </button>
+            <button
+                type="button"
+                class="sky-layer-chip filter-targets-chip"
+                :class="{ active: applyTargetFilters }"
+                @click="toggleApplyTargetFilters"
+                :title="
+                    applyTargetFilters
+                        ? `Showing only the ${filteredTargetCount} targets in your current filtered list · Click to show all catalog DSOs`
+                        : `Restrict Sky Map markers to the ${filteredTargetCount} targets in your current filtered list`
+                "
+            >
+                <span>⧩ Apply Filters ({{ filteredTargetCount }})</span>
             </button>
             <button
                 type="button"
@@ -4801,6 +4895,12 @@ onUnmounted(() => {
     background: rgba(12, 42, 46, 0.95);
     border-color: rgba(45, 212, 191, 0.58);
     color: #ccfbf1;
+}
+
+.sky-layer-chip.filter-targets-chip.active {
+    background: rgba(46, 26, 56, 0.95);
+    border-color: rgba(192, 132, 252, 0.65);
+    color: #f3e8ff;
 }
 
 .sky-zoom-stepper {

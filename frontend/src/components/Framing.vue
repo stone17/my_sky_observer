@@ -19,7 +19,7 @@ import {
     skyAtlasVersion
 } from '../utils/skyAtlas.js';
 
-const props = defineProps(['object', 'objects', 'settings', 'clientSettings', 'nightTimes', 'searchQuery', 'activeFov']);
+const props = defineProps(['object', 'objects', 'filteredObjects', 'settings', 'clientSettings', 'nightTimes', 'searchQuery', 'activeFov']);
 const emit = defineEmits(['update-settings', 'update-client-settings', 'update-search', 'select-object', 'update-fov', 'open-mobile-list', 'update-object-settings']);
 
 // --- PHYSICAL SENSOR & DEFAULT IMAGE FOV CALCULATION (Single Source of Truth) ---
@@ -1054,6 +1054,7 @@ onUnmounted(() => {
                 v-if="showSkyMap && object"
                 :object="object"
                 :objects="objects"
+                :filteredObjects="filteredObjects"
                 :settings="settings"
                 :clientSettings="clientSettings"
                 :nightTimes="nightTimes"

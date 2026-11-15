@@ -1403,6 +1403,7 @@ watch(clientSettings, () => {
                     <Framing
                         :object="selectedObject"
                         :objects="objects"
+                        :filtered-objects="filteredObjectsList"
                         :settings="settings"
                         :clientSettings="clientSettings"
                         :nightTimes="nightTimes"
