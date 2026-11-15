@@ -147,6 +147,26 @@ const wrapRaDeg = (ra) => {
 };
 
 const clampDecDeg = (dec) => Math.max(-89.99, Math.min(89.99, Number(dec)));
+const clampAltDeg = (alt) => Math.max(-89.5, Math.min(89.5, Number(alt)));
+const MS_PER_SIDEREAL_RAD = (86400000.0 * RAD2DEG) / 360.98564736629;
+
+const SKY_FRAME_STORAGE_KEY = 'sky_observer_sky_frame_mode';
+const readSavedSkyFrameMode = () => {
+    try {
+        const saved = window.localStorage?.getItem(SKY_FRAME_STORAGE_KEY);
+        if (saved === 'horizon' || saved === 'sky') return saved;
+    } catch {
+        // Ignore storage errors
+    }
+    return 'sky';
+};
+const persistSkyFrameMode = (mode) => {
+    try {
+        window.localStorage?.setItem(SKY_FRAME_STORAGE_KEY, mode);
+    } catch {
+        // Ignore storage errors
+    }
+};
 
 const angularDistanceDeg = (ra1, dec1, ra2, dec2) => {
     const a1 = ra1 * DEG2RAD;
@@ -434,6 +454,25 @@ const computeAltAzFromRaDec = (raDeg, decDeg, horiz) => {
     const northComp = x * horiz.Nhx + y * horiz.Nhy + z * horiz.Nhz;
     const azDeg = wrapRaDeg(Math.atan2(eastComp, northComp) * RAD2DEG);
     return { altDeg, azDeg };
+};
+
+const computeRaDecFromAltAz = (altDeg, azDeg, horiz) => {
+    const alt = altDeg * DEG2RAD;
+    const az = azDeg * DEG2RAD;
+    const sinAlt = Math.sin(alt);
+    const cosAlt = Math.cos(alt);
+    const sinAz = Math.sin(az);
+    const cosAz = Math.cos(az);
+    const hx = cosAz * horiz.Nhx + sinAz * horiz.Ehx;
+    const hy = cosAz * horiz.Nhy + sinAz * horiz.Ehy;
+    const hz = cosAz * horiz.Nhz;
+    const x = cosAlt * hx + sinAlt * horiz.Zx;
+    const y = cosAlt * hy + sinAlt * horiz.Zy;
+    const z = Math.max(-1.0, Math.min(1.0, cosAlt * hz + sinAlt * horiz.Zz));
+    return {
+        ra: wrapRaDeg(Math.atan2(y, x) * RAD2DEG),
+        dec: clampDecDeg(Math.asin(z) * RAD2DEG)
+    };
 };
 
 const getBvColorIndex = (bv) => {
@@ -872,6 +911,49 @@ const scrubTimeMs = ref(Date.now());
 const dateInputRef = ref(null);
 const effectiveTimeMs = computed(() => (isLiveTime.value ? liveNowMs.value : scrubTimeMs.value));
 
+// Reference Frame Mode: 'sky' (Equatorial RA/Dec fixed) vs 'horizon' (Horizontal Alt-Az fixed)
+const skyFrameMode = ref(readSavedSkyFrameMode());
+if (skyFrameMode.value === 'horizon') {
+    showHorizon.value = true;
+}
+const dragTimeMode = ref(false);
+const isShiftHeld = ref(false);
+const viewAz = ref(180.0);
+const viewAlt = ref(35.0);
+let viewHorizSynced = false;
+
+const isHorizonFixed = computed(
+    () => skyFrameMode.value === 'horizon' && Boolean(observerLocation.value)
+);
+const isTimeDragActive = computed(
+    () => isHorizonFixed.value && (dragTimeMode.value || isShiftHeld.value)
+);
+
+const syncHorizFromRaDec = (
+    raDeg = viewRa.value,
+    decDeg = viewDec.value,
+    timeMs = effectiveTimeMs.value
+) => {
+    const loc = observerLocation.value;
+    if (!loc) return false;
+    const horiz = makeHorizontalBasis(loc.lat, loc.lon, timeMs);
+    const { altDeg, azDeg } = computeAltAzFromRaDec(raDeg, decDeg, horiz);
+    viewAz.value = azDeg;
+    viewAlt.value = clampAltDeg(altDeg);
+    viewHorizSynced = true;
+    return true;
+};
+syncHorizFromRaDec(initialCoords.ra, initialCoords.dec, effectiveTimeMs.value);
+
+const getCurrentCenterRaDec = () => {
+    if (isHorizonFixed.value && observerLocation.value) {
+        const loc = observerLocation.value;
+        const horiz = makeHorizontalBasis(loc.lat, loc.lon, effectiveTimeMs.value);
+        return computeRaDecFromAltAz(viewAlt.value, viewAz.value, horiz);
+    }
+    return { ra: viewRa.value, dec: viewDec.value };
+};
+
 const observingEvening = computed(() => {
     // When tracking live daytime (08:00..11:59), preview upcoming tonight's session on the slider
     if (isLiveTime.value) {
@@ -1138,8 +1220,12 @@ const refreshCanvasRect = () => {
 // Coalesced pointer state & reusable zero-GC per-frame pools
 const isPanning = ref(false);
 let panMoved = false;
+let panDragKind = 'eq'; // 'eq' | 'altaz' | 'time'
 let panStartScreen = { x: 0, y: 0 };
 let panStartSky = { ra: 0, dec: 0 };
+let panStartHoriz = { az: 180.0, alt: 35.0 };
+let panStartTimeMs = 0;
+let panTimeVel = { vx: 1.0, vy: 0.0, denom: 1.0, f: 400.0 };
 let pendingPointer = null; // { px, py, clientX, clientY }
 let pinchStartDist = 0;
 let pinchStartFov = 35.0;
@@ -1254,14 +1340,63 @@ const makeCameraBasis = (centerRaDeg, centerDecDeg, w, h, fovDeg) => {
         Cx: cosD0 * cosA0,
         Cy: cosD0 * sinA0,
         Cz: sinD0,
-        // East tangent vector E
+        // Screen-left tangent vector E (Celestial East)
         Ex: -sinA0,
         Ey: cosA0,
-        // North tangent vector N
+        Ez: 0.0,
+        // Screen-up tangent vector N (Celestial North)
         Nx: -sinD0 * cosA0,
         Ny: -sinD0 * sinA0,
         Nz: cosD0
     };
+};
+
+const makeAltAzCameraBasis = (centerAzDeg, centerAltDeg, horiz, w, h, fovDeg) => {
+    const az = centerAzDeg * DEG2RAD;
+    const alt = clampAltDeg(centerAltDeg) * DEG2RAD;
+    const sinAz = Math.sin(az);
+    const cosAz = Math.cos(az);
+    const sinAlt = Math.sin(alt);
+    const cosAlt = Math.cos(alt);
+    const fovRad = Math.max(0.25, Math.min(125.0, fovDeg)) * DEG2RAD;
+    const f = (Math.max(h, 120) * 0.5) / Math.tan(fovRad * 0.5);
+
+    // Horizontal look unit vector H(az) = cos(az)*Nh + sin(az)*Eh (Ehz = 0)
+    const hx = cosAz * horiz.Nhx + sinAz * horiz.Ehx;
+    const hy = cosAz * horiz.Nhy + sinAz * horiz.Ehy;
+    const hz = cosAz * horiz.Nhz;
+
+    return {
+        f,
+        halfW: w * 0.5,
+        halfH: h * 0.5,
+        // View center unit vector C = cos(alt)*H + sin(alt)*Z
+        Cx: cosAlt * hx + sinAlt * horiz.Zx,
+        Cy: cosAlt * hy + sinAlt * horiz.Zy,
+        Cz: cosAlt * hz + sinAlt * horiz.Zz,
+        // Screen-left tangent vector E = sin(az)*Nh - cos(az)*Eh (strictly orthogonal to Zenith Z)
+        Ex: sinAz * horiz.Nhx - cosAz * horiz.Ehx,
+        Ey: sinAz * horiz.Nhy - cosAz * horiz.Ehy,
+        Ez: sinAz * horiz.Nhz,
+        // Screen-up tangent vector N = -sin(alt)*H + cos(alt)*Z (toward local Zenith)
+        Nx: -sinAlt * hx + cosAlt * horiz.Zx,
+        Ny: -sinAlt * hy + cosAlt * horiz.Zy,
+        Nz: -sinAlt * hz + cosAlt * horiz.Zz
+    };
+};
+
+const getActiveCameraBasis = (
+    w = viewportW.value,
+    h = viewportH.value,
+    fovDeg = mapFovDeg.value,
+    timeMs = effectiveTimeMs.value
+) => {
+    const loc = observerLocation.value;
+    if (isHorizonFixed.value && loc) {
+        const horiz = makeHorizontalBasis(loc.lat, loc.lon, timeMs);
+        return makeAltAzCameraBasis(viewAz.value, viewAlt.value, horiz, w, h, fovDeg);
+    }
+    return makeCameraBasis(viewRa.value, viewDec.value, w, h, fovDeg);
 };
 
 const projectRaDecWithBasis = (raDeg, decDeg, cam) => {
@@ -1276,7 +1411,7 @@ const projectRaDecWithBasis = (raDeg, decDeg, cam) => {
     const k = 2.0 / (1.0 + cosC);
     const fk = cam.f * k;
     return {
-        x: cam.halfW - fk * (x * cam.Ex + y * cam.Ey),
+        x: cam.halfW - fk * (x * cam.Ex + y * cam.Ey + z * cam.Ez),
         y: cam.halfH - fk * (x * cam.Nx + y * cam.Ny + z * cam.Nz),
         k,
         cosC,
@@ -1295,7 +1430,30 @@ const computeLocalNorthAngleWithBasis = (raDeg, decDeg, projPoint, cam) => {
     return Math.atan2(dx, -dy);
 };
 
-const screenToSky = (px, py, centerRaDeg = viewRa.value, centerDecDeg = viewDec.value) => {
+const screenToUnitVec = (px, py, cam = getActiveCameraBasis()) => {
+    const u = -(px - cam.halfW) / cam.f;
+    const v = -(py - cam.halfH) / cam.f;
+    const rhoSq = u * u + v * v;
+    const invDenom = 1.0 / (4.0 + rhoSq);
+    const wC = (4.0 - rhoSq) * invDenom;
+    const wE = 4.0 * u * invDenom;
+    const wN = 4.0 * v * invDenom;
+    const x = wC * cam.Cx + wE * cam.Ex + wN * cam.Nx;
+    const y = wC * cam.Cy + wE * cam.Ey + wN * cam.Ny;
+    const z = Math.max(-1.0, Math.min(1.0, wC * cam.Cz + wE * cam.Ez + wN * cam.Nz));
+    return { x, y, z, cosC: wC };
+};
+
+const screenToSky = (px, py, customCam = null) => {
+    const cam = customCam || getActiveCameraBasis();
+    const p = screenToUnitVec(px, py, cam);
+    return {
+        ra: wrapRaDeg(Math.atan2(p.y, p.x) * RAD2DEG),
+        dec: clampDecDeg(Math.asin(p.z) * RAD2DEG)
+    };
+};
+
+const screenToEquatorialPan = (px, py, centerRaDeg, centerDecDeg) => {
     const w = viewportW.value;
     const h = Math.max(viewportH.value, 120);
     const fovRad = Math.max(0.25, Math.min(125.0, mapFovDeg.value)) * DEG2RAD;
@@ -1322,6 +1480,35 @@ const screenToSky = (px, py, centerRaDeg = viewRa.value, centerDecDeg = viewDec.
     const ra = wrapRaDeg((a0 + da) * RAD2DEG);
 
     return { ra, dec: clampDecDeg(dec) };
+};
+
+const screenToAltAz = (px, py, centerAzDeg = viewAz.value, centerAltDeg = viewAlt.value) => {
+    const w = viewportW.value;
+    const h = Math.max(viewportH.value, 120);
+    const fovRad = Math.max(0.25, Math.min(125.0, mapFovDeg.value)) * DEG2RAD;
+    const f = (h * 0.5) / Math.tan(fovRad * 0.5);
+    const u = -(px - w * 0.5) / f;
+    const v = -(py - viewportH.value * 0.5) / f;
+    const rho = Math.hypot(u, v);
+
+    if (rho < 1e-9) {
+        return { az: wrapRaDeg(centerAzDeg), alt: clampAltDeg(centerAltDeg) };
+    }
+
+    const c = 2.0 * Math.atan(rho * 0.5);
+    const sinC = Math.sin(c);
+    const cosC = Math.cos(c);
+    const alt0 = clampAltDeg(centerAltDeg) * DEG2RAD;
+    const sinAlt0 = Math.sin(alt0);
+    const cosAlt0 = Math.cos(alt0);
+
+    const sinAlt = Math.max(-1.0, Math.min(1.0, cosC * sinAlt0 + (v * sinC * cosAlt0) / rho));
+    const alt = clampAltDeg(Math.asin(sinAlt) * RAD2DEG);
+    // +u is screen LEFT = decreasing Azimuth
+    const dAz = -Math.atan2(u * sinC, rho * cosAlt0 * cosC - v * sinAlt0 * sinC);
+    const az = wrapRaDeg(centerAzDeg + dAz * RAD2DEG);
+
+    return { az, alt };
 };
 
 // --- ULTRA-FAST 3D BOUNDING-SPHERE CONSTELLATION LOOKUP (< 0.02 ms) ---
@@ -1425,13 +1612,80 @@ const updateStatusReadout = (raDeg, decDeg, force = false) => {
     }
 };
 
-// --- OBSERVATION TIME CONTROLS ---
+// --- OBSERVATION TIME & REFERENCE FRAME CONTROLS ---
+const refreshReadoutAfterTimeChange = () => {
+    if (isHorizonFixed.value) {
+        if (pendingPointer && Number.isFinite(pendingPointer.px) && Number.isFinite(pendingPointer.py)) {
+            const pt = screenToSky(pendingPointer.px, pendingPointer.py);
+            updateStatusReadout(pt.ra, pt.dec, true);
+        } else {
+            const ctr = getCurrentCenterRaDec();
+            updateStatusReadout(ctr.ra, ctr.dec, true);
+        }
+    } else {
+        updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
+    }
+};
+
+const setSkyFrameMode = (mode) => {
+    const targetMode = mode === 'horizon' ? 'horizon' : 'sky';
+    if (targetMode === skyFrameMode.value) return;
+
+    if (animFrameId) {
+        cancelAnimationFrame(animFrameId);
+        animFrameId = null;
+    }
+
+    if (targetMode === 'horizon') {
+        if (!observerLocation.value) return;
+        syncHorizFromRaDec(viewRa.value, viewDec.value, effectiveTimeMs.value);
+        showHorizon.value = true;
+        skyFrameMode.value = 'horizon';
+        persistSkyFrameMode('horizon');
+    } else {
+        const ctr = getCurrentCenterRaDec();
+        viewRa.value = ctr.ra;
+        viewDec.value = ctr.dec;
+        dragTimeMode.value = false;
+        skyFrameMode.value = 'sky';
+        persistSkyFrameMode('sky');
+    }
+
+    const ctr = getCurrentCenterRaDec();
+    updateStatusReadout(ctr.ra, ctr.dec, true);
+    scheduleDraw();
+};
+
+const toggleSkyFrameMode = () => {
+    setSkyFrameMode(isHorizonFixed.value ? 'sky' : 'horizon');
+};
+
+const toggleHorizonLayer = () => {
+    if (showHorizon.value) {
+        if (isHorizonFixed.value) {
+            setSkyFrameMode('sky');
+        }
+        showHorizon.value = false;
+    } else {
+        showHorizon.value = true;
+    }
+};
+
+const toggleDragTimeMode = () => {
+    if (!isHorizonFixed.value) {
+        setSkyFrameMode('horizon');
+        dragTimeMode.value = true;
+        return;
+    }
+    dragTimeMode.value = !dragTimeMode.value;
+};
+
 const onTimeSliderInput = (e) => {
     const val = Number(e.target?.value);
     if (!Number.isFinite(val)) return;
     isLiveTime.value = false;
     scrubTimeMs.value = val;
-    updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
+    refreshReadoutAfterTimeChange();
     scheduleDraw();
 };
 
@@ -1439,7 +1693,7 @@ const stepObsTime = (deltaMinutes) => {
     const base = effectiveTimeMs.value;
     isLiveTime.value = false;
     scrubTimeMs.value = base + deltaMinutes * 60 * 1000;
-    updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
+    refreshReadoutAfterTimeChange();
     scheduleDraw();
 };
 
@@ -1448,7 +1702,7 @@ const stepObsDays = (deltaDays) => {
     dt.setDate(dt.getDate() + deltaDays);
     isLiveTime.value = false;
     scrubTimeMs.value = dt.getTime();
-    updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
+    refreshReadoutAfterTimeChange();
     scheduleDraw();
 };
 
@@ -1473,7 +1727,7 @@ const onDateInputChange = (e) => {
 
     isLiveTime.value = false;
     scrubTimeMs.value = next.getTime();
-    updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
+    refreshReadoutAfterTimeChange();
     scheduleDraw();
 };
 
@@ -1501,14 +1755,14 @@ const onDateWheel = (e) => {
 const jumpToTonightMid = () => {
     isLiveTime.value = false;
     scrubTimeMs.value = sessionRange.value.midMs;
-    updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
+    refreshReadoutAfterTimeChange();
     scheduleDraw();
 };
 
 const resetToLiveNow = () => {
     liveNowMs.value = Date.now();
     isLiveTime.value = true;
-    updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
+    refreshReadoutAfterTimeChange();
     scheduleDraw();
 };
 
@@ -1526,7 +1780,7 @@ const drawAltitudeCurveAndGround = (
     lineDash = null
 ) => {
     const zC = cam.Cx * horiz.Zx + cam.Cy * horiz.Zy + cam.Cz * horiz.Zz;
-    const zE = cam.Ex * horiz.Zx + cam.Ey * horiz.Zy;
+    const zE = cam.Ex * horiz.Zx + cam.Ey * horiz.Zy + cam.Ez * horiz.Zz;
     const zN = cam.Nx * horiz.Zx + cam.Ny * horiz.Zy + cam.Nz * horiz.Zz;
 
     const altRad = altDeg * DEG2RAD;
@@ -1668,11 +1922,11 @@ const drawAltitudeCurveAndGround = (
     }
 };
 
-const drawHorizonOverlay = (ctx, cam, w, h, fov, minPointCos, overlapsPlaced) => {
+const drawHorizonOverlay = (ctx, cam, w, h, fov, minPointCos, overlapsPlaced, precomputedHoriz = null) => {
     const loc = observerLocation.value;
-    if (!loc) return;
+    if (!loc && !precomputedHoriz) return;
 
-    const horiz = makeHorizontalBasis(loc.lat, loc.lon, effectiveTimeMs.value);
+    const horiz = precomputedHoriz || makeHorizontalBasis(loc.lat, loc.lon, effectiveTimeMs.value);
 
     // 1. Shaded below-horizon ground veil + soft horizon glow + crisp Alt = 0° curve
     drawAltitudeCurveAndGround(
@@ -1731,7 +1985,7 @@ const drawHorizonOverlay = (ctx, cam, w, h, fov, minPointCos, overlapsPlaced) =>
 
         if (mCosC > minPointCos) {
             const mFk = (cam.f * 2.0) / (1.0 + mCosC);
-            const msx = cam.halfW - mFk * (mx3 * cam.Ex + my3 * cam.Ey);
+            const msx = cam.halfW - mFk * (mx3 * cam.Ex + my3 * cam.Ey + mz3 * cam.Ez);
             const msy = cam.halfH - mFk * (mx3 * cam.Nx + my3 * cam.Ny + mz3 * cam.Nz);
             if (msx > 46 && msx < w - 46 && msy > 34 && msy < h - 42) {
                 const tag = `Min ${Math.round(minAlt)}°`;
@@ -1779,7 +2033,7 @@ const drawHorizonOverlay = (ctx, cam, w, h, fov, minPointCos, overlapsPlaced) =>
         if (cosC < minPointCos) continue;
 
         const fk = (cam.f * 2.0) / (1.0 + cosC);
-        const sx = cam.halfW - fk * (px3 * cam.Ex + py3 * cam.Ey);
+        const sx = cam.halfW - fk * (px3 * cam.Ex + py3 * cam.Ey + pz3 * cam.Ez);
         const sy = cam.halfH - fk * (px3 * cam.Nx + py3 * cam.Ny + pz3 * cam.Nz);
         if (sx < 20 || sx > w - 20 || sy < 24 || sy > h - 34) continue;
 
@@ -1820,7 +2074,7 @@ const drawHorizonOverlay = (ctx, cam, w, h, fov, minPointCos, overlapsPlaced) =>
     const zCosC = horiz.Zx * cam.Cx + horiz.Zy * cam.Cy + horiz.Zz * cam.Cz;
     if (zCosC > minPointCos) {
         const zFk = (cam.f * 2.0) / (1.0 + zCosC);
-        const zsx = cam.halfW - zFk * (horiz.Zx * cam.Ex + horiz.Zy * cam.Ey);
+        const zsx = cam.halfW - zFk * (horiz.Zx * cam.Ex + horiz.Zy * cam.Ey + horiz.Zz * cam.Ez);
         const zsy = cam.halfH - zFk * (horiz.Zx * cam.Nx + horiz.Zy * cam.Ny + horiz.Zz * cam.Nz);
         if (zsx > 36 && zsx < w - 36 && zsy > 30 && zsy < h - 36) {
             ctx.strokeStyle = 'rgba(52, 211, 153, 0.78)';
@@ -2292,7 +2546,8 @@ const ensureImageLoaded = (url, allowQueue = true) => {
 
 const isOffTarget = computed(() => {
     const tgt = getTargetCoords();
-    return angularDistanceDeg(viewRa.value, viewDec.value, tgt.ra, tgt.dec) > 0.35;
+    const ctr = getCurrentCenterRaDec();
+    return angularDistanceDeg(ctr.ra, ctr.dec, tgt.ra, tgt.dec) > 0.35;
 });
 
 // --- FAST 3D POLYLINE HELPER (Zero trig, zero allocations) ---
@@ -2312,7 +2567,7 @@ const traceXYZPolyline = (ctx, xyz, count, cam, maxJumpSq) => {
             continue;
         }
         const fk = (cam.f * 2.0) / (1.0 + cosC);
-        const sx = cam.halfW - fk * (x * cam.Ex + y * cam.Ey);
+        const sx = cam.halfW - fk * (x * cam.Ex + y * cam.Ey + z * cam.Ez);
         const sy = cam.halfH - fk * (x * cam.Nx + y * cam.Ny + z * cam.Nz);
 
         if (!started) {
@@ -2392,9 +2647,24 @@ const drawSkyCanvas = () => {
     ctx.fillRect(0, 0, w, h);
 
     const fov = mapFovDeg.value;
-    const centerRa = viewRa.value;
-    const centerDec = viewDec.value;
-    const cam = makeCameraBasis(centerRa, centerDec, w, h, fov);
+    const loc = observerLocation.value;
+    const horizBasis =
+        loc && (isHorizonFixed.value || showHorizon.value)
+            ? makeHorizontalBasis(loc.lat, loc.lon, effectiveTimeMs.value)
+            : null;
+
+    let cam;
+    let centerRa;
+    let centerDec;
+    if (isHorizonFixed.value && horizBasis) {
+        cam = makeAltAzCameraBasis(viewAz.value, viewAlt.value, horizBasis, w, h, fov);
+        centerRa = wrapRaDeg(Math.atan2(cam.Cy, cam.Cx) * RAD2DEG);
+        centerDec = clampDecDeg(Math.asin(Math.max(-1.0, Math.min(1.0, cam.Cz))) * RAD2DEG);
+    } else {
+        centerRa = viewRa.value;
+        centerDec = viewDec.value;
+        cam = makeCameraBasis(centerRa, centerDec, w, h, fov);
+    }
 
     // Compute exact angular corner radius for tight cone culling
     const cornerRho = Math.hypot(w * 0.5, h * 0.5) / cam.f;
@@ -2447,7 +2717,7 @@ const drawSkyCanvas = () => {
             if (cosC < mwMinCos) continue;
 
             const fk = (cam.f * 2.0) / (1.0 + cosC);
-            const sx = cam.halfW - fk * (x * cam.Ex + y * cam.Ey);
+            const sx = cam.halfW - fk * (x * cam.Ex + y * cam.Ey + z * cam.Ez);
             const sy = cam.halfH - fk * (x * cam.Nx + y * cam.Ny + z * cam.Nz);
             const rPx = mwNodes[i + 3] * fk;
             if (sx + rPx < 0 || sx - rPx > w || sy + rPx < 0 || sy - rPx > h) continue;
@@ -2484,15 +2754,15 @@ const drawSkyCanvas = () => {
                 const fkT = (cam.f * 2.0) / (1.0 + cT);
                 const fkB = (cam.f * 2.0) / (1.0 + cB);
 
-                const x0 = cam.halfW - fk0 * (sec.tx * cam.Ex + sec.ty * cam.Ey);
+                const x0 = cam.halfW - fk0 * (sec.tx * cam.Ex + sec.ty * cam.Ey + sec.tz * cam.Ez);
                 const y0 = cam.halfH - fk0 * (sec.tx * cam.Nx + sec.ty * cam.Ny + sec.tz * cam.Nz);
-                const xL = cam.halfW - fkL * (sec.lx * cam.Ex + sec.ly * cam.Ey);
+                const xL = cam.halfW - fkL * (sec.lx * cam.Ex + sec.ly * cam.Ey + sec.lz * cam.Ez);
                 const yL = cam.halfH - fkL * (sec.lx * cam.Nx + sec.ly * cam.Ny + sec.lz * cam.Nz);
-                const xR = cam.halfW - fkR * (sec.rx * cam.Ex + sec.ry * cam.Ey);
+                const xR = cam.halfW - fkR * (sec.rx * cam.Ex + sec.ry * cam.Ey + sec.rz * cam.Ez);
                 const yR = cam.halfH - fkR * (sec.rx * cam.Nx + sec.ry * cam.Ny + sec.rz * cam.Nz);
-                const xT = cam.halfW - fkT * (sec.topX * cam.Ex + sec.topY * cam.Ey);
+                const xT = cam.halfW - fkT * (sec.topX * cam.Ex + sec.topY * cam.Ey + sec.topZ * cam.Ez);
                 const yT = cam.halfH - fkT * (sec.topX * cam.Nx + sec.topY * cam.Ny + sec.topZ * cam.Nz);
-                const xB = cam.halfW - fkB * (sec.botX * cam.Ex + sec.botY * cam.Ey);
+                const xB = cam.halfW - fkB * (sec.botX * cam.Ex + sec.botY * cam.Ey + sec.botZ * cam.Ez);
                 const yB = cam.halfH - fkB * (sec.botX * cam.Nx + sec.botY * cam.Ny + sec.botZ * cam.Nz);
 
                 const minX = Math.min(xL, xR, xT, xB);
@@ -2607,7 +2877,7 @@ const drawSkyCanvas = () => {
                     const fk = cam.f * k;
                     const sizePx = photo.fov * DEG2RAD * fk;
                     if (sizePx >= 150) {
-                        const u = photo.x * cam.Ex + photo.y * cam.Ey;
+                        const u = photo.x * cam.Ex + photo.y * cam.Ey + photo.z * cam.Ez;
                         const v = photo.x * cam.Nx + photo.y * cam.Ny + photo.z * cam.Nz;
                         const px = cam.halfW - fk * u;
                         const py = cam.halfH - fk * v;
@@ -2626,7 +2896,7 @@ const drawSkyCanvas = () => {
                                 let sinA = 0.0;
                                 if (vz > 1e-8) {
                                     const vDotC = vx * cam.Cx + vy * cam.Cy + vz * cam.Cz;
-                                    const vDotE = vx * cam.Ex + vy * cam.Ey;
+                                    const vDotE = vx * cam.Ex + vy * cam.Ey + vz * cam.Ez;
                                     const vDotN = vx * cam.Nx + vy * cam.Ny + vz * cam.Nz;
                                     const halfKVC = 0.5 * k * vDotC;
                                     const dxN = halfKVC * u - vDotE;
@@ -2784,7 +3054,7 @@ const drawSkyCanvas = () => {
             const sizePx = photoSoA[o + 3] * fk;
             if (sizePx < minRenderPx && !isActiveTarget) return;
 
-            const u = x * cam.Ex + y * cam.Ey;
+            const u = x * cam.Ex + y * cam.Ey + z * cam.Ez;
             const v = x * cam.Nx + y * cam.Ny + z * cam.Nz;
             const px = cam.halfW - fk * u;
             const py = cam.halfH - fk * v;
@@ -2858,7 +3128,7 @@ const drawSkyCanvas = () => {
             let sinA = 0.0;
             if (vz > 1e-8) {
                 const vDotC = vx * cam.Cx + vy * cam.Cy + vz * cam.Cz;
-                const vDotE = vx * cam.Ex + vy * cam.Ey;
+                const vDotE = vx * cam.Ex + vy * cam.Ey + vz * cam.Ez;
                 const vDotN = vx * cam.Nx + vy * cam.Ny + vz * cam.Nz;
                 const halfKVC = 0.5 * k * vDotC;
                 const dxN = halfKVC * u - vDotE;
@@ -2996,7 +3266,7 @@ const drawSkyCanvas = () => {
                 if (cosC < minPointCos) continue;
 
                 const fk = (cam.f * 2.0) / (1.0 + cosC);
-                const sx = cam.halfW - fk * (x * cam.Ex + y * cam.Ey);
+                const sx = cam.halfW - fk * (x * cam.Ex + y * cam.Ey + z * cam.Ez);
                 const sy = cam.halfH - fk * (x * cam.Nx + y * cam.Ny + z * cam.Nz);
                 if (sx < -24 || sx > w + 24 || sy < -24 || sy > h + 24) continue;
 
@@ -3022,7 +3292,7 @@ const drawSkyCanvas = () => {
             if (cosC < minPointCos) continue;
 
             const fk = (cam.f * 2.0) / (1.0 + cosC);
-            const sx = cam.halfW - fk * (x * cam.Ex + y * cam.Ey);
+            const sx = cam.halfW - fk * (x * cam.Ex + y * cam.Ey + z * cam.Ez);
             if (sx < -8 || sx > w + 8) continue;
             const sy = cam.halfH - fk * (x * cam.Nx + y * cam.Ny + z * cam.Nz);
             if (sy < -8 || sy > h + 8) continue;
@@ -3070,7 +3340,7 @@ const drawSkyCanvas = () => {
             if (cosC < minPointCos) continue;
 
             const fk = (cam.f * 2.0) / (1.0 + cosC);
-            const sx = cam.halfW - fk * (x * cam.Ex + y * cam.Ey);
+            const sx = cam.halfW - fk * (x * cam.Ex + y * cam.Ey + z * cam.Ez);
             const sy = cam.halfH - fk * (x * cam.Nx + y * cam.Ny + z * cam.Nz);
             if (sx <= 30 || sx >= w - 65 || sy <= 24 || sy >= h - 30) continue;
 
@@ -3124,7 +3394,7 @@ const drawSkyCanvas = () => {
             }
 
             const fk = (cam.f * 2.0) / (1.0 + cosC);
-            const sx = cam.halfW - fk * (dx * cam.Ex + dy * cam.Ey);
+            const sx = cam.halfW - fk * (dx * cam.Ex + dy * cam.Ey + dz * cam.Ez);
             if (sx < 10 || sx > w - 10) continue;
             const sy = cam.halfH - fk * (dx * cam.Nx + dy * cam.Ny + dz * cam.Nz);
             if (sy < 14 || sy > h - 18) continue;
@@ -3312,7 +3582,7 @@ const drawSkyCanvas = () => {
             if (cosC < minPointCos) continue;
 
             const fk = (cam.f * 2.0) / (1.0 + cosC);
-            const sx = cam.halfW - fk * (c.x * cam.Ex + c.y * cam.Ey);
+            const sx = cam.halfW - fk * (c.x * cam.Ex + c.y * cam.Ey + c.z * cam.Ez);
             const sy = cam.halfH - fk * (c.x * cam.Nx + c.y * cam.Ny + c.z * cam.Nz);
             if (sx < 55 || sx > w - 55 || sy < 36 || sy > h - 36) continue;
 
@@ -3331,8 +3601,8 @@ const drawSkyCanvas = () => {
     }
 
     // 8.5 Local Observer Horizon, Ground Veil, Min-Altitude Ring & Compass Points
-    if (showHorizon.value && observerLocation.value) {
-        drawHorizonOverlay(ctx, cam, w, h, fov, minPointCos, overlapsPlaced);
+    if ((showHorizon.value || isHorizonFixed.value) && observerLocation.value) {
+        drawHorizonOverlay(ctx, cam, w, h, fov, minPointCos, overlapsPlaced, horizBasis);
     }
 
     // 9. Active Target Highlight Ring, Rotated Sensor FOV Frame & Comparison Setups
@@ -3463,6 +3733,50 @@ const centerOnTarget = () => {
     const tgt = getTargetCoords();
     if (animFrameId) cancelAnimationFrame(animFrameId);
 
+    if (isHorizonFixed.value && observerLocation.value) {
+        const loc = observerLocation.value;
+        const horiz = makeHorizontalBasis(loc.lat, loc.lon, effectiveTimeMs.value);
+        const tgtAA = computeAltAzFromRaDec(tgt.ra, tgt.dec, horiz);
+        const targetAz = tgtAA.azDeg;
+        const targetAlt = clampAltDeg(tgtAA.altDeg);
+
+        viewRa.value = tgt.ra;
+        viewDec.value = tgt.dec;
+
+        const startAz = viewAz.value;
+        const startAlt = viewAlt.value;
+        let dAz = targetAz - startAz;
+        if (dAz > 180) dAz -= 360;
+        if (dAz < -180) dAz += 360;
+        const dAlt = targetAlt - startAlt;
+
+        if (Math.hypot(dAz, dAlt) < 0.05) {
+            viewAz.value = targetAz;
+            viewAlt.value = targetAlt;
+            updateStatusReadout(tgt.ra, tgt.dec, true);
+            scheduleDraw();
+            return;
+        }
+
+        const startTime = performance.now();
+        const duration = 240;
+        const step = (now) => {
+            const t = Math.min(1, (now - startTime) / duration);
+            const ease = 1 - Math.pow(1 - t, 3);
+            viewAz.value = wrapRaDeg(startAz + dAz * ease);
+            viewAlt.value = clampAltDeg(startAlt + dAlt * ease);
+            drawSkyCanvas();
+            if (t < 1) {
+                animFrameId = requestAnimationFrame(step);
+            } else {
+                animFrameId = null;
+                updateStatusReadout(tgt.ra, tgt.dec, true);
+            }
+        };
+        animFrameId = requestAnimationFrame(step);
+        return;
+    }
+
     const startRa = viewRa.value;
     const startDec = viewDec.value;
     let dRa = tgt.ra - startRa;
@@ -3473,6 +3787,7 @@ const centerOnTarget = () => {
     if (Math.hypot(dRa, dDec) < 0.05) {
         viewRa.value = tgt.ra;
         viewDec.value = tgt.dec;
+        syncHorizFromRaDec(tgt.ra, tgt.dec);
         updateStatusReadout(tgt.ra, tgt.dec, true);
         scheduleDraw();
         return;
@@ -3490,6 +3805,7 @@ const centerOnTarget = () => {
             animFrameId = requestAnimationFrame(step);
         } else {
             animFrameId = null;
+            syncHorizFromRaDec(viewRa.value, viewDec.value);
             updateStatusReadout(viewRa.value, viewDec.value, true);
         }
     };
@@ -3503,7 +3819,8 @@ const applyZoomFactor = (factor, anchorPx = null, anchorPy = null) => {
 
     if (factor < 1.0 && props.object) {
         const tgt = getTargetCoords();
-        const distToTarget = angularDistanceDeg(viewRa.value, viewDec.value, tgt.ra, tgt.dec);
+        const ctr = getCurrentCenterRaDec();
+        const distToTarget = angularDistanceDeg(ctr.ra, ctr.dec, tgt.ra, tgt.dec);
         const returnThreshold = Math.max((props.baseImageFov || 1.0) * 1.03, 0.28);
         if (
             distToTarget <= Math.max((props.baseImageFov || 1.0) * 1.15, 0.9) &&
@@ -3515,17 +3832,29 @@ const applyZoomFactor = (factor, anchorPx = null, anchorPy = null) => {
     }
 
     if (anchorPx !== null && anchorPy !== null) {
-        const beforeSky = screenToSky(anchorPx, anchorPy);
-        mapFovDeg.value = nextFov;
-        const afterSky = screenToSky(anchorPx, anchorPy);
-        let dRa = beforeSky.ra - afterSky.ra;
-        if (dRa > 180) dRa -= 360;
-        if (dRa < -180) dRa += 360;
-        viewRa.value = wrapRaDeg(viewRa.value + dRa);
-        viewDec.value = clampDecDeg(viewDec.value + (beforeSky.dec - afterSky.dec));
+        if (isHorizonFixed.value) {
+            const beforeAA = screenToAltAz(anchorPx, anchorPy, viewAz.value, viewAlt.value);
+            mapFovDeg.value = nextFov;
+            const afterAA = screenToAltAz(anchorPx, anchorPy, viewAz.value, viewAlt.value);
+            let dAz = beforeAA.az - afterAA.az;
+            if (dAz > 180) dAz -= 360;
+            if (dAz < -180) dAz += 360;
+            viewAz.value = wrapRaDeg(viewAz.value + dAz);
+            viewAlt.value = clampAltDeg(viewAlt.value + (beforeAA.alt - afterAA.alt));
+        } else {
+            const beforeSky = screenToSky(anchorPx, anchorPy);
+            mapFovDeg.value = nextFov;
+            const afterSky = screenToSky(anchorPx, anchorPy);
+            let dRa = beforeSky.ra - afterSky.ra;
+            if (dRa > 180) dRa -= 360;
+            if (dRa < -180) dRa += 360;
+            viewRa.value = wrapRaDeg(viewRa.value + dRa);
+            viewDec.value = clampDecDeg(viewDec.value + (beforeSky.dec - afterSky.dec));
+        }
     } else {
         mapFovDeg.value = nextFov;
-        updateStatusReadout(viewRa.value, viewDec.value);
+        const ctr = getCurrentCenterRaDec();
+        updateStatusReadout(ctr.ra, ctr.dec);
     }
 
     scheduleDraw();
@@ -3572,6 +3901,54 @@ const findHitItem = (px, py) => {
     return best;
 };
 
+const beginPanGesture = (clientX, clientY, forceTimeDrag = false) => {
+    if (animFrameId) {
+        cancelAnimationFrame(animFrameId);
+        animFrameId = null;
+    }
+    refreshCanvasRect();
+    isPanning.value = true;
+    panMoved = false;
+    panStartScreen = { x: clientX, y: clientY };
+
+    if (isHorizonFixed.value && observerLocation.value) {
+        if (forceTimeDrag || dragTimeMode.value) {
+            panDragKind = 'time';
+            panStartTimeMs = effectiveTimeMs.value;
+            const cam = getActiveCameraBasis();
+            const px = canvasRectValid ? clientX - canvasLeft : viewportW.value * 0.5;
+            const py = canvasRectValid ? clientY - canvasTop : viewportH.value * 0.5;
+            const p0 = screenToUnitVec(px, py, cam);
+            const k = 2.0 / Math.max(0.25, 1.0 + p0.cosC);
+            const fk = cam.f * k;
+            const tx = p0.y;
+            const ty = -p0.x;
+            const tDotC = tx * cam.Cx + ty * cam.Cy;
+            const tDotE = tx * cam.Ex + ty * cam.Ey;
+            const tDotN = tx * cam.Nx + ty * cam.Ny;
+            const pDotE = p0.x * cam.Ex + p0.y * cam.Ey + p0.z * cam.Ez;
+            const pDotN = p0.x * cam.Nx + p0.y * cam.Ny + p0.z * cam.Nz;
+            const vx = -fk * (tDotE - 0.5 * k * tDotC * pDotE);
+            const vy = -fk * (tDotN - 0.5 * k * tDotC * pDotN);
+            const vNormSq = vx * vx + vy * vy;
+            const minDenom = 0.18 * cam.f * (0.18 * cam.f);
+            panTimeVel = {
+                vx,
+                vy,
+                denom: Math.max(vNormSq, minDenom),
+                nearPole: vNormSq < 0.06 * cam.f * (0.06 * cam.f),
+                f: cam.f
+            };
+        } else {
+            panDragKind = 'altaz';
+            panStartHoriz = { az: viewAz.value, alt: viewAlt.value };
+        }
+    } else {
+        panDragKind = 'eq';
+        panStartSky = { ra: viewRa.value, dec: viewDec.value };
+    }
+};
+
 const flushPointerFrame = () => {
     pointerRafId = null;
     const ptr = pendingPointer;
@@ -3582,7 +3959,34 @@ const flushPointerFrame = () => {
         const dy = ptr.clientY - panStartScreen.y;
         if (dx * dx + dy * dy > 9) panMoved = true;
 
-        const shiftedSky = screenToSky(
+        if (panDragKind === 'time') {
+            const dThetaRad = panTimeVel.nearPole
+                ? dx / panTimeVel.f
+                : (dx * panTimeVel.vx + dy * panTimeVel.vy) / panTimeVel.denom;
+            isLiveTime.value = false;
+            scrubTimeMs.value = panStartTimeMs + dThetaRad * MS_PER_SIDEREAL_RAD;
+            drawSkyCanvas();
+            const ctr = getCurrentCenterRaDec();
+            updateStatusReadout(ctr.ra, ctr.dec);
+            return;
+        }
+
+        if (panDragKind === 'altaz') {
+            const h = Math.max(viewportH.value, 120);
+            const fovRad = Math.max(0.25, Math.min(125.0, mapFovDeg.value)) * DEG2RAD;
+            const f = (h * 0.5) / Math.tan(fovRad * 0.5);
+            const cosAlt0 = Math.max(0.25, Math.cos(panStartHoriz.alt * DEG2RAD));
+            const dAzRad = -2.0 * Math.atan2(dx, 2.0 * f * cosAlt0);
+            const dAltRad = 2.0 * Math.atan2(dy, 2.0 * f);
+            viewAz.value = wrapRaDeg(panStartHoriz.az + dAzRad * RAD2DEG);
+            viewAlt.value = clampAltDeg(panStartHoriz.alt + dAltRad * RAD2DEG);
+            drawSkyCanvas();
+            const ctr = getCurrentCenterRaDec();
+            updateStatusReadout(ctr.ra, ctr.dec);
+            return;
+        }
+
+        const shiftedSky = screenToEquatorialPan(
             viewportW.value * 0.5 - dx,
             viewportH.value * 0.5 - dy,
             panStartSky.ra,
@@ -3610,18 +4014,14 @@ const flushPointerFrame = () => {
 
 const onMouseDown = (e) => {
     if (e.button !== 0) return;
-    if (animFrameId) {
-        cancelAnimationFrame(animFrameId);
-        animFrameId = null;
-    }
-    refreshCanvasRect();
-    isPanning.value = true;
-    panMoved = false;
-    panStartScreen = { x: e.clientX, y: e.clientY };
-    panStartSky = { ra: viewRa.value, dec: viewDec.value };
+    isShiftHeld.value = Boolean(e.shiftKey);
+    beginPanGesture(e.clientX, e.clientY, Boolean(e.shiftKey));
 };
 
 const onMouseMove = (e) => {
+    if (Boolean(e.shiftKey) !== isShiftHeld.value) {
+        isShiftHeld.value = Boolean(e.shiftKey);
+    }
     if (!canvasRectValid && !refreshCanvasRect()) return;
     pendingPointer = {
         px: e.clientX - canvasLeft,
@@ -3674,6 +4074,7 @@ const handleItemClick = async (item, closeMapAfterSelect = false) => {
     }
     viewRa.value = wrapRaDeg(item.ra);
     viewDec.value = clampDecDeg(item.dec);
+    syncHorizFromRaDec(viewRa.value, viewDec.value);
     updateStatusReadout(viewRa.value, viewDec.value, true);
     scheduleDraw();
 };
@@ -3684,6 +4085,17 @@ const onDoubleClick = (e) => {
     if (hit) {
         handleItemClick({ ...hit }, true);
     }
+};
+
+const finishPanSync = () => {
+    const ctr = getCurrentCenterRaDec();
+    if (isHorizonFixed.value) {
+        viewRa.value = ctr.ra;
+        viewDec.value = ctr.dec;
+    } else {
+        syncHorizFromRaDec(ctr.ra, ctr.dec);
+    }
+    updateStatusReadout(ctr.ra, ctr.dec, true);
 };
 
 const onMouseUp = (e) => {
@@ -3697,17 +4109,25 @@ const onMouseUp = (e) => {
             }
         }
     } else if (wasPanning) {
-        updateStatusReadout(viewRa.value, viewDec.value, true);
+        finishPanSync();
         scheduleDraw();
     }
 };
 
 const onMouseLeave = () => {
+    const wasPanning = isPanning.value;
     isPanning.value = false;
     pendingPointer = null;
-    updateStatusReadout(viewRa.value, viewDec.value, true);
+    if (wasPanning) {
+        finishPanSync();
+    } else {
+        const ctr = getCurrentCenterRaDec();
+        updateStatusReadout(ctr.ra, ctr.dec, true);
+    }
     if (hoveredItem.value) {
         hoveredItem.value = null;
+        scheduleDraw();
+    } else if (wasPanning) {
         scheduleDraw();
     }
 };
@@ -3722,10 +4142,7 @@ const onTouchStart = (e) => {
         pinchStartFov = mapFovDeg.value;
     } else if (e.touches.length === 1) {
         const t = e.touches[0];
-        isPanning.value = true;
-        panMoved = false;
-        panStartScreen = { x: t.clientX, y: t.clientY };
-        panStartSky = { ra: viewRa.value, dec: viewDec.value };
+        beginPanGesture(t.clientX, t.clientY, false);
     }
 };
 
@@ -3741,8 +4158,8 @@ const onTouchMove = (e) => {
     if (isPanning.value && e.touches.length === 1) {
         const t = e.touches[0];
         pendingPointer = {
-            px: 0,
-            py: 0,
+            px: canvasRectValid ? t.clientX - canvasLeft : 0,
+            py: canvasRectValid ? t.clientY - canvasTop : 0,
             clientX: t.clientX,
             clientY: t.clientY
         };
@@ -3755,17 +4172,35 @@ const onTouchMove = (e) => {
 
 const onTouchEnd = (e) => {
     if (e.touches.length === 0) {
+        const wasPanning = isPanning.value;
         isPanning.value = false;
         pinchStartDist = 0;
-        updateStatusReadout(viewRa.value, viewDec.value, true);
+        if (wasPanning) {
+            finishPanSync();
+        } else {
+            const ctr = getCurrentCenterRaDec();
+            updateStatusReadout(ctr.ra, ctr.dec, true);
+        }
         scheduleDraw();
     }
 };
 
 const onKeyDown = (e) => {
-    if (e.key === 'Escape') {
+    if (e.key === 'Shift') {
+        isShiftHeld.value = true;
+    } else if (e.key === 'Escape') {
         emit('close');
     }
+};
+
+const onKeyUp = (e) => {
+    if (e.key === 'Shift') {
+        isShiftHeld.value = false;
+    }
+};
+
+const onWindowBlur = () => {
+    isShiftHeld.value = false;
 };
 
 // --- LIGHTWEIGHT WATCHERS & LIFECYCLE ---
@@ -3792,6 +4227,7 @@ watch(
             const tgt = getTargetCoords();
             viewRa.value = tgt.ra;
             viewDec.value = tgt.dec;
+            syncHorizFromRaDec(tgt.ra, tgt.dec);
             updateStatusReadout(tgt.ra, tgt.dec, true);
             scheduleDraw();
         }
@@ -3819,6 +4255,9 @@ watch(
         if (newUrl || newStatus === 'cached') {
             upsertLivePhotoFromObject(props.object);
         }
+        if (!viewHorizSynced && observerLocation.value) {
+            syncHorizFromRaDec(viewRa.value, viewDec.value);
+        }
         updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
         scheduleDraw();
     }
@@ -3840,14 +4279,16 @@ watch(skyAtlasVersion, () => {
 
 onMounted(async () => {
     window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onWindowBlur);
     window.addEventListener('resize', refreshCanvasRect, { passive: true });
     window.addEventListener('scroll', refreshCanvasRect, { capture: true, passive: true });
 
     liveClockTimer = window.setInterval(() => {
         if (isLiveTime.value) {
             liveNowMs.value = Date.now();
-            updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
-            if (showHorizon.value && observerLocation.value) {
+            refreshReadoutAfterTimeChange();
+            if ((showHorizon.value || isHorizonFixed.value) && observerLocation.value) {
                 scheduleDraw();
             }
         }
@@ -3873,12 +4314,15 @@ onMounted(async () => {
     await loadSkyData();
     isLoadingSky.value = false;
     refreshCanvasRect();
-    updateStatusReadout(viewRa.value, viewDec.value, true);
+    const ctr = getCurrentCenterRaDec();
+    updateStatusReadout(ctr.ra, ctr.dec, true);
     scheduleDraw();
 });
 
 onUnmounted(() => {
     window.removeEventListener('keydown', onKeyDown);
+    window.removeEventListener('keyup', onKeyUp);
+    window.removeEventListener('blur', onWindowBlur);
     window.removeEventListener('resize', refreshCanvasRect);
     window.removeEventListener('scroll', refreshCanvasRect, { capture: true });
     if (liveClockTimer) clearInterval(liveClockTimer);
@@ -3938,10 +4382,24 @@ onUnmounted(() => {
                 type="button"
                 class="sky-layer-chip horizon-chip"
                 :class="{ active: showHorizon }"
-                @click="showHorizon = !showHorizon"
+                @click="toggleHorizonLayer"
                 :title="`Toggle local horizon, cardinal directions & min altitude (${observerLocation.coordsLabel})`"
             >
                 <span>⛰ Horizon</span>
+            </button>
+            <button
+                v-if="observerLocation"
+                type="button"
+                class="sky-layer-chip frame-lock-chip"
+                :class="{ active: isHorizonFixed }"
+                @click="toggleSkyFrameMode"
+                :title="
+                    isHorizonFixed
+                        ? 'Horizon Fixed (Alt-Az): sky moves with time & drags along the level horizon · Click for Sky Fixed (EQ)'
+                        : 'Sky Fixed (Equatorial): horizon moves with time · Click to lock Horizon Fixed (Alt-Az)'
+                "
+            >
+                <span>{{ isHorizonFixed ? '🧭 Horizon Fixed' : '✦ Sky Fixed' }}</span>
             </button>
             <button
                 type="button"
@@ -4034,6 +4492,43 @@ onUnmounted(() => {
             @touchstart.stop
             @wheel.stop
         >
+            <div class="time-frame-row">
+                <div class="frame-mode-seg" role="group" aria-label="Sky reference frame">
+                    <button
+                        type="button"
+                        class="frame-seg-btn"
+                        :class="{ active: !isHorizonFixed }"
+                        @click="setSkyFrameMode('sky')"
+                        title="Sky Fixed (Equatorial, North up): sky stays fixed while the horizon moves with time"
+                    >
+                        ✦ Sky Fixed
+                    </button>
+                    <button
+                        type="button"
+                        class="frame-seg-btn"
+                        :class="{ active: isHorizonFixed }"
+                        @click="setSkyFrameMode('horizon')"
+                        title="Horizon Fixed (Alt-Az, Zenith up): horizon stays fixed & level while the sky moves with time. Drag horizontally to scan along the horizon."
+                    >
+                        ⛰ Horizon Fixed
+                    </button>
+                </div>
+
+                <button
+                    type="button"
+                    class="drag-sky-pill"
+                    :class="{ active: isTimeDragActive }"
+                    @click="toggleDragTimeMode"
+                    :title="
+                        isTimeDragActive
+                            ? 'Drag Sky active: dragging advances/rewinds sky time across the fixed horizon · Click to return to panning along the horizon'
+                            : 'Drag the sky through time across a fixed horizon & compass (or hold Shift + drag in Horizon Fixed mode)'
+                    "
+                >
+                    <span>⟳ Drag Sky</span>
+                </button>
+            </div>
+
             <div class="time-date-row">
                 <div class="date-step-group">
                     <button
@@ -4302,6 +4797,12 @@ onUnmounted(() => {
     color: #d1fae5;
 }
 
+.sky-layer-chip.frame-lock-chip.active {
+    background: rgba(12, 42, 46, 0.95);
+    border-color: rgba(45, 212, 191, 0.58);
+    color: #ccfbf1;
+}
+
 .sky-zoom-stepper {
     display: inline-flex;
     border-radius: 7px;
@@ -4404,8 +4905,95 @@ onUnmounted(() => {
     border: 1px solid rgba(148, 163, 184, 0.26);
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
     z-index: 33;
-    min-width: 288px;
-    max-width: 356px;
+    min-width: 304px;
+    max-width: 368px;
+}
+
+.time-frame-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.frame-mode-seg {
+    display: inline-flex;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+    border-radius: 5px;
+    overflow: hidden;
+    border: 1px solid rgba(148, 163, 184, 0.26);
+    background: rgba(13, 19, 31, 0.94);
+}
+
+.frame-seg-btn {
+    flex: 1;
+    padding: 2.5px 7px;
+    margin: 0;
+    border: none;
+    background: transparent;
+    color: #94a3b8;
+    font-size: 0.68rem;
+    font-weight: 500;
+    line-height: 1.25;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.frame-seg-btn + .frame-seg-btn {
+    border-left: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.frame-seg-btn:hover {
+    color: #e2e8f0;
+    background: rgba(30, 41, 59, 0.72);
+}
+
+.frame-seg-btn.active {
+    background: rgba(14, 48, 66, 0.95);
+    color: #e0f2fe;
+    font-weight: 600;
+}
+
+.frame-seg-btn + .frame-seg-btn.active {
+    background: rgba(9, 48, 40, 0.95);
+    color: #d1fae5;
+}
+
+.drag-sky-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2.5px 7px;
+    margin: 0;
+    border-radius: 5px;
+    border: 1px solid rgba(148, 163, 184, 0.26);
+    background: rgba(16, 24, 38, 0.92);
+    color: #cbd5e1;
+    font-size: 0.68rem;
+    font-weight: 500;
+    line-height: 1.25;
+    white-space: nowrap;
+    flex-shrink: 0;
+    cursor: pointer;
+    transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.drag-sky-pill:hover {
+    background: rgba(28, 39, 58, 0.96);
+    border-color: rgba(148, 163, 184, 0.48);
+    color: #ffffff;
+}
+
+.drag-sky-pill.active {
+    background: rgba(54, 34, 10, 0.95);
+    border-color: rgba(245, 158, 11, 0.68);
+    color: #fde68a;
+    font-weight: 600;
 }
 
 .time-date-row {
