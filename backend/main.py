@@ -1,4 +1,3 @@
-import asyncio
 import os
 import sys
 from typing import Optional
@@ -8,7 +7,7 @@ import httpx
 from astropy.coordinates import SkyCoord
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .astro_utils import AstroCalculator, auto_stretch_image
@@ -43,10 +42,6 @@ from .image_service import (
     save_custom_image_meta,
 )
 from .sky_atlas import (
-    ATLAS_CACHE_SUBDIR,
-    build_sky_atlas,
-    create_atlas_export_zip_bytes,
-    get_sky_atlas_status,
     resolve_active_atlas_dir,
     resolve_safe_dir_file,
 )
@@ -410,62 +405,6 @@ def get_cached_sky_images(setup_hash: str = ""):
 def purge_cache():
     purge_image_cache(CACHE_DIR)
     return {"status": "purged"}
-
-
-@app.get("/api/cache/sky-atlas/status")
-def api_sky_atlas_status():
-    return get_sky_atlas_status(CACHE_DIR)
-
-
-@app.post("/api/cache/sky-atlas/build")
-async def api_build_sky_atlas(from_scratch: bool = False, include_custom: bool = False):
-    settings = load_settings()
-    active_setup_hash = None
-    fallback_fov = 1.0
-    try:
-        telescope = Telescope(**settings.get("telescope", {"focal_length": 400}))
-        camera = Camera(
-            **settings.get("camera", {"sensor_width": 23.5, "sensor_height": 15.6})
-        )
-        fov_info = compute_fov_and_setup(telescope, camera, settings)
-        active_setup_hash = fov_info.get("setup_hash")
-        fallback_fov = float(fov_info.get("default_download_fov") or 1.0)
-    except Exception:
-        pass
-
-    output_dir = os.path.abspath(os.path.join(CACHE_DIR, ATLAS_CACHE_SUBDIR))
-    mirror_dirs = []
-    pub_parent = get_resource_path("frontend/public")
-    if os.path.isdir(pub_parent) and not hasattr(sys, "_MEIPASS"):
-        mirror_dirs.append(os.path.join(pub_parent, "sky_atlas"))
-    dist_parent = get_resource_path("frontend/dist")
-    if os.path.isdir(dist_parent) and not hasattr(sys, "_MEIPASS"):
-        mirror_dirs.append(os.path.join(dist_parent, "sky_atlas"))
-
-    result = await asyncio.to_thread(
-        build_sky_atlas,
-        cache_dir=CACHE_DIR,
-        output_dir=output_dir,
-        mirror_dirs=mirror_dirs,
-        settings=settings,
-        active_setup_hash=active_setup_hash,
-        fallback_fov=fallback_fov,
-        include_custom=include_custom,
-        merge_existing=not from_scratch,
-    )
-    return JSONResponse(content=result)
-
-
-@app.get("/api/cache/sky-atlas/export.zip")
-def api_export_sky_atlas():
-    zip_bytes = create_atlas_export_zip_bytes(CACHE_DIR)
-    if not zip_bytes:
-        raise HTTPException(status_code=404, detail="No Sky Atlas built yet")
-    return Response(
-        content=zip_bytes,
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="sky_atlas.zip"'},
-    )
 
 
 @app.post("/api/fetch-custom-image")

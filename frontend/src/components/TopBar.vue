@@ -1,6 +1,5 @@
 <script setup>
 import { ref, onMounted, onUnmounted, watch, computed } from 'vue';
-import { ensureSkyAtlasLoaded } from '../utils/skyAtlas.js';
 
 const props = defineProps({
     settings: Object,
@@ -17,8 +16,6 @@ const localSettings = ref({});
 const profiles = ref({});
 const presets = ref({ cameras: {} });
 const cacheStatus = ref({ size_mb: 0, count: 0 });
-const atlasStatus = ref({ exists: false, count: 0, sheets: 0, size_mb: 0 });
-const isBuildingAtlas = ref(false);
 const selectedProfileName = ref(null);
 const newProfileName = ref("");
 
@@ -55,26 +52,6 @@ const fetchCacheStatus = async () => {
         const res = await fetch('/api/cache/status');
         if (res.ok) cacheStatus.value = await res.json();
     } catch (e) { console.error(e); }
-    try {
-        const aRes = await fetch('/api/cache/sky-atlas/status');
-        if (aRes.ok) atlasStatus.value = await aRes.json();
-    } catch (e) { console.error(e); }
-};
-
-const buildSkyAtlas = async () => {
-    if (isBuildingAtlas.value) return;
-    isBuildingAtlas.value = true;
-    try {
-        const res = await fetch('/api/cache/sky-atlas/build', { method: 'POST' });
-        if (res.ok) {
-            await fetchCacheStatus();
-            await ensureSkyAtlasLoaded(true);
-        }
-    } catch (e) {
-        console.error(e);
-    } finally {
-        isBuildingAtlas.value = false;
-    }
 };
 
 const availableCatalogs = ref([]);
@@ -532,17 +509,6 @@ const locationDisplay = computed(() => {
                 </div>
                 <div class="info-row">Images: {{ cacheStatus.count }}</div>
                 <div class="info-row">Size: {{ cacheStatus.size_mb }} MB</div>
-                <div class="info-row">
-                    Sky Atlas: {{ atlasStatus.exists ? `${atlasStatus.count} tiles (${atlasStatus.size_mb} MB)` : 'Not built' }}
-                </div>
-                <button
-                    class="full-width primary"
-                    style="margin-top: 6px;"
-                    :disabled="isBuildingAtlas || (cacheStatus.count === 0 && !atlasStatus.exists)"
-                    @click="buildSkyAtlas"
-                >
-                    {{ isBuildingAtlas ? 'Building Atlas...' : '⚡ Build Sky Atlas' }}
-                </button>
                 <hr />
                 <button class="full-width danger" @click="purgeCache">Purge Cache</button>
             </div>

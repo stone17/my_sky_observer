@@ -106,16 +106,15 @@ Settings are automatically stored in `settings_user.yaml`. You can configure:
 
 *Note: All settings should be adjusted directly within the application's UI.*
 
-## 🌌 Building the Pre-Baked Sky Sprite Atlas
+## 🌌 Pre-Baked Sky Survey Sector Map (Developer CLI)
 
-After downloading sky survey cutouts into `image_cache/`, you can pack all cached targets into compact `4096×4096` WebP sprite sheets (`frontend/public/sky_atlas/`) for 60 FPS wide-field Sky Map rendering and instant low-resolution Framing previews:
+To generate or refresh the bundled multi-LOD celestial RA/Dec sky survey map (`frontend/public/sky_atlas/`) from downloaded cutouts in `image_cache/` so users get zero-latency 60 FPS zoomed-out sky rendering and instant Framing previews out of the box:
 
-*   **From the Web UI:** Open the left sidebar → **Images & Cache** → click **⚡ Build / Update Sky Atlas** (and optionally **⬇️ Export Atlas (.zip)** when running inside Docker).
-*   **From the Command Line:**
-    ```bash
-    python scripts/build_sky_atlas.py
-    ```
-    This writes `sky_atlas_0.webp`, `sky_atlas.json`, and `LICENSE-ASSETS.md` into `frontend/public/sky_atlas/`, which can be committed directly to Git so clones get instant sky previews out of the box.
+```bash
+python scripts/build_sky_atlas.py
+```
+
+This composites overlapping cutouts onto seamless `LOD 0` (`12°` wide-sky) and `LOD 1` (`7.5°` detail) spherical sector sheets (`sky_atlas_lod0.webp`, `sky_atlas_*.webp`, `sky_atlas.json`, and `LICENSE-ASSETS.md`) inside `frontend/public/sky_atlas/`.
 
 ## 🤝 Contributing
 

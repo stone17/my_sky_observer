@@ -2,6 +2,9 @@
 import { ref, shallowRef, computed, watch, onMounted, onUnmounted } from 'vue';
 import {
     skyAtlasVersion,
+    skyAtlasSectorMode,
+    skyAtlasLod0Sectors,
+    skyAtlasLod1Sectors,
     skyAtlasItems,
     ensureSkyAtlasLoaded,
     ensureAtlasSheetImage
@@ -1841,6 +1844,27 @@ let dsoSoA = new Float32Array(0);        // [x, y, z, majHalfRad] * M
 let dsoPatchIds = new Uint8Array(0);     // patchId (0..47) * M
 let dsoByNameMap = new Map();
 let objectByNameMap = new Map();
+let denseCachedCatalog = false;
+
+const visibleSectorPool = [];
+let visibleSectorCount = 0;
+const pushVisibleSector = (sec, img, ux, uy, vx, vy, cx, cy) => {
+    let slot = visibleSectorPool[visibleSectorCount];
+    if (!slot) {
+        slot = { sec, img, ux, uy, vx, vy, cx, cy };
+        visibleSectorPool[visibleSectorCount] = slot;
+    } else {
+        slot.sec = sec;
+        slot.img = img;
+        slot.ux = ux;
+        slot.uy = uy;
+        slot.vx = vx;
+        slot.vy = vy;
+        slot.cx = cx;
+        slot.cy = cy;
+    }
+    visibleSectorCount++;
+};
 
 const normalizePhotoKeyName = (name) =>
     String(name || '')
@@ -1904,36 +1928,13 @@ const rebuildSceneIndex = () => {
     }
     objectByNameMap = byName;
 
-    // Step 2: Build unified Sky Photos list (sorted purely by FOV, independent of active target)
+    // Step 2: Build unified Sky Photos list.
+    // When v2 pre-composited spherical Sky Atlas sectors are active, skip indexing all 13k
+    // individual overlapping target tiles; only retain the currently selected active target's
+    // high-res cutout for ultra-close-up (< ~6° FOV) inlay.
     const byKey = new Map();
     const byNorm = new Map();
     const cachedNames = new Set();
-
-    const atlasList = skyAtlasItems.value;
-    for (let i = 0; i < atlasList.length; i++) {
-        const at = atlasList[i];
-        const key = `${at.ra.toFixed(3)}_${at.dec.toFixed(3)}_${at.fov.toFixed(2)}`;
-        const norm = at.normName || normalizePhotoKeyName(at.name);
-        const entry = {
-            name: at.name,
-            commonName: at.commonName || '',
-            ra: at.ra,
-            dec: at.dec,
-            x: at.x,
-            y: at.y,
-            z: at.z,
-            fov: at.fov,
-            url: null,
-            atlasTile: at,
-            refObj: lookupCatalogObject(at.name),
-            isCustom: Boolean(at.isCustom)
-        };
-        byKey.set(key, entry);
-        if (at.name) cachedNames.add(at.name);
-        if (norm && !byNorm.has(norm)) {
-            byNorm.set(norm, entry);
-        }
-    }
 
     const mergeLivePhoto = (name, commonName, ra, dec, fov, url, isCustom) => {
         if (name) cachedNames.add(name);
@@ -1987,43 +1988,71 @@ const rebuildSceneIndex = () => {
         }
     };
 
-    const serverImgs = cachedServerImages.value;
-    for (let i = 0; i < serverImgs.length; i++) {
-        const img = serverImgs[i];
-        if (!img?.url || img.ra === undefined || img.dec === undefined) continue;
-        const cleanUrl = String(img.url).split('?')[0];
-        const ra = Number(img.ra);
-        const dec = Number(img.dec);
-        const fov = Math.max(Number(img.fov) || 1.0, 0.2);
-        if (!Number.isFinite(ra) || !Number.isFinite(dec)) continue;
-        mergeLivePhoto(
-            img.name,
-            img.common_name || '',
-            ra,
-            dec,
-            fov,
-            cleanUrl,
-            Boolean(img.is_custom)
-        );
-    }
+    if (!skyAtlasSectorMode.value) {
+        const atlasList = skyAtlasItems.value;
+        for (let i = 0; i < atlasList.length; i++) {
+            const at = atlasList[i];
+            const key = `${at.ra.toFixed(3)}_${at.dec.toFixed(3)}_${at.fov.toFixed(2)}`;
+            const norm = at.normName || normalizePhotoKeyName(at.name);
+            const entry = {
+                name: at.name,
+                commonName: at.commonName || '',
+                ra: at.ra,
+                dec: at.dec,
+                x: at.x,
+                y: at.y,
+                z: at.z,
+                fov: at.fov,
+                url: null,
+                atlasTile: at,
+                refObj: lookupCatalogObject(at.name),
+                isCustom: Boolean(at.isCustom)
+            };
+            byKey.set(key, entry);
+            if (at.name) cachedNames.add(at.name);
+            if (norm && !byNorm.has(norm)) {
+                byNorm.set(norm, entry);
+            }
+        }
 
-    if (Array.isArray(objs)) {
-        for (let i = 0; i < objs.length; i++) {
-            const o = objs[i];
-            if (!o || o.status !== 'cached' || !o.image_url) continue;
-            const ra = Number(o.center_ra !== undefined ? o.center_ra : o.ra);
-            const dec = Number(o.center_dec !== undefined ? o.center_dec : o.dec);
-            const fov = Math.max(Number(o.image_fov || props.baseImageFov || 1.0), 0.2);
+        const serverImgs = cachedServerImages.value;
+        for (let i = 0; i < serverImgs.length; i++) {
+            const img = serverImgs[i];
+            if (!img?.url || img.ra === undefined || img.dec === undefined) continue;
+            const cleanUrl = String(img.url).split('?')[0];
+            const ra = Number(img.ra);
+            const dec = Number(img.dec);
+            const fov = Math.max(Number(img.fov) || 1.0, 0.2);
             if (!Number.isFinite(ra) || !Number.isFinite(dec)) continue;
             mergeLivePhoto(
-                o.name,
-                o.common_name && o.common_name !== 'N/A' ? o.common_name : '',
+                img.name,
+                img.common_name || '',
                 ra,
                 dec,
                 fov,
-                String(o.image_url),
-                Boolean(o.custom_framed)
+                cleanUrl,
+                Boolean(img.is_custom)
             );
+        }
+
+        if (Array.isArray(objs)) {
+            for (let i = 0; i < objs.length; i++) {
+                const o = objs[i];
+                if (!o || o.status !== 'cached' || !o.image_url) continue;
+                const ra = Number(o.center_ra !== undefined ? o.center_ra : o.ra);
+                const dec = Number(o.center_dec !== undefined ? o.center_dec : o.dec);
+                const fov = Math.max(Number(o.image_fov || props.baseImageFov || 1.0), 0.2);
+                if (!Number.isFinite(ra) || !Number.isFinite(dec)) continue;
+                mergeLivePhoto(
+                    o.name,
+                    o.common_name && o.common_name !== 'N/A' ? o.common_name : '',
+                    ra,
+                    dec,
+                    fov,
+                    String(o.image_url),
+                    Boolean(o.custom_framed)
+                );
+            }
         }
     }
 
@@ -2058,7 +2087,16 @@ const rebuildSceneIndex = () => {
     // Step 3: Build pre-sorted DSO table + contiguous SoA & patch IDs
     const dsoList = [];
     const dsoMap = new Map();
+    let totalCachedDsos = 0;
     if (Array.isArray(objs)) {
+        for (let i = 0; i < objs.length; i++) {
+            const o = objs[i];
+            if (o && (o.status === 'cached' || cachedNames.has(o.name))) {
+                totalCachedDsos++;
+            }
+        }
+        denseCachedCatalog = skyAtlasSectorMode.value || totalCachedDsos > 300;
+
         for (let i = 0; i < objs.length; i++) {
             const obj = objs[i];
             if (!obj || !obj.name) continue;
@@ -2074,6 +2112,7 @@ const rebuildSceneIndex = () => {
             const mag = typeof obj.mag === 'number' && obj.mag < 90 ? obj.mag : 13.5;
             const maj = typeof obj.maj_ax === 'number' ? obj.maj_ax : 0;
             const isCached = obj.status === 'cached' || cachedNames.has(obj.name);
+            const cacheBoost = !denseCachedCatalog && isCached ? 200 : 0;
 
             const entry = {
                 obj,
@@ -2090,7 +2129,7 @@ const rebuildSceneIndex = () => {
                 mag,
                 maj,
                 majHalfRad: (maj / 60.0) * DEG2RAD * 0.5,
-                score: (isCached ? 200 : 0) + (isMessier ? 100 : 0) + Math.min(maj, 60) - mag * 3
+                score: cacheBoost + (isMessier ? 100 : 0) + Math.min(maj, 60) - mag * 3
             };
             dsoList.push(entry);
             dsoMap.set(obj.name, entry);
@@ -2120,6 +2159,12 @@ const rebuildSceneIndex = () => {
 // O(1) incremental live-photo upsert (avoids re-fetching /api/cache/sky-images or rebuilding 7,300 items)
 const upsertLivePhotoFromObject = (obj) => {
     if (!obj || !obj.image_url) return;
+    if (skyAtlasSectorMode.value) {
+        if (obj.name !== props.object?.name) return;
+        photoByKey.clear();
+        photoByNormName.clear();
+        skyPhotosList = [];
+    }
     const ra = Number(obj.center_ra !== undefined ? obj.center_ra : obj.ra);
     const dec = Number(obj.center_dec !== undefined ? obj.center_dec : obj.dec);
     const fov = Math.max(Number(obj.image_fov || props.baseImageFov || 1.0), 0.2);
@@ -2400,6 +2445,167 @@ const drawSkyCanvas = () => {
         ctx.restore();
     }
 
+    // 2.5 Pre-Composited Multi-LOD Spherical Sky Survey Sector Map (Zero Overdraw, Zero Seams)
+    if (showCachedPhotos.value && skyAtlasSectorMode.value) {
+        const collectAndDrawSectors = (sectors, highPriority, drawDirectly) => {
+            let anyMissingSheet = false;
+            const nSec = sectors.length;
+            for (let i = 0; i < nSec; i++) {
+                const sec = sectors[i];
+                if (maxVisRad + sec.radiusRad < Math.PI) {
+                    const thresh = cosVis * sec.cosR - sinVis * sec.sinR;
+                    if (cam.Cx * sec.tx + cam.Cy * sec.ty + cam.Cz * sec.tz < thresh) continue;
+                }
+
+                const c0 = sec.tx * cam.Cx + sec.ty * cam.Cy + sec.tz * cam.Cz;
+                const cL = sec.lx * cam.Cx + sec.ly * cam.Cy + sec.lz * cam.Cz;
+                const cR = sec.rx * cam.Cx + sec.ry * cam.Cy + sec.rz * cam.Cz;
+                const cT = sec.topX * cam.Cx + sec.topY * cam.Cy + sec.topZ * cam.Cz;
+                const cB = sec.botX * cam.Cx + sec.botY * cam.Cy + sec.botZ * cam.Cz;
+                if (c0 <= -0.75 || cL <= -0.75 || cR <= -0.75 || cT <= -0.75 || cB <= -0.75) {
+                    continue;
+                }
+
+                const fk0 = (cam.f * 2.0) / (1.0 + c0);
+                const fkL = (cam.f * 2.0) / (1.0 + cL);
+                const fkR = (cam.f * 2.0) / (1.0 + cR);
+                const fkT = (cam.f * 2.0) / (1.0 + cT);
+                const fkB = (cam.f * 2.0) / (1.0 + cB);
+
+                const x0 = cam.halfW - fk0 * (sec.tx * cam.Ex + sec.ty * cam.Ey);
+                const y0 = cam.halfH - fk0 * (sec.tx * cam.Nx + sec.ty * cam.Ny + sec.tz * cam.Nz);
+                const xL = cam.halfW - fkL * (sec.lx * cam.Ex + sec.ly * cam.Ey);
+                const yL = cam.halfH - fkL * (sec.lx * cam.Nx + sec.ly * cam.Ny + sec.lz * cam.Nz);
+                const xR = cam.halfW - fkR * (sec.rx * cam.Ex + sec.ry * cam.Ey);
+                const yR = cam.halfH - fkR * (sec.rx * cam.Nx + sec.ry * cam.Ny + sec.rz * cam.Nz);
+                const xT = cam.halfW - fkT * (sec.topX * cam.Ex + sec.topY * cam.Ey);
+                const yT = cam.halfH - fkT * (sec.topX * cam.Nx + sec.topY * cam.Ny + sec.topZ * cam.Nz);
+                const xB = cam.halfW - fkB * (sec.botX * cam.Ex + sec.botY * cam.Ey);
+                const yB = cam.halfH - fkB * (sec.botX * cam.Nx + sec.botY * cam.Ny + sec.botZ * cam.Nz);
+
+                const minX = Math.min(xL, xR, xT, xB);
+                const maxX = Math.max(xL, xR, xT, xB);
+                const minY = Math.min(yL, yR, yT, yB);
+                const maxY = Math.max(yL, yR, yT, yB);
+                if (maxX < -16 || minX > w + 16 || maxY < -16 || minY > h + 16) continue;
+
+                const sheetImg = ensureAtlasSheetImage(sec.s, true, highPriority);
+                if (!sheetImg) {
+                    anyMissingSheet = true;
+                    continue;
+                }
+
+                const ux = xR - xL;
+                const uy = yR - yL;
+                const vx = xB - xT;
+                const vy = yB - yT;
+                const cx = x0 + 0.22 * (xL + xR + xT + xB - 4.0 * x0);
+                const cy = y0 + 0.22 * (yL + yR + yT + yB - 4.0 * y0);
+
+                if (drawDirectly) {
+                    ctx.setTransform(dpr * ux, dpr * uy, dpr * vx, dpr * vy, dpr * cx, dpr * cy);
+                    ctx.drawImage(sheetImg, sec.u, sec.v, sec.w, sec.h, -0.5, -0.5, 1.0, 1.0);
+                } else {
+                    pushVisibleSector(sec, sheetImg, ux, uy, vx, vy, cx, cy);
+                }
+            }
+            return anyMissingSheet;
+        };
+
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 1.0;
+
+        const lod0 = skyAtlasLod0Sectors.value;
+        const lod1 = skyAtlasLod1Sectors.value;
+
+        if (fov > 48.0 || lod1.length === 0) {
+            collectAndDrawSectors(lod0, true, true);
+        } else {
+            visibleSectorCount = 0;
+            const missingLod1 = collectAndDrawSectors(lod1, !isPanning.value, false);
+            if (missingLod1 && lod0.length > 0) {
+                collectAndDrawSectors(lod0, true, true);
+            }
+            for (let i = 0; i < visibleSectorCount; i++) {
+                const s = visibleSectorPool[i];
+                ctx.setTransform(
+                    dpr * s.ux,
+                    dpr * s.uy,
+                    dpr * s.vx,
+                    dpr * s.vy,
+                    dpr * s.cx,
+                    dpr * s.cy
+                );
+                ctx.drawImage(s.img, s.sec.u, s.sec.v, s.sec.w, s.sec.h, -0.5, -0.5, 1.0, 1.0);
+            }
+        }
+
+        // Optional close-up HD inlay for the single selected active target when zoomed deep in (< ~7° FOV)
+        if (skyPhotosList.length > 0 && fov <= 10.0) {
+            const photo = skyPhotosList[0];
+            if (photo?.url) {
+                const cosC = photo.x * cam.Cx + photo.y * cam.Cy + photo.z * cam.Cz;
+                if (cosC > 0.2) {
+                    const k = 2.0 / (1.0 + cosC);
+                    const fk = cam.f * k;
+                    const sizePx = photo.fov * DEG2RAD * fk;
+                    if (sizePx >= 150) {
+                        const u = photo.x * cam.Ex + photo.y * cam.Ey;
+                        const v = photo.x * cam.Nx + photo.y * cam.Ny + photo.z * cam.Nz;
+                        const px = cam.halfW - fk * u;
+                        const py = cam.halfH - fk * v;
+                        if (
+                            px + sizePx >= -20 &&
+                            px - sizePx <= w + 20 &&
+                            py + sizePx >= -20 &&
+                            py - sizePx <= h + 20
+                        ) {
+                            const hiResImg = ensureImageLoaded(photo.url, true);
+                            if (hiResImg) {
+                                const vx = -photo.x * photo.z;
+                                const vy = -photo.y * photo.z;
+                                const vz = 1.0 - photo.z * photo.z;
+                                let cosA = 1.0;
+                                let sinA = 0.0;
+                                if (vz > 1e-8) {
+                                    const vDotC = vx * cam.Cx + vy * cam.Cy + vz * cam.Cz;
+                                    const vDotE = vx * cam.Ex + vy * cam.Ey;
+                                    const vDotN = vx * cam.Nx + vy * cam.Ny + vz * cam.Nz;
+                                    const halfKVC = 0.5 * k * vDotC;
+                                    const dxN = halfKVC * u - vDotE;
+                                    const dyN = halfKVC * v - vDotN;
+                                    const len = Math.hypot(dxN, dyN);
+                                    if (len > 1e-9) {
+                                        cosA = -dyN / len;
+                                        sinA = dxN / len;
+                                    }
+                                }
+                                const half = sizePx * 0.5;
+                                ctx.setTransform(
+                                    dpr * cosA,
+                                    dpr * sinA,
+                                    -dpr * sinA,
+                                    dpr * cosA,
+                                    px * dpr,
+                                    py * dpr
+                                );
+                                ctx.fillStyle = 'rgba(5, 9, 18, 0.9)';
+                                ctx.fillRect(-half, -half, sizePx, sizePx);
+                                ctx.globalCompositeOperation = 'screen';
+                                ctx.globalAlpha = 0.92;
+                                ctx.drawImage(hiResImg, -half, -half, sizePx, sizePx);
+                                ctx.globalCompositeOperation = 'source-over';
+                                ctx.globalAlpha = 1.0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
     // 3. Curved Celestial RA/Dec Grid (Precomputed 3D vectors, 0 trig calls)
     if (showGrid.value) {
         const grid = getGridGeometry(fov);
@@ -2479,12 +2685,10 @@ const drawSkyCanvas = () => {
         ctx.stroke();
     }
 
-    // 5. Sky Atlas + Cached Sky Survey Photos Projected at True Celestial Scale
-    // IMPORTANT: Each tile MUST draw its source-over dark backing rect immediately before its
-    // screen-blended image so overlapping DSS2 cutouts attenuate underlying tiles instead of blowing out to white.
+    // 5. Fallback Individual Sky Photos (only used when v2 spherical Sky Atlas sector map is absent)
     const hovered = hoveredItem.value;
     const photoCount = skyPhotosList.length;
-    if (showCachedPhotos.value && photoCount > 0) {
+    if (showCachedPhotos.value && !skyAtlasSectorMode.value && photoCount > 0) {
         const denseCatalogMode = photoCount > 120;
         const minRenderPx = denseCatalogMode ? 3.2 : 2.5;
         const minHitPx = denseCatalogMode ? 4.5 : 3.0;
@@ -2848,8 +3052,9 @@ const drawSkyCanvas = () => {
 
             const d = preparedDsos[i];
             if (d.name === activeName) continue;
-            if (fov > 35 && !d.isMessier && !d.isCached && d.mag > 7.2 && d.maj < 30) continue;
-            if (fov > 16 && !d.isMessier && !d.isCached && d.mag > 9.0 && d.maj < 15) continue;
+            const keepSmallCached = !denseCachedCatalog && d.isCached;
+            if (fov > 35 && !d.isMessier && !keepSmallCached && d.mag > 7.2 && d.maj < 30) continue;
+            if (fov > 16 && !d.isMessier && !keepSmallCached && d.mag > 9.0 && d.maj < 15) continue;
 
             const fk = (cam.f * 2.0) / (1.0 + cosC);
             const sx = cam.halfW - fk * (dx * cam.Ex + dy * cam.Ey);
@@ -3398,7 +3603,7 @@ const onKeyDown = (e) => {
 
 // --- LIGHTWEIGHT WATCHERS & LIFECYCLE ---
 watch(
-    () => [props.objects?.length, skyAtlasItems.value.length],
+    () => [props.objects?.length, skyAtlasItems.value.length, skyAtlasSectorMode.value],
     () => {
         rebuildSceneIndex();
         scheduleDraw();
@@ -3490,8 +3695,10 @@ onMounted(async () => {
         updateDims();
     }
 
-    ensureSkyAtlasLoaded();
-    fetchCachedSkyImages();
+    const hasAtlas = await ensureSkyAtlasLoaded();
+    if (!hasAtlas || !skyAtlasSectorMode.value) {
+        fetchCachedSkyImages();
+    }
     await loadSkyData();
     isLoadingSky.value = false;
     refreshCanvasRect();
@@ -3570,9 +3777,10 @@ onUnmounted(() => {
                 class="sky-layer-chip"
                 :class="{ active: showCachedPhotos }"
                 @click="showCachedPhotos = !showCachedPhotos"
-                title="Project already-downloaded sky survey images at their true celestial coordinates and FOV"
+                title="Toggle pre-composited sky survey map at true celestial coordinates"
             >
-                <span>📷 Photos ({{ skyPhotoCount }})</span>
+                <span v-if="skyAtlasSectorMode">📷 Sky Survey</span>
+                <span v-else>📷 Photos ({{ skyPhotoCount }})</span>
             </button>
             <button
                 type="button"

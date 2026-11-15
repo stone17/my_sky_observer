@@ -16,6 +16,7 @@ import {
     ensureSkyAtlasLoaded,
     ensureAtlasSheetImage,
     findOverlappingAtlasTiles,
+    makeTangentBasis,
     skyAtlasVersion
 } from '../utils/skyAtlas.js';
 
@@ -145,17 +146,64 @@ const renderAtlasPreviewCanvas = () => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    ctx.fillStyle = '#04070f';
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#050912';
     ctx.fillRect(0, 0, size, size);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
 
-    const cosDec = Math.max(Math.cos((spec.dec * Math.PI) / 180.0), 0.01);
+    const deg2rad = Math.PI / 180.0;
+    const cosDec = Math.max(Math.cos(spec.dec * deg2rad), 0.01);
+    const frameBasis = makeTangentBasis(spec.ra, spec.dec);
+    const halfTanFrame = Math.tan(0.5 * Math.min(spec.fov, 130.0) * deg2rad);
+    const invSpanScale = size / (2.0 * Math.max(halfTanFrame, 1e-5));
+
+    const projectGnomonicX = (px, py, pz, invD) =>
+        size * 0.5 - (px * frameBasis.ex + py * frameBasis.ey + pz * frameBasis.ez) * invD * invSpanScale;
+    const projectGnomonicY = (px, py, pz, invD) =>
+        size * 0.5 - (px * frameBasis.nx + py * frameBasis.ny + pz * frameBasis.nz) * invD * invSpanScale;
 
     for (let i = 0; i < spec.tiles.length; i++) {
         const tile = spec.tiles[i];
-        const sheetImg = ensureAtlasSheetImage(tile.s);
+        const sheetImg = ensureAtlasSheetImage(tile.s, true, true);
         if (!sheetImg) continue;
+
+        if (tile.isSector) {
+            const d0 = tile.tx * frameBasis.tx + tile.ty * frameBasis.ty + tile.tz * frameBasis.tz;
+            const dL = tile.lx * frameBasis.tx + tile.ly * frameBasis.ty + tile.lz * frameBasis.tz;
+            const dR = tile.rx * frameBasis.tx + tile.ry * frameBasis.ty + tile.rz * frameBasis.tz;
+            const dT = tile.topX * frameBasis.tx + tile.topY * frameBasis.ty + tile.topZ * frameBasis.tz;
+            const dB = tile.botX * frameBasis.tx + tile.botY * frameBasis.ty + tile.botZ * frameBasis.tz;
+            if (d0 <= 0.05 || dL <= 0.05 || dR <= 0.05 || dT <= 0.05 || dB <= 0.05) continue;
+
+            const inv0 = 1.0 / d0;
+            const invL = 1.0 / dL;
+            const invR = 1.0 / dR;
+            const invT = 1.0 / dT;
+            const invB = 1.0 / dB;
+
+            const x0 = projectGnomonicX(tile.tx, tile.ty, tile.tz, inv0);
+            const y0 = projectGnomonicY(tile.tx, tile.ty, tile.tz, inv0);
+            const xL = projectGnomonicX(tile.lx, tile.ly, tile.lz, invL);
+            const yL = projectGnomonicY(tile.lx, tile.ly, tile.lz, invL);
+            const xR = projectGnomonicX(tile.rx, tile.ry, tile.rz, invR);
+            const yR = projectGnomonicY(tile.rx, tile.ry, tile.rz, invR);
+            const xT = projectGnomonicX(tile.topX, tile.topY, tile.topZ, invT);
+            const yT = projectGnomonicY(tile.topX, tile.topY, tile.topZ, invT);
+            const xB = projectGnomonicX(tile.botX, tile.botY, tile.botZ, invB);
+            const yB = projectGnomonicY(tile.botX, tile.botY, tile.botZ, invB);
+
+            const ux = xR - xL;
+            const uy = yR - yL;
+            const vx = xB - xT;
+            const vy = yB - yT;
+            const cx = x0 + 0.22 * (xL + xR + xT + xB - 4.0 * x0);
+            const cy = y0 + 0.22 * (yL + yR + yT + yB - 4.0 * y0);
+
+            ctx.setTransform(ux, uy, vx, vy, cx, cy);
+            ctx.drawImage(sheetImg, tile.u, tile.v, tile.w, tile.h, -0.5, -0.5, 1.0, 1.0);
+            continue;
+        }
 
         let dRa = tile.ra - spec.ra;
         if (dRa > 180) dRa -= 360;
@@ -169,6 +217,7 @@ const renderAtlasPreviewCanvas = () => {
         const destCx = size * 0.5 + (dxDeg / spec.fov) * size;
         const destCy = size * 0.5 + (dyDeg / spec.fov) * size;
 
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.drawImage(
             sheetImg,
             tile.u + 0.5,
@@ -181,6 +230,8 @@ const renderAtlasPreviewCanvas = () => {
             destSize
         );
     }
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
 };
 
 watch(

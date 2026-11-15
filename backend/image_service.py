@@ -447,6 +447,7 @@ def list_cached_sky_images(
     settings: Optional[dict] = None,
     active_setup_hash: Optional[str] = None,
     fallback_fov: float = 1.0,
+    setup_filter: Optional[str] = None,
 ) -> List[dict]:
     """Scan cache_dir and return all cached sky survey images with celestial RA/Dec/FOV."""
     if not os.path.isdir(cache_dir):
@@ -475,8 +476,9 @@ def list_cached_sky_images(
 
     dedup: Dict[Tuple[str, float], dict] = {}
 
-    for entry in sorted(os.listdir(cache_dir)):
-        if entry == "_sky_atlas":
+    entries_to_scan = [setup_filter] if setup_filter else sorted(os.listdir(cache_dir))
+    for entry in entries_to_scan:
+        if not entry or entry == "_sky_atlas":
             continue
         try:
             setup_dir = resolve_safe_cache_path(cache_dir, entry)
@@ -497,16 +499,19 @@ def list_cached_sky_images(
                 sidecar_meta = None
 
         suffix = f"_{entry}.jpg"
-        for fname in os.listdir(setup_dir):
-            if not _is_cached_image_file(fname):
-                continue
-            try:
-                fpath = resolve_safe_cache_path(cache_dir, entry, fname)
-            except ValueError:
-                continue
-            if not os.path.isfile(fpath):
-                continue
+        try:
+            with os.scandir(setup_dir) as dir_iter:
+                file_names = [
+                    d.name
+                    for d in dir_iter
+                    if _is_cached_image_file(d.name)
+                    and not d.is_symlink()
+                    and d.is_file(follow_symlinks=False)
+                ]
+        except OSError:
+            continue
 
+        for fname in file_names:
             url = f"/cache/{entry}/{fname}"
             if fname.endswith(suffix):
                 san_prefix = fname[: -len(suffix)]
