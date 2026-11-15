@@ -580,6 +580,7 @@ watch(rotation, (newRot) => {
 
 const offsetX = ref(0);
 const offsetY = ref(0);
+const skyMapSensorOverride = ref(null);
 const isDragging = ref(false);
 const dragStart = ref({ x: 0, y: 0 });
 const pinchStartDist = ref(0);
@@ -594,6 +595,7 @@ const zoomLevel = ref(1.0);
 const applySavedObjectState = (objName) => {
     if (!objName) return;
     isRestoringObjectState = true;
+    skyMapSensorOverride.value = null;
     const saved = props.clientSettings?.object_settings?.[objName] || {};
     const savedRot = saved.rotation !== undefined ? Number(saved.rotation) : Number(props.object?.rotation || 0);
     rotation.value = Number.isFinite(savedRot) ? savedRot : 0;
@@ -626,11 +628,66 @@ const onFovInputChange = () => {
 };
 
 const resetFov = () => {
+    skyMapSensorOverride.value = null;
     offsetX.value = 0;
     offsetY.value = 0;
     zoomLevel.value = 1.0;
     localFov.value = defaultImageFov.value;
     emit('update-fov', { fov: defaultImageFov.value, isReset: true });
+};
+
+const onSkyMapUpdateSensorCenter = (coords) => {
+    if (!coords || !props.object) return;
+    const ra = ((Number(coords.ra) % 360) + 360) % 360;
+    const dec = Math.max(-89.99, Math.min(89.99, Number(coords.dec)));
+    if (!Number.isFinite(ra) || !Number.isFinite(dec)) return;
+
+    const centerRa = parseFloat(
+        props.object.center_ra !== undefined ? props.object.center_ra : props.object.ra
+    );
+    const centerDec = parseFloat(
+        props.object.center_dec !== undefined ? props.object.center_dec : props.object.dec
+    );
+    let dRa = ra - centerRa;
+    if (dRa > 180) dRa -= 360;
+    if (dRa < -180) dRa += 360;
+    const dDec = dec - centerDec;
+
+    const baseFov = effectiveDisplayFov.value || localFov.value || 1.0;
+    const cosDec = Math.max(Math.cos((centerDec * Math.PI) / 180), 0.01);
+    const angOffsetX = dRa * cosDec;
+    const angOffsetY = dDec;
+
+    if (
+        wrapperSize.value > 0 &&
+        Math.abs(angOffsetX) <= baseFov * 0.48 &&
+        Math.abs(angOffsetY) <= baseFov * 0.48
+    ) {
+        const degToPx = wrapperSize.value / baseFov;
+        offsetX.value = -angOffsetX * degToPx;
+        offsetY.value = -angOffsetY * degToPx;
+        skyMapSensorOverride.value = null;
+        if (coords.persist && props.object.name) {
+            emitObjectPatch({
+                offset_x_pct: Math.round((offsetX.value / wrapperSize.value) * 10000) / 100,
+                offset_y_pct: Math.round((offsetY.value / wrapperSize.value) * 10000) / 100
+            });
+        }
+    } else {
+        skyMapSensorOverride.value = { ra, dec };
+    }
+};
+
+const onSkyMapResetSensorCenter = () => {
+    skyMapSensorOverride.value = null;
+    offsetX.value = 0;
+    offsetY.value = 0;
+    if (props.object?.name) {
+        emitObjectPatch({
+            offset_x_pct: 0,
+            offset_y_pct: 0
+        });
+    }
 };
 
 const showSkyMap = ref(false);
@@ -685,6 +742,7 @@ const onDrag = (e) => {
     }
 };
 const startDrag = (e) => {
+    skyMapSensorOverride.value = null;
     isDragging.value = true;
     dragStart.value = {
         x: e.clientX - (offsetX.value * zoomLevel.value),
@@ -710,6 +768,7 @@ const getTouchDistance = (t1, t2) => {
 
 const startTouchDrag = (e) => {
     if (e.touches.length === 1) {
+        skyMapSensorOverride.value = null;
         const t = e.touches[0];
         isDragging.value = true;
         dragStart.value = {
@@ -752,6 +811,13 @@ const onViewportTouchMove = (e) => {
 };
 
 const getCurrentCenterCoordinates = () => {
+    if (skyMapSensorOverride.value) {
+        return {
+            ra: skyMapSensorOverride.value.ra,
+            dec: skyMapSensorOverride.value.dec
+        };
+    }
+
     const baseFov = effectiveDisplayFov.value || localFov.value;
     const pxToDeg = baseFov / (wrapperSize.value || 1);
 
@@ -784,6 +850,7 @@ const isFovModified = computed(() => {
 const isCustomFov = computed(() => {
     const currentImgFov = props.object?.image_fov || localFov.value;
     return (
+        Boolean(skyMapSensorOverride.value) ||
         Math.abs(localFov.value - defaultImageFov.value) >= 0.01 ||
         Math.abs(currentImgFov - defaultImageFov.value) >= 0.01 ||
         Boolean(props.object?.custom_framed)
@@ -792,6 +859,7 @@ const isCustomFov = computed(() => {
 
 const isModified = computed(() => {
     if (!props.object) return false;
+    if (skyMapSensorOverride.value) return true;
     if (Math.abs(offsetX.value) > 0.01 || Math.abs(offsetY.value) > 0.01) return true;
     return isFovModified.value;
 });
@@ -849,7 +917,10 @@ const updateImage = async (explicitRes = null) => {
     const targetFov = normalizeImageFov(localFov.value, defaultImageFov.value);
     localFov.value = targetFov;
 
-    const hasOffset = Math.abs(offsetX.value) > 0.01 || Math.abs(offsetY.value) > 0.01;
+    const hasOffset =
+        Boolean(skyMapSensorOverride.value) ||
+        Math.abs(offsetX.value) > 0.01 ||
+        Math.abs(offsetY.value) > 0.01;
     const isOffCenter = hasOffset || Boolean(props.object.custom_framed);
 
     // If centered on catalog coordinates, use standard object download via App.vue
@@ -893,6 +964,7 @@ const updateImage = async (explicitRes = null) => {
             delete props.object.downloading_resolution;
             props.object.status = 'cached';
 
+            skyMapSensorOverride.value = null;
             offsetX.value = 0;
             offsetY.value = 0;
             zoomLevel.value = 1.0;
@@ -1066,6 +1138,8 @@ onUnmounted(() => {
                 :initialMapFov="skyMapInitialFov"
                 @close="closeSkyMap"
                 @select-object="emit('select-object', $event)"
+                @update-sensor-center="onSkyMapUpdateSensorCenter"
+                @reset-sensor-center="onSkyMapResetSensorCenter"
             />
 
             <!-- Top-Left Quick Sky Context Button (in Framing mode) -->
