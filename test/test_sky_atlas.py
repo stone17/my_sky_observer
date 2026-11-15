@@ -119,9 +119,10 @@ def test_build_sky_atlas_sectors_overlap_and_cache_isolation(tmp_path):
     assert len(manifest["lod0"]["sectors"]) == result["lod0_sectors"]
     assert len(manifest["lod1"]["sectors"]) == result["lod1_sectors"]
     assert len(manifest["lod2"]["sectors"]) == result["lod2_sectors"]
-    assert len(manifest["targets"]) == 3
-    target_names = {entry[0] for entry in manifest["targets"]}
-    assert target_names == {"M 42", "M 43", "M 31"}
+    assert "targets" not in manifest
+    assert "lods" not in manifest
+    sample_sec = manifest["lod0"]["sectors"][0]
+    assert isinstance(sample_sec, list) and len(sample_sec) == 6
 
     # Verify _sky_atlas directory is excluded from raw JPEG cache count & purge
     status_before = get_cache_status_info(str(cache_dir), setup_hash=setup_hash)

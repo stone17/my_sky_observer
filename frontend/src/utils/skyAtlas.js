@@ -16,10 +16,79 @@ export const skyAtlasMeta = shallowRef({
     generatedAt: ''
 });
 export const skyAtlasItems = shallowRef([]);
-export const skyAtlasTargets = shallowRef([]);
 export const skyAtlasLod0Sectors = shallowRef([]);
 export const skyAtlasLod1Sectors = shallowRef([]);
 export const skyAtlasLod2Sectors = shallowRef([]);
+
+// 48-patch spherical bounding-cone partition (6 Dec bands x 8 RA sectors) for O(1) LOD sector culling
+const PATCH_DEC_BINS = 6;
+const PATCH_RA_BINS = 8;
+const PATCH_COUNT = PATCH_DEC_BINS * PATCH_RA_BINS;
+const patchCx = new Float64Array(PATCH_COUNT);
+const patchCy = new Float64Array(PATCH_COUNT);
+const patchCz = new Float64Array(PATCH_COUNT);
+const patchRadius = new Float64Array(PATCH_COUNT);
+const patchCosR = new Float64Array(PATCH_COUNT);
+const patchSinR = new Float64Array(PATCH_COUNT);
+
+(() => {
+    const SAMPLES = 12;
+    for (let dBin = 0; dBin < PATCH_DEC_BINS; dBin++) {
+        const decMin = -90.0 + dBin * 30.0;
+        const decMax = decMin + 30.0;
+        for (let rBin = 0; rBin < PATCH_RA_BINS; rBin++) {
+            const raMin = rBin * 45.0;
+            const raMax = raMin + 45.0;
+            const pid = dBin * PATCH_RA_BINS + rBin;
+
+            let sx = 0;
+            let sy = 0;
+            let sz = 0;
+            for (let di = 0; di <= SAMPLES; di++) {
+                const d = (decMin + ((decMax - decMin) * di) / SAMPLES) * DEG2RAD;
+                const cd = Math.cos(d);
+                const sd = Math.sin(d);
+                for (let ri = 0; ri <= SAMPLES; ri++) {
+                    const a = (raMin + ((raMax - raMin) * ri) / SAMPLES) * DEG2RAD;
+                    sx += cd * Math.cos(a);
+                    sy += cd * Math.sin(a);
+                    sz += sd;
+                }
+            }
+            const len = Math.hypot(sx, sy, sz) || 1.0;
+            const cx = sx / len;
+            const cy = sy / len;
+            const cz = sz / len;
+
+            let minDot = 1.0;
+            for (let di = 0; di <= SAMPLES; di++) {
+                const d = (decMin + ((decMax - decMin) * di) / SAMPLES) * DEG2RAD;
+                const cd = Math.cos(d);
+                const sd = Math.sin(d);
+                for (let ri = 0; ri <= SAMPLES; ri++) {
+                    if (di > 0 && di < SAMPLES && ri > 0 && ri < SAMPLES) continue;
+                    const a = (raMin + ((raMax - raMin) * ri) / SAMPLES) * DEG2RAD;
+                    const dot = cx * cd * Math.cos(a) + cy * cd * Math.sin(a) + cz * sd;
+                    if (dot < minDot) minDot = dot;
+                }
+            }
+            const rad = Math.min(Math.PI, Math.acos(Math.max(-1.0, Math.min(1.0, minDot))) + 0.065);
+            patchCx[pid] = cx;
+            patchCy[pid] = cy;
+            patchCz[pid] = cz;
+            patchRadius[pid] = rad;
+            patchCosR[pid] = Math.cos(rad);
+            patchSinR[pid] = Math.sin(rad);
+        }
+    }
+})();
+
+const getSkyPatchId = (raDeg, decDeg) => {
+    const r = ((raDeg % 360) + 360) % 360;
+    const dBin = Math.max(0, Math.min(PATCH_DEC_BINS - 1, Math.floor((decDeg + 90.0) / 30.0)));
+    const rBin = Math.max(0, Math.min(PATCH_RA_BINS - 1, Math.floor(r / 45.0)));
+    return dBin * PATCH_RA_BINS + rBin;
+};
 
 let loadPromise = null;
 let sheetMetaByIndex = new Map();
@@ -245,15 +314,46 @@ const enqueueSheetDecode = (sheetIndex, highPriority = false) => {
 
 const prepareSectorList = (rawSectors, defaultTileSize, lodLevel, validSheets) => {
     const out = [];
+    const byPatch = Array.from({ length: PATCH_COUNT }, () => []);
+    out.byPatch = byPatch;
+    let maxRadiusRad = 0.0;
+    out.maxRadiusRad = 0.0;
     if (!Array.isArray(rawSectors)) return out;
 
     for (let i = 0; i < rawSectors.length; i++) {
         const sc = rawSectors[i];
-        if (!sc || sc.ra === undefined || sc.dec === undefined) continue;
-        const ra = Number(sc.ra);
-        const dec = Number(sc.dec);
-        const span = Number(sc.span);
-        const s = Number(sc.s);
+        if (!sc) continue;
+
+        let ra;
+        let dec;
+        let span;
+        let s;
+        let u;
+        let v;
+        let w;
+        let h;
+
+        if (Array.isArray(sc)) {
+            ra = Number(sc[0]);
+            dec = Number(sc[1]);
+            span = Number(sc[2]);
+            s = Number(sc[3]);
+            u = Number(sc[4]) || 0;
+            v = Number(sc[5]) || 0;
+            w = Number(sc[6]) || defaultTileSize;
+            h = Number(sc[7]) || defaultTileSize;
+        } else {
+            if (sc.ra === undefined || sc.dec === undefined) continue;
+            ra = Number(sc.ra);
+            dec = Number(sc.dec);
+            span = Number(sc.span);
+            s = Number(sc.s);
+            u = Number(sc.u) || 0;
+            v = Number(sc.v) || 0;
+            w = Number(sc.w) || defaultTileSize;
+            h = Number(sc.h) || defaultTileSize;
+        }
+
         if (!Number.isFinite(ra) || !Number.isFinite(dec) || !Number.isFinite(span) || span <= 0) {
             continue;
         }
@@ -263,10 +363,13 @@ const prepareSectorList = (rawSectors, defaultTileSize, lodLevel, validSheets) =
         const basis = makeTangentBasis(ra, dec);
         const invEdgeLen = 1.0 / Math.sqrt(1.0 + halfTan * halfTan);
         const radiusRad = Math.atan(Math.SQRT2 * halfTan);
+        if (radiusRad > maxRadiusRad) maxRadiusRad = radiusRad;
+        const patchId = getSkyPatchId(ra, dec);
 
-        out.push({
+        const rec = {
             isSector: true,
             lod: lodLevel,
+            patchId,
             ra,
             dec,
             span,
@@ -294,56 +397,15 @@ const prepareSectorList = (rawSectors, defaultTileSize, lodLevel, validSheets) =
             cosR: Math.cos(radiusRad),
             sinR: Math.sin(radiusRad),
             s,
-            u: Number(sc.u) || 0,
-            v: Number(sc.v) || 0,
-            w: Number(sc.w) || defaultTileSize,
-            h: Number(sc.h) || defaultTileSize
-        });
+            u,
+            v,
+            w,
+            h
+        };
+        out.push(rec);
+        byPatch[patchId].push(rec);
     }
-    return out;
-};
-
-const prepareTargetsList = (rawTargets) => {
-    const out = [];
-    if (!Array.isArray(rawTargets)) return out;
-
-    for (let i = 0; i < rawTargets.length; i++) {
-        const row = rawTargets[i];
-        if (!row) continue;
-        if (Array.isArray(row)) {
-            const name = String(row[0] || '');
-            const commonName = String(row[1] || '');
-            const ra = Number(row[2]);
-            const dec = Number(row[3]);
-            const fov = Math.max(Number(row[4]) || 1.0, 0.2);
-            if (!name || !Number.isFinite(ra) || !Number.isFinite(dec)) continue;
-            out.push({
-                name,
-                normName: normalizeTargetKey(name),
-                commonName,
-                ra,
-                dec,
-                fov,
-                isCustom: Boolean(row[5])
-            });
-        } else if (typeof row === 'object') {
-            const name = String(row.name || '');
-            const commonName = String(row.common || row.commonName || '');
-            const ra = Number(row.ra);
-            const dec = Number(row.dec);
-            const fov = Math.max(Number(row.fov) || 1.0, 0.2);
-            if (!name || !Number.isFinite(ra) || !Number.isFinite(dec)) continue;
-            out.push({
-                name,
-                normName: normalizeTargetKey(name),
-                commonName,
-                ra,
-                dec,
-                fov,
-                isCustom: Boolean(row.custom || row.isCustom)
-            });
-        }
-    }
+    out.maxRadiusRad = maxRadiusRad;
     return out;
 };
 
@@ -357,7 +419,6 @@ const resetState = () => {
     itemByNormName = new Map();
     decBuckets = new Map();
     skyAtlasItems.value = [];
-    skyAtlasTargets.value = [];
     skyAtlasLod0Sectors.value = [];
     skyAtlasLod1Sectors.value = [];
     skyAtlasLod2Sectors.value = [];
@@ -416,12 +477,10 @@ const indexManifest = (data) => {
         const lod0Sectors = prepareSectorList(lod0Node?.sectors, lod0TileSize, 0, nextSheets);
         const lod1Sectors = prepareSectorList(lod1Node?.sectors, lod1TileSize, 1, nextSheets);
         const lod2Sectors = prepareSectorList(lod2Node?.sectors, lod2TileSize, 2, nextSheets);
-        const parsedTargets = prepareTargetsList(data?.targets);
 
         const hasAny = lod0Sectors.length > 0 || lod1Sectors.length > 0 || lod2Sectors.length > 0;
         const sourceCount =
             Number(data?.source_count) ||
-            parsedTargets.length ||
             lod2Sectors.length ||
             lod1Sectors.length ||
             lod0Sectors.length;
@@ -429,7 +488,6 @@ const indexManifest = (data) => {
         itemByNormName = new Map();
         decBuckets = new Map();
         skyAtlasItems.value = [];
-        skyAtlasTargets.value = parsedTargets;
         skyAtlasLod0Sectors.value = lod0Sectors;
         skyAtlasLod1Sectors.value = lod1Sectors;
         skyAtlasLod2Sectors.value = lod2Sectors;
@@ -439,7 +497,6 @@ const indexManifest = (data) => {
             version: Number(data?.version) || (lod2Sectors.length > 0 ? 3 : 2),
             mode: 'sectors',
             count: sourceCount,
-            targetCount: parsedTargets.length,
             lod0Count: lod0Sectors.length,
             lod1Count: lod1Sectors.length,
             lod2Count: lod2Sectors.length,
@@ -518,7 +575,6 @@ const indexManifest = (data) => {
 
     itemByNormName = nextByName;
     decBuckets = nextBuckets;
-    skyAtlasTargets.value = [];
     skyAtlasLod0Sectors.value = [];
     skyAtlasLod1Sectors.value = [];
     skyAtlasLod2Sectors.value = [];
@@ -656,6 +712,36 @@ const collectOverlappingSectors = (sectors, fx, fy, fz, frameRad, cosF, sinF, re
     const allHits = [];
     const readyHits = [];
     let anyPending = false;
+
+    const byPatch = sectors.byPatch;
+    if (byPatch && sectors.length > 300) {
+        const coneLimit = Math.min(Math.PI, frameRad + (sectors.maxRadiusRad || 0.14));
+        const cosCone = Math.cos(coneLimit);
+        const sinCone = Math.sin(coneLimit);
+        for (let p = 0; p < PATCH_COUNT; p++) {
+            const bucket = byPatch[p];
+            if (bucket.length === 0) continue;
+            if (coneLimit + patchRadius[p] < Math.PI) {
+                const pThresh = cosCone * patchCosR[p] - sinCone * patchSinR[p];
+                if (fx * patchCx[p] + fy * patchCy[p] + fz * patchCz[p] < pThresh) continue;
+            }
+            for (let i = 0; i < bucket.length; i++) {
+                const sec = bucket[i];
+                if (frameRad + sec.radiusRad < Math.PI) {
+                    const thresh = cosF * sec.cosR - sinF * sec.sinR;
+                    if (fx * sec.tx + fy * sec.ty + fz * sec.tz < thresh) continue;
+                }
+                allHits.push(sec);
+                const ready = ensureAtlasSheetImage(sec.s, requestLoad, highPriority);
+                if (ready) {
+                    readyHits.push(sec);
+                } else {
+                    anyPending = true;
+                }
+            }
+        }
+        return { allHits, readyHits, anyPending };
+    }
 
     for (let i = 0; i < sectors.length; i++) {
         const sec = sectors[i];

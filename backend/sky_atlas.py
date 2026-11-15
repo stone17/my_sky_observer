@@ -654,16 +654,14 @@ def _pack_sectors_into_sheets(
                 pass
 
             sector_manifest_entries.append(
-                {
-                    "ra": round(float(sec["ra0"]), 5),
-                    "dec": round(float(sec["dec0"]), 5),
-                    "span": round(float(sec["span_deg"]), 5),
-                    "s": global_s,
-                    "u": u,
-                    "v": v,
-                    "w": tile_px,
-                    "h": tile_px,
-                }
+                [
+                    round(float(sec["ra0"]), 4),
+                    round(float(sec["dec0"]), 4),
+                    round(float(sec["span_deg"]), 4),
+                    global_s,
+                    u,
+                    v,
+                ]
             )
 
         sheet_jobs.append((global_s, sheet_filename, sheet_im, len(batch)))
@@ -878,9 +876,8 @@ def build_sky_atlas(
         if prev is None or _candidate_rank(item) > _candidate_rank(prev[0]):
             best_by_key[dedup_key] = (item, filepath)
 
-    # Prepare geometric metadata for all unique cached cutouts + compact hit-test target footprints
+    # Prepare geometric metadata for all unique cached cutouts
     cutout_metas: List[dict] = []
-    manifest_targets: List[list] = []
     for k in sorted(best_by_key.keys()):
         item, fpath = best_by_key[k]
         ra = float(item["ra"]) % 360.0
@@ -903,21 +900,6 @@ def build_sky_atlas(
                 "detail_weight": detail_weight,
             }
         )
-
-        raw_name = str(item.get("name") or "").strip()
-        raw_common = str(item.get("common_name") or "").strip()
-        if raw_common in ("N/A", raw_name):
-            raw_common = ""
-        target_row: list = [
-            raw_name,
-            raw_common,
-            round(ra, 4),
-            round(dec, 4),
-            round(fov, 3),
-        ]
-        if item.get("is_custom"):
-            target_row.append(1)
-        manifest_targets.append(target_row)
 
     source_count = len(cutout_metas)
     if source_count == 0:
@@ -1118,47 +1100,40 @@ def build_sky_atlas(
     all_sheets = lod0_sheets + lod1_sheets + lod2_sheets
     all_encoded = lod0_encoded + lod1_encoded + lod2_encoded
 
-    lods_list = [
-        {
-            "lod": 0,
-            "tile_size": lod0_tile_size,
-            "step_deg": lod0_step_deg,
-            "sectors": lod0_entries,
-        },
-        {
-            "lod": 1,
-            "tile_size": lod1_tile_size,
-            "step_deg": lod1_step_deg,
-            "sectors": lod1_entries,
-        },
-    ]
-    if enable_lod2 and lod2_entries:
-        lods_list.append(
-            {
-                "lod": 2,
-                "tile_size": lod2_tile_size,
-                "step_deg": lod2_step_deg,
-                "sectors": lod2_entries,
-            }
-        )
+    lod0_node = {
+        "lod": 0,
+        "tile_size": lod0_tile_size,
+        "step_deg": lod0_step_deg,
+        "sectors": lod0_entries,
+    }
+    lod1_node = {
+        "lod": 1,
+        "tile_size": lod1_tile_size,
+        "step_deg": lod1_step_deg,
+        "sectors": lod1_entries,
+    }
+    has_lod2 = bool(enable_lod2 and lod2_entries)
 
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     manifest_payload = {
         "version": 2,
         "mode": "sectors",
-        "lod_count": len(lods_list),
+        "lod_count": 3 if has_lod2 else 2,
         "generated_at": generated_at,
         "license": ATLAS_LICENSE,
         "attribution": ATLAS_ATTRIBUTION,
         "source_count": source_count,
         "sheets": all_sheets,
-        "lods": lods_list,
-        "lod0": lods_list[0],
-        "lod1": lods_list[1],
-        "targets": manifest_targets,
+        "lod0": lod0_node,
+        "lod1": lod1_node,
     }
-    if enable_lod2 and lod2_entries:
-        manifest_payload["lod2"] = lods_list[2]
+    if has_lod2:
+        manifest_payload["lod2"] = {
+            "lod": 2,
+            "tile_size": lod2_tile_size,
+            "step_deg": lod2_step_deg,
+            "sectors": lod2_entries,
+        }
 
     manifest_bytes = json.dumps(
         manifest_payload, ensure_ascii=False, separators=(",", ":")
