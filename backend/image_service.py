@@ -349,24 +349,37 @@ _CUSTOM_FOV_RE = re.compile(
 _RADEC_PREFIX_RE = re.compile(
     r"^RADEC_(-?[0-9]+(?:\.[0-9]+)?)_(-?[0-9]+(?:\.[0-9]+)?)$"
 )
+_SKYFILL_PREFIX_RE = re.compile(
+    r"^SKYFILL_(-?[0-9]+(?:\.[0-9]+)?)_(-?[0-9]+(?:\.[0-9]+)?)$"
+)
 _SAN_CATALOG_LOOKUP: Optional[Dict[str, dict]] = None
 
 
-def parse_setup_hash_fov(setup_hash: str) -> Tuple[Optional[float], int]:
-    """Parse (download_fov_deg, resolution_px) from a standard setup_hash folder name."""
+def parse_setup_hash_details(
+    setup_hash: str,
+) -> Tuple[Optional[float], int, Optional[str]]:
+    """Parse (download_fov_deg, resolution_px, source) from a standard setup_hash folder name."""
     m = _SETUP_FOV_RE.match(setup_hash)
     if m:
         fov_w = float(m.group(1))
         fov_h = float(m.group(2))
         padding = float(m.group(3))
         res = int(m.group(4))
-        return max(max(fov_w, fov_h) * padding, 0.25), res
+        src = m.group(5)
+        return max(max(fov_w, fov_h) * padding, 0.25), res, src
     m2 = _CUSTOM_FOV_RE.match(setup_hash)
     if m2:
         eff = float(m2.group(1))
         res = int(m2.group(2))
-        return max(eff, 0.25), res
-    return None, 1024
+        src = m2.group(3)
+        return max(eff, 0.25), res, src
+    return None, 1024, None
+
+
+def parse_setup_hash_fov(setup_hash: str) -> Tuple[Optional[float], int]:
+    """Parse (download_fov_deg, resolution_px) from a standard setup_hash folder name."""
+    fov, res, _ = parse_setup_hash_details(setup_hash)
+    return fov, res
 
 
 def save_custom_image_meta(
@@ -526,6 +539,7 @@ def list_cached_sky_images(
             common_name = ""
             obj_type = ""
             is_custom = False
+            is_sky_fill = False
 
             cat_entry = catalog_lookup.get(san_prefix)
             if cat_entry is not None:
@@ -535,50 +549,63 @@ def list_cached_sky_images(
                 ra = cat_entry["ra"]
                 dec = cat_entry["dec"]
             else:
-                is_custom = True
-                if sidecar_meta:
+                m_sf = _SKYFILL_PREFIX_RE.match(san_prefix)
+                if m_sf:
                     try:
-                        ra = float(sidecar_meta["ra"])
-                        dec = float(sidecar_meta["dec"])
-                        fov = float(sidecar_meta["fov"])
-                        res_px = int(sidecar_meta.get("resolution", 1024))
-                    except (KeyError, TypeError, ValueError):
-                        pass
-
-                saved_cfg = url_meta_lookup.get(url)
-                if saved_cfg:
-                    if saved_cfg.get("name"):
-                        obj_name = saved_cfg["name"]
-                        cat_by_saved = catalog_lookup.get(
-                            sanitize_cache_object_name(obj_name)
-                        )
-                        if cat_by_saved:
-                            common_name = cat_by_saved["common_name"]
-                            obj_type = cat_by_saved["type"]
-                    if ra is None and saved_cfg.get("ra") is not None:
+                        ra = float(m_sf.group(1)) % 360.0
+                        dec = max(-90.0, min(90.0, float(m_sf.group(2))))
+                        obj_name = f"SKYFILL_{ra:.4f}_{dec:.4f}"
+                        is_sky_fill = True
+                    except ValueError:
+                        ra = None
+                        dec = None
+                    if fov is None:
+                        fov = max(float(fallback_fov or 1.0), 0.25)
+                else:
+                    is_custom = True
+                    if sidecar_meta:
                         try:
-                            ra = float(saved_cfg["ra"])
-                            dec = float(saved_cfg["dec"])
-                        except (TypeError, ValueError):
-                            pass
-                    if fov is None and saved_cfg.get("fov") is not None:
-                        try:
-                            fov = max(float(saved_cfg["fov"]), 0.25)
-                        except (TypeError, ValueError):
+                            ra = float(sidecar_meta["ra"])
+                            dec = float(sidecar_meta["dec"])
+                            fov = float(sidecar_meta["fov"])
+                            res_px = int(sidecar_meta.get("resolution", 1024))
+                        except (KeyError, TypeError, ValueError):
                             pass
 
-                if ra is None or dec is None:
-                    m_rd = _RADEC_PREFIX_RE.match(san_prefix)
-                    if m_rd:
-                        try:
-                            ra = float(m_rd.group(1))
-                            dec = float(m_rd.group(2))
-                            obj_name = f"RA {ra:.2f}° Dec {dec:+.2f}°"
-                        except ValueError:
-                            pass
+                    saved_cfg = url_meta_lookup.get(url)
+                    if saved_cfg:
+                        if saved_cfg.get("name"):
+                            obj_name = saved_cfg["name"]
+                            cat_by_saved = catalog_lookup.get(
+                                sanitize_cache_object_name(obj_name)
+                            )
+                            if cat_by_saved:
+                                common_name = cat_by_saved["common_name"]
+                                obj_type = cat_by_saved["type"]
+                        if ra is None and saved_cfg.get("ra") is not None:
+                            try:
+                                ra = float(saved_cfg["ra"])
+                                dec = float(saved_cfg["dec"])
+                            except (TypeError, ValueError):
+                                pass
+                        if fov is None and saved_cfg.get("fov") is not None:
+                            try:
+                                fov = max(float(saved_cfg["fov"]), 0.25)
+                            except (TypeError, ValueError):
+                                pass
 
-                if fov is None:
-                    fov = max(float(fallback_fov or 1.0), 0.25)
+                    if ra is None or dec is None:
+                        m_rd = _RADEC_PREFIX_RE.match(san_prefix)
+                        if m_rd:
+                            try:
+                                ra = float(m_rd.group(1))
+                                dec = float(m_rd.group(2))
+                                obj_name = f"RA {ra:.2f}° Dec {dec:+.2f}°"
+                            except ValueError:
+                                pass
+
+                    if fov is None:
+                        fov = max(float(fallback_fov or 1.0), 0.25)
 
             if ra is None or dec is None or fov is None or fov <= 0:
                 continue
@@ -596,6 +623,7 @@ def list_cached_sky_images(
                 "resolution": res_px,
                 "is_active_setup": is_active,
                 "is_custom": is_custom,
+                "is_sky_fill": is_sky_fill,
             }
 
             key = (f"{item['ra']:.3f}_{item['dec']:.3f}", round(item["fov"], 2))

@@ -794,6 +794,7 @@ def build_sky_atlas(
     cache_dir: str = CACHE_DIR,
     output_dir: Optional[str] = None,
     mirror_dirs: Optional[List[str]] = None,
+    extra_cache_dirs: Optional[List[str]] = None,
     settings: Optional[dict] = None,
     active_setup_hash: Optional[str] = None,
     fallback_fov: float = 1.0,
@@ -836,45 +837,76 @@ def build_sky_atlas(
     if setup_filter and not active_setup_hash:
         active_setup_hash = setup_filter
 
-    cached_items = list_cached_sky_images(
-        cache_dir=root_cache_dir,
-        settings=settings,
-        active_setup_hash=active_setup_hash,
-        fallback_fov=fallback_fov,
-        setup_filter=setup_filter,
-    )
+    cache_sources: List[Tuple[str, Optional[str]]] = [(root_cache_dir, setup_filter)]
+    seen_sources = {
+        (os.path.normcase(root_cache_dir), setup_filter or "")
+    }
+    for extra_raw in extra_cache_dirs or []:
+        if not extra_raw:
+            continue
+        ext_root, ext_filter = normalize_cache_dir_and_setup(extra_raw)
+        src_key = (os.path.normcase(ext_root), ext_filter or "")
+        if src_key not in seen_sources:
+            seen_sources.add(src_key)
+            cache_sources.append((ext_root, ext_filter))
 
-    validated_setup_dirs: Dict[str, str] = {}
+    validated_setup_dirs: Dict[Tuple[str, str], str] = {}
     best_by_key: Dict[str, Tuple[dict, str]] = {}
-    for item in cached_items:
-        if item.get("is_custom") and not include_custom:
-            continue
-        url = str(item.get("url") or "")
-        if not url.startswith("/cache/"):
-            continue
-        rel_parts = url[len("/cache/") :].split("/")
-        if len(rel_parts) != 2:
-            continue
-        setup_part, fname_part = rel_parts
-        if "/" in fname_part or "\\" in fname_part or fname_part in ("", ".", ".."):
-            continue
-        setup_abs = validated_setup_dirs.get(setup_part)
-        if setup_abs is None:
-            try:
-                setup_abs = resolve_safe_cache_path(root_cache_dir, setup_part)
-            except ValueError:
-                continue
-            validated_setup_dirs[setup_part] = setup_abs
-        filepath = os.path.join(setup_abs, fname_part)
 
-        dedup_key = (
-            f"custom_{item['ra']:.3f}_{item['dec']:.3f}"
-            if item.get("is_custom")
-            else str(item["name"]).strip()
+    for src_root, src_filter in cache_sources:
+        src_items = list_cached_sky_images(
+            cache_dir=src_root,
+            settings=settings,
+            active_setup_hash=active_setup_hash,
+            fallback_fov=fallback_fov,
+            setup_filter=src_filter,
         )
-        prev = best_by_key.get(dedup_key)
-        if prev is None or _candidate_rank(item) > _candidate_rank(prev[0]):
-            best_by_key[dedup_key] = (item, filepath)
+        if src_filter and os.path.isdir(src_root):
+            for sib in sorted(os.listdir(src_root)):
+                if sib == src_filter or not sib.startswith("fov_custom_"):
+                    continue
+                sib_items = list_cached_sky_images(
+                    cache_dir=src_root,
+                    settings=settings,
+                    active_setup_hash=active_setup_hash,
+                    fallback_fov=fallback_fov,
+                    setup_filter=sib,
+                )
+                src_items.extend(it for it in sib_items if it.get("is_sky_fill"))
+
+        src_root_norm = os.path.normcase(src_root)
+        for item in src_items:
+            if item.get("is_custom") and not include_custom:
+                continue
+            url = str(item.get("url") or "")
+            if not url.startswith("/cache/"):
+                continue
+            rel_parts = url[len("/cache/") :].split("/")
+            if len(rel_parts) != 2:
+                continue
+            setup_part, fname_part = rel_parts
+            if "/" in fname_part or "\\" in fname_part or fname_part in ("", ".", ".."):
+                continue
+            cache_key = (src_root_norm, setup_part)
+            setup_abs = validated_setup_dirs.get(cache_key)
+            if setup_abs is None:
+                try:
+                    setup_abs = resolve_safe_cache_path(src_root, setup_part)
+                except ValueError:
+                    continue
+                validated_setup_dirs[cache_key] = setup_abs
+            filepath = os.path.join(setup_abs, fname_part)
+            if not os.path.isfile(filepath):
+                continue
+
+            dedup_key = (
+                f"custom_{item['ra']:.3f}_{item['dec']:.3f}"
+                if item.get("is_custom")
+                else str(item["name"]).strip()
+            )
+            prev = best_by_key.get(dedup_key)
+            if prev is None or _candidate_rank(item) > _candidate_rank(prev[0]):
+                best_by_key[dedup_key] = (item, filepath)
 
     # Prepare geometric metadata for all unique cached cutouts
     cutout_metas: List[dict] = []
@@ -886,8 +918,10 @@ def build_sky_atlas(
         basis = _make_tangent_basis(ra, dec)
         half_tan = math.tan(0.5 * fov * DEG2RAD)
         cone_rad = math.atan(math.sqrt(2.0) * half_tan)
-        # Slightly higher weight for narrower-FOV cutouts so fine detail wins inside overlaps
+        # Slightly higher weight for narrower-FOV and catalog-target cutouts so fine detail wins inside overlaps
         detail_weight = min(2.5, max(1.0, 2.0 / max(fov, 0.5)))
+        if not item.get("is_sky_fill"):
+            detail_weight *= 1.15
         cutout_metas.append(
             {
                 "filepath": fpath,

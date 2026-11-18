@@ -114,7 +114,17 @@ To generate or refresh the bundled multi-LOD celestial RA/Dec sky survey map (`f
 python scripts/build_sky_atlas.py
 ```
 
-This composites overlapping cutouts onto a seamless 3-tier multi-LOD spherical sector pyramid (`LOD 0` `~12.85°` wide-sky, `LOD 1` `6°` mid-field, and `LOD 2` `3°` close-up WebP sheets `sky_atlas_lod*.webp` + `sky_atlas.json` with clickable per-cutout footprints and `LICENSE-ASSETS.md`) inside `frontend/public/sky_atlas/`.
+Because catalog DSOs leave empty voids across ~40% of the celestial sphere, you can fill every remaining uncovered patch (automatically matching your existing tiles' FOV, resolution, and survey source) and rebuild a 100% seamless full-sky atlas in one step:
+
+```bash
+# Preview missing patch count first
+python scripts/fill_sky_gaps.py --cache-dir ./image_cache --dry-run
+
+# Download all missing patches (Ctrl+C resumable) and rebuild sky_atlas
+python scripts/fill_sky_gaps.py --cache-dir ./image_cache
+```
+
+This composites overlapping cutouts onto a seamless 3-tier multi-LOD spherical sector pyramid (`LOD 0` `~12.85°` wide-sky, `LOD 1` `6°` mid-field, and `LOD 2` `3°` close-up WebP sheets `sky_atlas_lod*.webp` + `sky_atlas.json` and `LICENSE-ASSETS.md`) inside `frontend/public/sky_atlas/`.
 
 ## 🤝 Contributing
 

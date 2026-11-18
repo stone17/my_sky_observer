@@ -201,17 +201,20 @@ const persistApplyFilters = (enabled) => {
     }
 };
 
-const SKY_FIX_FOV_STORAGE_KEY = 'sky_observer_sky_fix_fov_v1';
-const readSavedFixFov = () => {
+const SKY_FOV_PINNED_STORAGE_KEY = 'sky_observer_sky_fov_pinned_v2';
+const readSavedFovPinned = () => {
     try {
-        return window.localStorage?.getItem(SKY_FIX_FOV_STORAGE_KEY) === '1';
+        const raw = window.localStorage?.getItem(SKY_FOV_PINNED_STORAGE_KEY);
+        if (raw === '0') return false;
+        if (raw === '1') return true;
+        return true;
     } catch {
-        return false;
+        return true;
     }
 };
-const persistFixFov = (enabled) => {
+const persistFovPinned = (pinned) => {
     try {
-        window.localStorage?.setItem(SKY_FIX_FOV_STORAGE_KEY, enabled ? '1' : '0');
+        window.localStorage?.setItem(SKY_FOV_PINNED_STORAGE_KEY, pinned ? '1' : '0');
     } catch {
         // Ignore storage errors
     }
@@ -742,10 +745,10 @@ const viewRa = ref(initialCoords.ra);
 const viewDec = ref(initialCoords.dec);
 const mapFovDeg = ref(Math.max(0.4, Math.min(100.0, Number(props.initialMapFov) || 35.0)));
 
-// Sensor FOV interactive state (always-draggable FOV & viewport/horizon-pinned FOV)
+// Sensor FOV interactive state (pinned to sky vs unpinned centered in viewport)
 const fovRa = ref(initialCoords.ra);
 const fovDec = ref(initialCoords.dec);
-const fixFovEnabled = ref(readSavedFixFov());
+const fovPinned = ref(readSavedFovPinned());
 const isHoveringFov = ref(false);
 const isDraggingFov = ref(false);
 const fovCtrlRef = ref(null);
@@ -753,7 +756,6 @@ const fovOverlayVisible = ref(false);
 let fovOverlayLeft = 0;
 let fovOverlayTop = 0;
 let lastEmittedFov = { ra: initialCoords.ra, dec: initialCoords.dec };
-const fovPinnedCam = { u: 0.0, v: 0.0, w: 1.0, valid: false };
 const lastFovHit = {
     valid: false,
     cx: 0,
@@ -1205,7 +1207,7 @@ const screenToAltAz = (px, py, centerAzDeg = viewAz.value, centerAltDeg = viewAl
     return { az, alt };
 };
 
-// --- SENSOR FOV DRAG, 3D CAMERA-BASIS PIN & FRAMING SYNC ---
+// --- SENSOR FOV PIN TO SKY / UNPIN TO VIEWPORT CENTER & FRAMING SYNC ---
 const emitSensorCenterIfChanged = (persist = false) => {
     if (!props.object) return;
     const ra = wrapRaDeg(fovRa.value);
@@ -1220,49 +1222,16 @@ const emitSensorCenterIfChanged = (persist = false) => {
     }
 };
 
-const rebindPinToCurrentSky = (customCam = null) => {
-    const cam = customCam || getActiveCameraBasis();
-    const a = fovRa.value * DEG2RAD;
-    const d = fovDec.value * DEG2RAD;
-    const cd = Math.cos(d);
-    const x = cd * Math.cos(a);
-    const y = cd * Math.sin(a);
-    const z = Math.sin(d);
-    fovPinnedCam.u = x * cam.Ex + y * cam.Ey + z * cam.Ez;
-    fovPinnedCam.v = x * cam.Nx + y * cam.Ny + z * cam.Nz;
-    fovPinnedCam.w = x * cam.Cx + y * cam.Cy + z * cam.Cz;
-    fovPinnedCam.valid = true;
-};
-
-const isFovCurrentlyOnScreen = (cam = getActiveCameraBasis()) => {
-    const sp = projectRaDecWithBasis(fovRa.value, fovDec.value, cam);
-    if (!sp) return false;
-    return (
-        sp.x >= 10 &&
-        sp.x <= viewportW.value - 10 &&
-        sp.y >= 10 &&
-        sp.y <= viewportH.value - 10
-    );
-};
-
-const syncFovSkyFromPin = (cam = getActiveCameraBasis()) => {
-    if (!fixFovEnabled.value || !hasValidSensorFov.value || isDraggingFov.value) return;
-    if (!fovPinnedCam.valid) {
-        rebindPinToCurrentSky(cam);
-        return;
-    }
-    const u = fovPinnedCam.u;
-    const v = fovPinnedCam.v;
-    const w = fovPinnedCam.w;
-    const x = u * cam.Ex + v * cam.Nx + w * cam.Cx;
-    const y = u * cam.Ey + v * cam.Ny + w * cam.Cy;
-    const z = Math.max(-1.0, Math.min(1.0, u * cam.Ez + v * cam.Nz + w * cam.Cz));
-    fovRa.value = wrapRaDeg(Math.atan2(y, x) * RAD2DEG);
-    fovDec.value = clampDecDeg(Math.asin(z) * RAD2DEG);
+const syncUnpinnedFovToCenter = (cam = getActiveCameraBasis()) => {
+    if (fovPinned.value || !hasValidSensorFov.value) return;
+    fovRa.value = wrapRaDeg(Math.atan2(cam.Cy, cam.Cx) * RAD2DEG);
+    fovDec.value = clampDecDeg(Math.asin(Math.max(-1.0, Math.min(1.0, cam.Cz))) * RAD2DEG);
 };
 
 const hitTestSensorFov = (px, py) => {
-    if (!hasValidSensorFov.value || !lastFovHit.valid) {
+    // Only capture direct FOV drag when pinned to the sky; when unpinned, FOV stays
+    // locked at viewport center so dragging anywhere pans the sky underneath it.
+    if (!fovPinned.value || !hasValidSensorFov.value || !lastFovHit.valid) {
         return false;
     }
     const dx = px - lastFovHit.cx;
@@ -1287,22 +1256,18 @@ const updateFovFloatingCtrlPosition = (leftPx, topPx, visible) => {
     }
 };
 
-const toggleFixFov = () => {
-    const next = !fixFovEnabled.value;
-    fixFovEnabled.value = next;
-    persistFixFov(next);
-    if (next) {
+const toggleFovPin = () => {
+    const next = !fovPinned.value;
+    fovPinned.value = next;
+    persistFovPinned(next);
+    if (!next) {
+        isDraggingFov.value = false;
+        isHoveringFov.value = false;
         const cam = getActiveCameraBasis();
-        if (hasValidSensorFov.value && !isFovCurrentlyOnScreen(cam)) {
-            const ctr = getCurrentCenterRaDec();
-            fovRa.value = ctr.ra;
-            fovDec.value = ctr.dec;
-        }
-        rebindPinToCurrentSky(cam);
-        emitSensorCenterIfChanged();
+        syncUnpinnedFovToCenter(cam);
+        emitSensorCenterIfChanged(true);
     } else {
-        fovPinnedCam.valid = false;
-        emitSensorCenterIfChanged();
+        emitSensorCenterIfChanged(true);
     }
     scheduleDraw();
 };
@@ -1312,8 +1277,14 @@ const resetSensorFovToTarget = () => {
     fovRa.value = cat.ra;
     fovDec.value = cat.dec;
     lastEmittedFov = { ra: cat.ra, dec: cat.dec };
-    if (fixFovEnabled.value) {
-        rebindPinToCurrentSky();
+    if (!fovPinned.value) {
+        if (animFrameId) {
+            cancelAnimationFrame(animFrameId);
+            animFrameId = null;
+        }
+        viewRa.value = cat.ra;
+        viewDec.value = cat.dec;
+        syncHorizFromRaDec(cat.ra, cat.dec, effectiveTimeMs.value);
     }
     emit('reset-sensor-center');
     updateStatusReadout(cat.ra, cat.dec, true);
@@ -1425,8 +1396,8 @@ const updateStatusReadout = (raDeg, decDeg, force = false) => {
 const refreshReadoutAfterTimeChange = () => {
     if (isHorizonFixed.value) {
         const cam = getActiveCameraBasis();
-        if (fixFovEnabled.value && hasValidSensorFov.value && !isDraggingFov.value) {
-            syncFovSkyFromPin(cam);
+        if (!fovPinned.value && hasValidSensorFov.value) {
+            syncUnpinnedFovToCenter(cam);
             emitSensorCenterIfChanged();
         }
         if (pendingPointer && Number.isFinite(pendingPointer.px) && Number.isFinite(pendingPointer.py)) {
@@ -1465,8 +1436,9 @@ const setSkyFrameMode = (mode) => {
         persistSkyFrameMode('sky');
     }
 
-    if (fixFovEnabled.value && hasValidSensorFov.value) {
-        rebindPinToCurrentSky();
+    if (!fovPinned.value && hasValidSensorFov.value) {
+        syncUnpinnedFovToCenter();
+        emitSensorCenterIfChanged();
     }
 
     const ctr = getCurrentCenterRaDec();
@@ -3386,13 +3358,17 @@ const drawSkyCanvas = () => {
     lastFovHit.valid = false;
     let placedFovCtrl = false;
     if (props.object) {
-        if (fixFovEnabled.value && hasValidSensorFov.value && !isDraggingFov.value) {
-            syncFovSkyFromPin(cam);
+        if (!fovPinned.value && hasValidSensorFov.value) {
+            syncUnpinnedFovToCenter(cam);
             emitSensorCenterIfChanged();
         }
         const sensorRa = fovRa.value;
         const sensorDec = fovDec.value;
-        const sp = projectRaDecWithBasis(sensorRa, sensorDec, cam);
+        let sp = projectRaDecWithBasis(sensorRa, sensorDec, cam);
+        if (sp && !fovPinned.value) {
+            sp.x = cam.halfW;
+            sp.y = cam.halfH;
+        }
         let totalRotRad = 0;
         if (sp) {
             const localNorth = computeLocalNorthAngleWithBasis(
@@ -3431,17 +3407,19 @@ const drawSkyCanvas = () => {
             const cosR = Math.cos(totalRotRad);
             const sinR = Math.sin(totalRotRad);
 
-            lastFovHit.valid = true;
-            lastFovHit.cx = sp.x;
-            lastFovHit.cy = sp.y;
-            lastFovHit.halfW = Math.max(drawW * 0.5 + 6, 14);
-            lastFovHit.halfH = Math.max(drawH * 0.5 + 6, 14);
-            lastFovHit.cosR = cosR;
-            lastFovHit.sinR = sinR;
+            const isPinned = fovPinned.value;
+            if (isPinned) {
+                lastFovHit.valid = true;
+                lastFovHit.cx = sp.x;
+                lastFovHit.cy = sp.y;
+                lastFovHit.halfW = Math.max(drawW * 0.5 + 6, 14);
+                lastFovHit.halfH = Math.max(drawH * 0.5 + 6, 14);
+                lastFovHit.cosR = cosR;
+                lastFovHit.sinR = sinR;
+            }
 
-            const isDragActive = isDraggingFov.value;
-            const isDragHover = isHoveringFov.value;
-            const isPinned = fixFovEnabled.value;
+            const isDragActive = isPinned && isDraggingFov.value;
+            const isDragHover = isPinned && isHoveringFov.value;
 
             ctx.save();
             ctx.translate(sp.x, sp.y);
@@ -3480,14 +3458,14 @@ const drawSkyCanvas = () => {
                 ctx.restore();
             }
 
-            // Always-draggable FOV visual affordance: corner L-brackets + subtle center crosshair on hover/drag
+            // Corner L-brackets (when pinned/draggable) + subtle center crosshair (when unpinned/centered or detached)
             const handleColor =
                 isDragActive || isDragHover ? '#fef08a' : 'rgba(253, 230, 138, 0.82)';
             ctx.strokeStyle = handleColor;
             ctx.lineWidth = isDragActive || isDragHover ? 1.85 : 1.45;
             ctx.beginPath();
 
-            if (drawW >= 18 && drawH >= 14) {
+            if (isPinned && drawW >= 18 && drawH >= 14) {
                 const hw = drawW * 0.5;
                 const hh = drawH * 0.5;
                 const tick = Math.min(7.5, Math.max(4.0, Math.min(drawW, drawH) * 0.22));
@@ -3509,7 +3487,7 @@ const drawSkyCanvas = () => {
                 ctx.lineTo(-hw, hh - tick);
             }
 
-            if (isDragActive || isDragHover || isFovDetached.value) {
+            if (!isPinned || isDragActive || isDragHover || isFovDetached.value) {
                 const arm = Math.min(5.5, Math.max(3.5, Math.min(drawW, drawH) * 0.2));
                 ctx.moveTo(-arm, 0);
                 ctx.lineTo(arm, 0);
@@ -3638,8 +3616,8 @@ const centerOnTarget = () => {
         if (Math.hypot(dAz, dAlt) < 0.05) {
             viewAz.value = targetAz;
             viewAlt.value = targetAlt;
-            if (fixFovEnabled.value && hasValidSensorFov.value) {
-                syncFovSkyFromPin();
+            if (!fovPinned.value && hasValidSensorFov.value) {
+                syncUnpinnedFovToCenter();
                 emitSensorCenterIfChanged();
             }
             updateStatusReadout(tgt.ra, tgt.dec, true);
@@ -3659,9 +3637,9 @@ const centerOnTarget = () => {
                 animFrameId = requestAnimationFrame(step);
             } else {
                 animFrameId = null;
-                if (fixFovEnabled.value && hasValidSensorFov.value) {
-                    syncFovSkyFromPin();
-                    emitSensorCenterIfChanged();
+                if (!fovPinned.value && hasValidSensorFov.value) {
+                    syncUnpinnedFovToCenter();
+                    emitSensorCenterIfChanged(true);
                 }
                 updateStatusReadout(tgt.ra, tgt.dec, true);
             }
@@ -3681,8 +3659,8 @@ const centerOnTarget = () => {
         viewRa.value = tgt.ra;
         viewDec.value = tgt.dec;
         syncHorizFromRaDec(tgt.ra, tgt.dec);
-        if (fixFovEnabled.value && hasValidSensorFov.value) {
-            syncFovSkyFromPin();
+        if (!fovPinned.value && hasValidSensorFov.value) {
+            syncUnpinnedFovToCenter();
             emitSensorCenterIfChanged();
         }
         updateStatusReadout(tgt.ra, tgt.dec, true);
@@ -3703,9 +3681,9 @@ const centerOnTarget = () => {
         } else {
             animFrameId = null;
             syncHorizFromRaDec(viewRa.value, viewDec.value);
-            if (fixFovEnabled.value && hasValidSensorFov.value) {
-                syncFovSkyFromPin();
-                emitSensorCenterIfChanged();
+            if (!fovPinned.value && hasValidSensorFov.value) {
+                syncUnpinnedFovToCenter();
+                emitSensorCenterIfChanged(true);
             }
             updateStatusReadout(viewRa.value, viewDec.value, true);
         }
@@ -3732,20 +3710,20 @@ const applyZoomFactor = (factor, anchorPx = null, anchorPy = null) => {
         }
     }
 
-    if (hasValidSensorFov.value && !fixFovEnabled.value) {
-        if (animFrameId) {
-            cancelAnimationFrame(animFrameId);
-            animFrameId = null;
-        }
+    // Unpinned mode: FOV stays locked at viewport center, so zoom around the center
+    // keeping both the FOV rectangle and the sky inside it centered.
+    if (hasValidSensorFov.value && !fovPinned.value) {
         mapFovDeg.value = nextFov;
-        viewRa.value = wrapRaDeg(fovRa.value);
-        viewDec.value = clampDecDeg(fovDec.value);
-        syncHorizFromRaDec(viewRa.value, viewDec.value, effectiveTimeMs.value);
-        updateStatusReadout(viewRa.value, viewDec.value);
+        const cam = getActiveCameraBasis();
+        syncUnpinnedFovToCenter(cam);
+        emitSensorCenterIfChanged();
+        updateStatusReadout(fovRa.value, fovDec.value);
         scheduleDraw();
         return;
     }
 
+    // Pinned mode: FOV stays locked to its sky coordinates (fovRa, fovDec) and moves/scales
+    // naturally with the sky during cursor-anchored or center zoom.
     if (anchorPx !== null && anchorPy !== null) {
         if (isHorizonFixed.value) {
             const beforeAA = screenToAltAz(anchorPx, anchorPy, viewAz.value, viewAlt.value);
@@ -3772,17 +3750,14 @@ const applyZoomFactor = (factor, anchorPx = null, anchorPy = null) => {
         updateStatusReadout(ctr.ra, ctr.dec);
     }
 
-    if (fixFovEnabled.value && hasValidSensorFov.value) {
-        rebindPinToCurrentSky();
-    }
-
     scheduleDraw();
 };
 
 const onWheel = (e) => {
     if (!canvasRectValid) refreshCanvasRect();
-    const px = canvasRectValid ? e.clientX - canvasLeft : null;
-    const py = canvasRectValid ? e.clientY - canvasTop : null;
+    const useCursorAnchor = !hasValidSensorFov.value || fovPinned.value;
+    const px = useCursorAnchor && canvasRectValid ? e.clientX - canvasLeft : null;
+    const py = useCursorAnchor && canvasRectValid ? e.clientY - canvasTop : null;
     const factor = e.deltaY > 0 ? 1.14 : 1 / 1.14;
     applyZoomFactor(factor, px, py);
 };
@@ -3898,9 +3873,6 @@ const flushPointerFrame = () => {
             const skyPt = screenToSky(tx, ty, cam);
             fovRa.value = skyPt.ra;
             fovDec.value = skyPt.dec;
-            if (fixFovEnabled.value) {
-                rebindPinToCurrentSky(cam);
-            }
             emitSensorCenterIfChanged();
             drawSkyCanvas();
             updateStatusReadout(skyPt.ra, skyPt.dec);
@@ -3915,8 +3887,8 @@ const flushPointerFrame = () => {
             isLiveTime.value = false;
             scrubTimeMs.value = nextTimeMs;
             emit('update-obs-time', { isLive: false, timeMs: nextTimeMs });
-            if (fixFovEnabled.value && hasValidSensorFov.value) {
-                syncFovSkyFromPin();
+            if (!fovPinned.value && hasValidSensorFov.value) {
+                syncUnpinnedFovToCenter();
                 emitSensorCenterIfChanged();
             }
             drawSkyCanvas();
@@ -4048,6 +4020,10 @@ const handleItemClick = async (item, closeMapAfterSelect = false) => {
     viewRa.value = wrapRaDeg(item.ra);
     viewDec.value = clampDecDeg(item.dec);
     syncHorizFromRaDec(viewRa.value, viewDec.value);
+    if (!fovPinned.value && hasValidSensorFov.value) {
+        syncUnpinnedFovToCenter();
+        emitSensorCenterIfChanged(true);
+    }
     updateStatusReadout(viewRa.value, viewDec.value, true);
     scheduleDraw();
 };
@@ -4062,9 +4038,6 @@ const onDoubleClick = (e) => {
 
 const finishPanSync = () => {
     if (panDragKind === 'fov') {
-        if (fixFovEnabled.value && hasValidSensorFov.value) {
-            rebindPinToCurrentSky();
-        }
         emitSensorCenterIfChanged(true);
         updateStatusReadout(fovRa.value, fovDec.value, true);
         return;
@@ -4077,8 +4050,8 @@ const finishPanSync = () => {
     } else {
         syncHorizFromRaDec(ctr.ra, ctr.dec);
     }
-    if (fixFovEnabled.value && hasValidSensorFov.value) {
-        syncFovSkyFromPin();
+    if (!fovPinned.value && hasValidSensorFov.value) {
+        syncUnpinnedFovToCenter();
         emitSensorCenterIfChanged(true);
     }
     updateStatusReadout(ctr.ra, ctr.dec, true);
@@ -4228,9 +4201,6 @@ watch(
             viewRa.value = tgt.ra;
             viewDec.value = tgt.dec;
             syncHorizFromRaDec(tgt.ra, tgt.dec);
-            if (fixFovEnabled.value && hasValidSensorFov.value) {
-                rebindPinToCurrentSky();
-            }
             updateStatusReadout(tgt.ra, tgt.dec, true);
             scheduleDraw();
         }
@@ -4255,8 +4225,10 @@ watch(
         fovRa.value = nextRa;
         fovDec.value = nextDec;
         lastEmittedFov = { ra: nextRa, dec: nextDec };
-        if (fixFovEnabled.value && hasValidSensorFov.value) {
-            rebindPinToCurrentSky();
+        if (!fovPinned.value) {
+            viewRa.value = nextRa;
+            viewDec.value = nextDec;
+            syncHorizFromRaDec(nextRa, nextDec, effectiveTimeMs.value);
         }
         scheduleDraw();
     }
@@ -4305,9 +4277,6 @@ watch(
     (val) => {
         if (Number.isFinite(val) && val > 0) {
             mapFovDeg.value = Math.max(0.4, Math.min(100.0, val));
-            if (fixFovEnabled.value && hasValidSensorFov.value) {
-                rebindPinToCurrentSky();
-            }
             scheduleDraw();
         }
     }
@@ -4377,9 +4346,6 @@ onMounted(async () => {
             viewportW.value = containerRef.value.clientWidth || 800;
             viewportH.value = containerRef.value.clientHeight || 600;
             refreshCanvasRect();
-            if (fixFovEnabled.value && hasValidSensorFov.value) {
-                rebindPinToCurrentSky();
-            }
             scheduleDraw();
         };
         resizeObserver = new ResizeObserver(updateDims);
@@ -4454,13 +4420,13 @@ onUnmounted(() => {
             <button
                 type="button"
                 class="fov-anchor-btn pin-btn"
-                :class="{ active: fixFovEnabled }"
-                @click="toggleFixFov"
-                :aria-pressed="fixFovEnabled"
+                :class="{ active: fovPinned }"
+                @click="toggleFovPin"
+                :aria-pressed="fovPinned"
                 :title="
-                    fixFovEnabled
-                        ? 'FOV pinned: sensor frame stays fixed while panning or moving sky time · Click to unpin (track stars)'
-                        : 'Pin FOV here: keep sensor frame fixed on screen / above the horizon while moving the sky'
+                    fovPinned
+                        ? 'FOV pinned to sky: moves and zooms with the sky (drag frame to reposition) · Click to unpin & lock to view center'
+                        : 'FOV unpinned: stays locked in the center of the view while panning or zooming · Click to pin to current sky coordinates'
                 "
             >
                 <svg
@@ -4520,6 +4486,16 @@ onUnmounted(() => {
             >
                 <span class="pill-icon">⌖</span>
                 <span>Centre on target</span>
+            </button>
+
+            <button
+                v-if="hasValidSensorFov && fovPinned && !fovOverlayVisible"
+                type="button"
+                class="sky-pill-btn fov-ctrl-btn unpin-fov-btn"
+                @click="toggleFovPin"
+                title="Pinned sensor FOV is off-screen · Click to unpin and bring it to the center of the view"
+            >
+                <span>⌖ Unpin FOV (center)</span>
             </button>
 
             <button
@@ -4872,6 +4848,18 @@ onUnmounted(() => {
     padding: 5px 10px;
     font-size: 0.74rem;
     color: #cbd5e1;
+}
+
+.sky-pill-btn.unpin-fov-btn {
+    background: rgba(12, 36, 40, 0.92);
+    border-color: rgba(45, 212, 191, 0.45);
+    color: #5eead4;
+}
+
+.sky-pill-btn.unpin-fov-btn:hover {
+    background: rgba(16, 54, 58, 0.96);
+    border-color: #2dd4bf;
+    color: #ccfbf1;
 }
 
 .sky-pill-btn.reset-fov-btn {
