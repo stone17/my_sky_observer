@@ -10,6 +10,13 @@ import {
     ensureSkyAtlasLoaded,
     ensureAtlasSheetImage
 } from '../utils/skyAtlas.js';
+import {
+    computeLstDeg,
+    parseObserverLocation,
+    resolveObservingEvening,
+    resolveLiveTonightEveningKey
+} from '../utils/observingTime.js';
+import ObservingDateConsole from './ObservingDateConsole.vue';
 
 const props = defineProps({
     object: { type: Object, default: null },
@@ -23,14 +30,18 @@ const props = defineProps({
     sensorCenter: { type: Object, default: null },
     rotation: { type: Number, default: 0 },
     baseImageFov: { type: Number, default: 1.0 },
-    initialMapFov: { type: Number, default: 35.0 }
+    initialMapFov: { type: Number, default: 35.0 },
+    isLiveObsTime: { type: Boolean, default: undefined },
+    liveNowMs: { type: Number, default: undefined },
+    effectiveObsTimeMs: { type: Number, default: undefined }
 });
 
 const emit = defineEmits([
     'close',
     'select-object',
     'update-sensor-center',
-    'reset-sensor-center'
+    'reset-sensor-center',
+    'update-obs-time'
 ]);
 
 // --- MATH CONSTANTS ---
@@ -264,194 +275,6 @@ const formatAzCompass = (azDeg) => {
     const norm = wrapRaDeg(azDeg);
     const idx = Math.round(norm / 22.5) % 16;
     return `${Math.round(norm)}° ${COMPASS_SECTORS_16[idx]}`;
-};
-
-const SHORT_WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const SHORT_MONTHS = [
-    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
-];
-
-const formatLocalClock = (ms) => {
-    const dt = new Date(ms);
-    const hh = String(dt.getHours()).padStart(2, '0');
-    const mm = String(dt.getMinutes()).padStart(2, '0');
-    return `${hh}:${mm}`;
-};
-
-const formatDateInputYmd = (ms) => {
-    const dt = new Date(ms);
-    const y = dt.getFullYear();
-    const m = String(dt.getMonth() + 1).padStart(2, '0');
-    const d = String(dt.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
-};
-
-const formatObsDateBadge = (ms, refNowMs) => {
-    const dt = new Date(ms);
-    const ref = new Date(refNowMs);
-    const mon = SHORT_MONTHS[dt.getMonth()];
-    const day = dt.getDate();
-    if (dt.getFullYear() !== ref.getFullYear()) {
-        return `${mon} ${day}, ${dt.getFullYear()}`;
-    }
-    const wk = SHORT_WEEKDAYS[dt.getDay()];
-    return `${wk}, ${mon} ${day}`;
-};
-
-const getObservingEveningDate = (ms) => {
-    const dt = new Date(ms);
-    const eve = new Date(
-        dt.getFullYear(),
-        dt.getMonth(),
-        dt.getHours() < 12 ? dt.getDate() - 1 : dt.getDate(),
-        12,
-        0,
-        0,
-        0
-    );
-    const year = eve.getFullYear();
-    const month0 = eve.getMonth();
-    const day = eve.getDate();
-    const key = `${year}-${String(month0 + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-    return { year, month0, day, key };
-};
-
-const computeLstDeg = (timeMs, lonDeg) => {
-    const jd = timeMs / 86400000.0 + 2440587.5;
-    const d = jd - 2451545.0;
-    const T = d / 36525.0;
-    const gmst =
-        280.46061837 +
-        360.98564736629 * d +
-        0.000387933 * T * T -
-        (T * T * T) / 38710000.0;
-    return wrapRaDeg(gmst + lonDeg);
-};
-
-const computeSolarEquatorial = (timeMs) => {
-    const d = timeMs / 86400000.0 + 2440587.5 - 2451545.0;
-    const g = (357.52911 + 0.98560028 * d) * DEG2RAD;
-    const q = 280.46646 + 0.98564736 * d;
-    const lam = (q + 1.914602 * Math.sin(g) + 0.019993 * Math.sin(2.0 * g)) * DEG2RAD;
-    const eps = (23.439291 - 0.000013 * d) * DEG2RAD;
-    const sinLam = Math.sin(lam);
-    const raDeg = wrapRaDeg(Math.atan2(Math.cos(eps) * sinLam, Math.cos(lam)) * RAD2DEG);
-    const sinDec = Math.max(-1.0, Math.min(1.0, Math.sin(eps) * sinLam));
-    const cosDec = Math.sqrt(Math.max(0.0, 1.0 - sinDec * sinDec));
-    return { raDeg, sinDec, cosDec };
-};
-
-const nightEphemerisCache = new Map();
-
-const computeNightEphemerisForEvening = (year, month0, day, latDeg, lonDeg) => {
-    const cacheKey = `${year}-${month0}-${day}:${latDeg.toFixed(3)}:${lonDeg.toFixed(3)}`;
-    const cached = nightEphemerisCache.get(cacheKey);
-    if (cached) return cached;
-
-    const clampedLat = Math.max(-89.8, Math.min(89.8, latDeg));
-    const sinLat = Math.sin(clampedLat * DEG2RAD);
-    const cosLat = Math.cos(clampedLat * DEG2RAD);
-
-    // Refine true solar midnight (solar anti-transit, HA = 180°) for evening (year, month0, day)
-    const approxMidMs = Date.UTC(year, month0, day, 24, 0, 0) - (lonDeg / 15.0) * 3600000.0;
-    const sunMid = computeSolarEquatorial(approxMidMs);
-    const lstMid = computeLstDeg(approxMidMs, lonDeg);
-    let haErr = wrapRaDeg(lstMid - sunMid.raDeg - 180.0);
-    if (haErr > 180.0) haErr -= 360.0;
-    const solarMidMs = approxMidMs - (haErr / 360.0) * 86400000.0;
-
-    // Solve evening & morning timestamps where Sun crosses altDeg around solarMidMs
-    const solveCrossingPair = (altDeg) => {
-        const sinAlt = Math.sin(altDeg * DEG2RAD);
-        const cosH0 = (sinAlt - sinLat * sunMid.sinDec) / Math.max(1e-6, cosLat * sunMid.cosDec);
-        if (cosH0 < -1.0) return { state: 'never_below', eveMs: null, mornMs: null };
-        if (cosH0 > 1.0) return { state: 'always_below', eveMs: null, mornMs: null };
-
-        const halfNightDeg0 = 180.0 - Math.acos(cosH0) * RAD2DEG;
-        const guessOffsetMs = (halfNightDeg0 / 360.0) * 86400000.0;
-
-        // 1-step refinement using solar RA/Dec at evening and morning crossing times
-        const refineSide = (sign) => {
-            const tGuess = solarMidMs + sign * guessOffsetMs;
-            const sun = computeSolarEquatorial(tGuess);
-            const cosH = (sinAlt - sinLat * sun.sinDec) / Math.max(1e-6, cosLat * sun.cosDec);
-            if (cosH < -1.0 || cosH > 1.0) return tGuess;
-            const halfNightDeg = 180.0 - Math.acos(cosH) * RAD2DEG;
-            // Refine local solar anti-transit slightly for RA drift
-            let dRa = sun.raDeg - sunMid.raDeg;
-            if (dRa > 180.0) dRa -= 360.0;
-            if (dRa < -180.0) dRa += 360.0;
-            return solarMidMs + ((dRa + sign * halfNightDeg) / 360.0) * 86400000.0;
-        };
-
-        const eveMs = refineSide(-1.0);
-        const mornMs = refineSide(1.0);
-        if (!Number.isFinite(eveMs) || !Number.isFinite(mornMs) || mornMs <= eveMs) {
-            return { state: 'never_below', eveMs: null, mornMs: null };
-        }
-        return { state: 'normal', eveMs, mornMs };
-    };
-
-    const horizonCross = solveCrossingPair(-0.833);
-    const civilCross = solveCrossingPair(-6.0);
-    const nautCross = solveCrossingPair(-12.0);
-    const astroCross = solveCrossingPair(-18.0);
-
-    let startMs;
-    let endMs;
-    let midMs = solarMidMs;
-    let sunsetMs = horizonCross.eveMs;
-    let sunriseMs = horizonCross.mornMs;
-
-    if (horizonCross.state === 'normal') {
-        startMs = sunsetMs - 30 * 60 * 1000;
-        endMs = sunriseMs + 30 * 60 * 1000;
-        if (astroCross.state === 'normal') {
-            midMs = 0.5 * (astroCross.eveMs + astroCross.mornMs);
-        } else {
-            midMs = 0.5 * (sunsetMs + sunriseMs);
-        }
-    } else if (horizonCross.state === 'always_below') {
-        // Polar winter night: 18h session window centered on solar midnight
-        startMs = solarMidMs - 9 * 3600 * 1000;
-        endMs = solarMidMs + 9 * 3600 * 1000;
-        sunsetMs = startMs;
-        sunriseMs = endMs;
-    } else {
-        // Polar midnight sun: 10h window centered on solar midnight
-        startMs = solarMidMs - 5 * 3600 * 1000;
-        endMs = solarMidMs + 5 * 3600 * 1000;
-    }
-
-    const sunAtMid = computeSolarEquatorial(solarMidMs);
-    const midSinAlt = Math.max(
-        -1.0,
-        Math.min(1.0, sinLat * sunAtMid.sinDec - cosLat * sunAtMid.cosDec)
-    );
-    const midSunAltDeg = Math.asin(midSinAlt) * RAD2DEG;
-
-    const result = {
-        startMs,
-        endMs,
-        midMs,
-        solarMidMs,
-        midSunAltDeg,
-        sunsetMs,
-        sunriseMs,
-        civilEveMs: civilCross.eveMs,
-        civilMornMs: civilCross.mornMs,
-        nautEveMs: nautCross.eveMs,
-        nautMornMs: nautCross.mornMs,
-        astroEveMs: astroCross.eveMs,
-        astroMornMs: astroCross.mornMs
-    };
-
-    if (nightEphemerisCache.size > 128) {
-        nightEphemerisCache.clear();
-    }
-    nightEphemerisCache.set(cacheKey, result);
-    return result;
 };
 
 const makeHorizontalBasis = (latDeg, lonDeg, timeMs) => {
@@ -987,25 +810,8 @@ const toggleApplyTargetFilters = () => {
     scheduleDraw();
 };
 
-// Observer Location, Minimum Altitude & Observation Time State
-const observerLocation = computed(() => {
-    const loc = props.settings?.location;
-    if (!loc) return null;
-    const lat = Number(loc.latitude);
-    const lon = Number(loc.longitude);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
-
-    const city = typeof loc.city_name === 'string' ? loc.city_name.trim() : '';
-    const latTag = `${Math.abs(lat).toFixed(1)}°${lat >= 0 ? 'N' : 'S'}`;
-    const lonTag = `${Math.abs(lon).toFixed(1)}°${lon >= 0 ? 'E' : 'W'}`;
-    return {
-        lat,
-        lon,
-        label: city || `${latTag} ${lonTag}`,
-        coordsLabel: `${latTag}, ${lonTag}`
-    };
-});
+// Observer Location, Minimum Altitude & Shared Observation Time State
+const observerLocation = computed(() => parseObserverLocation(props.settings));
 
 const minAltitudeDeg = computed(() => {
     const raw = props.clientSettings?.min_hours_altitude ?? props.settings?.min_altitude ?? 30;
@@ -1013,10 +819,11 @@ const minAltitudeDeg = computed(() => {
     return Number.isFinite(val) ? Math.max(0, Math.min(88, val)) : 30;
 });
 
-const isLiveTime = ref(true);
-const liveNowMs = ref(Date.now());
-const scrubTimeMs = ref(Date.now());
-const dateInputRef = ref(null);
+const isLiveTime = ref(props.isLiveObsTime ?? true);
+const liveNowMs = ref(Number.isFinite(props.liveNowMs) ? props.liveNowMs : Date.now());
+const scrubTimeMs = ref(
+    Number.isFinite(props.effectiveObsTimeMs) ? props.effectiveObsTimeMs : Date.now()
+);
 const effectiveTimeMs = computed(() => (isLiveTime.value ? liveNowMs.value : scrubTimeMs.value));
 
 // Reference Frame Mode: 'sky' (Equatorial RA/Dec fixed) vs 'horizon' (Horizontal Alt-Az fixed)
@@ -1061,227 +868,6 @@ const getCurrentCenterRaDec = () => {
     }
     return { ra: viewRa.value, dec: viewDec.value };
 };
-
-const observingEvening = computed(() => {
-    // When tracking live daytime (08:00..11:59), preview upcoming tonight's session on the slider
-    if (isLiveTime.value) {
-        const dt = new Date(liveNowMs.value);
-        if (dt.getHours() >= 8) {
-            const year = dt.getFullYear();
-            const month0 = dt.getMonth();
-            const day = dt.getDate();
-            const key = `${year}-${String(month0 + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-            return { year, month0, day, key };
-        }
-    }
-    return getObservingEveningDate(effectiveTimeMs.value);
-});
-
-const propsTonightEveningKey = computed(() => {
-    const g0 = props.object?.altitude_graph?.[0]?.time;
-    if (g0) {
-        const t = Date.parse(g0);
-        if (Number.isFinite(t)) return getObservingEveningDate(t).key;
-    }
-    const c0 = props.nightTimes?.civil?.[0];
-    if (c0) {
-        const t = Date.parse(c0);
-        if (Number.isFinite(t)) return getObservingEveningDate(t).key;
-    }
-    const dt = new Date(liveNowMs.value);
-    if (dt.getHours() >= 8) {
-        return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
-    }
-    return getObservingEveningDate(liveNowMs.value).key;
-});
-
-const isTonightSession = computed(
-    () => isLiveTime.value || observingEvening.value.key === propsTonightEveningKey.value
-);
-
-const activeNightEphemeris = computed(() => {
-    const loc = observerLocation.value;
-    if (!loc) return null;
-    const eve = observingEvening.value;
-    return computeNightEphemerisForEvening(eve.year, eve.month0, eve.day, loc.lat, loc.lon);
-});
-
-const sessionRange = computed(() => {
-    if (isTonightSession.value) {
-        // 1. Prefer object's tonight altitude_graph session bounds (sunset - 30m -> sunrise + 30m)
-        const graph = props.object?.altitude_graph;
-        if (Array.isArray(graph) && graph.length >= 2) {
-            const s = Date.parse(graph[0].time);
-            const e = Date.parse(graph[graph.length - 1].time);
-            if (Number.isFinite(s) && Number.isFinite(e) && e > s) {
-                let midMs = (s + e) * 0.5;
-                const nightPair = props.nightTimes?.night;
-                if (Array.isArray(nightPair) && nightPair.length === 2) {
-                    const ns = Date.parse(nightPair[0]);
-                    const ne = Date.parse(nightPair[1]);
-                    if (Number.isFinite(ns) && Number.isFinite(ne) && ne > ns) {
-                        midMs = (ns + ne) * 0.5;
-                    }
-                }
-                return { startMs: s, endMs: e, midMs };
-            }
-        }
-
-        // 2. Fallback to tonight's nightTimes twilight bounds
-        const nt = props.nightTimes;
-        if (nt && typeof nt === 'object') {
-            let minT = Infinity;
-            let maxT = -Infinity;
-            for (const key of [
-                'civil',
-                'nautical',
-                'astronomical',
-                'night',
-                'astronomical_morn',
-                'nautical_morn',
-                'civil_morn'
-            ]) {
-                const pair = nt[key];
-                if (Array.isArray(pair) && pair.length === 2) {
-                    const t0 = Date.parse(pair[0]);
-                    const t1 = Date.parse(pair[1]);
-                    if (Number.isFinite(t0) && t0 < minT) minT = t0;
-                    if (Number.isFinite(t1) && t1 > maxT) maxT = t1;
-                }
-            }
-            if (Number.isFinite(minT) && Number.isFinite(maxT) && maxT > minT) {
-                const startMs = minT - 30 * 60 * 1000;
-                const endMs = maxT + 30 * 60 * 1000;
-                return { startMs, endMs, midMs: (startMs + endMs) * 0.5 };
-            }
-        }
-    }
-
-    // 3. Computed solar twilight bounds for any selected date & observer location
-    const ephem = activeNightEphemeris.value;
-    if (ephem) {
-        return {
-            startMs: ephem.startMs,
-            endMs: ephem.endMs,
-            midMs: ephem.midMs
-        };
-    }
-
-    // 4. Clean local-clock fallback (17:00 -> 07:00 on observing evening)
-    const eve = observingEvening.value;
-    const startMs = new Date(eve.year, eve.month0, eve.day, 17, 0, 0, 0).getTime();
-    const endMs = startMs + 14 * 3600 * 1000;
-    return { startMs, endMs, midMs: (startMs + endMs) * 0.5 };
-});
-
-const sliderValueMs = computed(() => {
-    const { startMs, endMs } = sessionRange.value;
-    return Math.max(startMs, Math.min(endMs, effectiveTimeMs.value));
-});
-
-const sliderTrackStyle = computed(() => {
-    const { startMs, endMs } = sessionRange.value;
-    const span = endMs - startMs;
-    if (span <= 0) {
-        return {
-            background:
-                'linear-gradient(90deg, #334155 0%, #1e3a8a 25%, #0f172a 50%, #1e3a8a 75%, #334155 100%)'
-        };
-    }
-
-    const DAY = 'rgba(71, 85, 105, 0.78)';
-    const CIV = 'rgba(59, 130, 246, 0.46)';
-    const NAU = 'rgba(37, 99, 235, 0.58)';
-    const AST = 'rgba(29, 78, 216, 0.75)';
-    const DRK = 'rgba(15, 23, 42, 0.96)';
-
-    const pctMs = (t) =>
-        Number.isFinite(t) ? Math.max(0, Math.min(100, ((t - startMs) / span) * 100)) : null;
-
-    // Extract twilight transition timestamps from tonight's nightTimes or arbitrary-date solar ephemeris
-    let s0 = null;
-    let s1 = null;
-    let c0 = null;
-    let c1 = null;
-    let n0 = null;
-    let n1 = null;
-    let a0 = null;
-    let a1 = null;
-
-    const nt = isTonightSession.value ? props.nightTimes : null;
-    const ephem = activeNightEphemeris.value;
-
-    if (nt && typeof nt === 'object' && (nt.civil || nt.nautical || nt.astronomical || nt.night)) {
-        const parsePct = (iso) => (iso ? pctMs(Date.parse(iso)) : null);
-        s0 = parsePct(nt.civil?.[0]);
-        s1 = parsePct(nt.civil_morn?.[1]);
-        c0 = parsePct(nt.nautical?.[0] ?? nt.civil?.[1]);
-        c1 = parsePct(nt.nautical_morn?.[1] ?? nt.civil_morn?.[0]);
-        n0 = parsePct(nt.astronomical?.[0] ?? (nt.night ? nt.nautical?.[1] : null));
-        n1 = parsePct(nt.astronomical_morn?.[1] ?? (nt.night ? nt.nautical_morn?.[0] : null));
-        a0 = parsePct(nt.night?.[0]);
-        a1 = parsePct(nt.night?.[1]);
-    } else if (ephem) {
-        s0 = pctMs(ephem.sunsetMs);
-        s1 = pctMs(ephem.sunriseMs);
-        c0 = pctMs(ephem.civilEveMs);
-        c1 = pctMs(ephem.civilMornMs);
-        n0 = pctMs(ephem.nautEveMs);
-        n1 = pctMs(ephem.nautMornMs);
-        a0 = pctMs(ephem.astroEveMs);
-        a1 = pctMs(ephem.astroMornMs);
-    }
-
-    if (s0 !== null && s1 !== null && s1 > s0) {
-        const stops = [`${DAY} 0%`, `${DAY} ${s0.toFixed(1)}%`, `${CIV} ${s0.toFixed(1)}%`];
-        if (c0 !== null && c1 !== null && c1 > c0) {
-            stops.push(`${CIV} ${c0.toFixed(1)}%`, `${NAU} ${c0.toFixed(1)}%`);
-            if (n0 !== null && n1 !== null && n1 > n0) {
-                stops.push(`${NAU} ${n0.toFixed(1)}%`, `${AST} ${n0.toFixed(1)}%`);
-                if (a0 !== null && a1 !== null && a1 > a0) {
-                    stops.push(
-                        `${AST} ${a0.toFixed(1)}%`,
-                        `${DRK} ${a0.toFixed(1)}%`,
-                        `${DRK} ${a1.toFixed(1)}%`,
-                        `${AST} ${a1.toFixed(1)}%`
-                    );
-                }
-                stops.push(`${AST} ${n1.toFixed(1)}%`, `${NAU} ${n1.toFixed(1)}%`);
-            }
-            stops.push(`${NAU} ${c1.toFixed(1)}%`, `${CIV} ${c1.toFixed(1)}%`);
-        }
-        stops.push(`${CIV} ${s1.toFixed(1)}%`, `${DAY} ${s1.toFixed(1)}%`, `${DAY} 100%`);
-        return { background: `linear-gradient(90deg, ${stops.join(', ')})` };
-    }
-
-    if (ephem && ephem.midSunAltDeg >= -0.833) {
-        return { background: DAY };
-    }
-
-    return {
-        background: `linear-gradient(90deg, ${DAY} 0%, ${NAU} 22%, ${DRK} 50%, ${NAU} 78%, ${DAY} 100%)`
-    };
-});
-
-const formattedObsTime = computed(() => formatLocalClock(effectiveTimeMs.value));
-const formattedObsDate = computed(() =>
-    formatObsDateBadge(effectiveTimeMs.value, liveNowMs.value)
-);
-const dateInputValue = computed(() => formatDateInputYmd(effectiveTimeMs.value));
-const dayOffsetFromToday = computed(() => {
-    const todayNoon = new Date(liveNowMs.value);
-    todayNoon.setHours(12, 0, 0, 0);
-    const obsNoon = new Date(effectiveTimeMs.value);
-    obsNoon.setHours(12, 0, 0, 0);
-    return Math.round((obsNoon.getTime() - todayNoon.getTime()) / 86400000);
-});
-const dayOffsetText = computed(() => {
-    const d = dayOffsetFromToday.value;
-    if (d === 0) return '';
-    return d > 0 ? `+${d}d` : `−${Math.abs(d)}d`;
-});
-const formattedSessionStart = computed(() => formatLocalClock(sessionRange.value.startMs));
-const formattedSessionEnd = computed(() => formatLocalClock(sessionRange.value.endMs));
 
 const isLoadingSky = ref(!preparedSky);
 const cachedServerImages = shallowRef([]);
@@ -1912,88 +1498,20 @@ const toggleDragTimeMode = () => {
     dragTimeMode.value = !dragTimeMode.value;
 };
 
-const onTimeSliderInput = (e) => {
-    const val = Number(e.target?.value);
-    if (!Number.isFinite(val)) return;
-    isLiveTime.value = false;
-    scrubTimeMs.value = val;
-    refreshReadoutAfterTimeChange();
-    scheduleDraw();
-};
-
-const stepObsTime = (deltaMinutes) => {
-    const base = effectiveTimeMs.value;
-    isLiveTime.value = false;
-    scrubTimeMs.value = base + deltaMinutes * 60 * 1000;
-    refreshReadoutAfterTimeChange();
-    scheduleDraw();
-};
-
-const stepObsDays = (deltaDays) => {
-    const dt = new Date(effectiveTimeMs.value);
-    dt.setDate(dt.getDate() + deltaDays);
-    isLiveTime.value = false;
-    scrubTimeMs.value = dt.getTime();
-    refreshReadoutAfterTimeChange();
-    scheduleDraw();
-};
-
-const onDateInputChange = (e) => {
-    const raw = e.target?.value;
-    if (!raw || typeof raw !== 'string') return;
-    const parts = raw.split('-').map(Number);
-    if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) return;
-    const [year, month, day] = parts;
-
-    const cur = new Date(effectiveTimeMs.value);
-    const next = new Date(
-        year,
-        month - 1,
-        day,
-        cur.getHours(),
-        cur.getMinutes(),
-        cur.getSeconds(),
-        0
-    );
-    if (!Number.isFinite(next.getTime())) return;
-
-    isLiveTime.value = false;
-    scrubTimeMs.value = next.getTime();
-    refreshReadoutAfterTimeChange();
-    scheduleDraw();
-};
-
-const openDatePicker = () => {
-    const el = dateInputRef.value;
-    if (!el) return;
-    if (typeof el.showPicker === 'function') {
-        try {
-            el.showPicker();
-            return;
-        } catch {
-            // Fall through to focus/click fallback
-        }
+const handleConsoleTimeUpdate = (payload) => {
+    if (!payload) return;
+    if (payload.isLive) {
+        const now = Number.isFinite(payload.timeMs) ? payload.timeMs : Date.now();
+        liveNowMs.value = now;
+        isLiveTime.value = true;
+        emit('update-obs-time', { isLive: true, timeMs: now });
+    } else if (Number.isFinite(payload.timeMs)) {
+        isLiveTime.value = false;
+        scrubTimeMs.value = payload.timeMs;
+        emit('update-obs-time', { isLive: false, timeMs: payload.timeMs });
+    } else {
+        return;
     }
-    el.focus();
-    el.click();
-};
-
-const onDateWheel = (e) => {
-    if (e.deltaY === 0) return;
-    const step = e.shiftKey ? 7 : 1;
-    stepObsDays(e.deltaY < 0 ? step : -step);
-};
-
-const jumpToTonightMid = () => {
-    isLiveTime.value = false;
-    scrubTimeMs.value = sessionRange.value.midMs;
-    refreshReadoutAfterTimeChange();
-    scheduleDraw();
-};
-
-const resetToLiveNow = () => {
-    liveNowMs.value = Date.now();
-    isLiveTime.value = true;
     refreshReadoutAfterTimeChange();
     scheduleDraw();
 };
@@ -4393,8 +3911,14 @@ const flushPointerFrame = () => {
             const dThetaRad = panTimeVel.nearPole
                 ? dx / panTimeVel.f
                 : (dx * panTimeVel.vx + dy * panTimeVel.vy) / panTimeVel.denom;
+            const nextTimeMs = panStartTimeMs + dThetaRad * MS_PER_SIDEREAL_RAD;
             isLiveTime.value = false;
-            scrubTimeMs.value = panStartTimeMs + dThetaRad * MS_PER_SIDEREAL_RAD;
+            scrubTimeMs.value = nextTimeMs;
+            emit('update-obs-time', { isLive: false, timeMs: nextTimeMs });
+            if (fixFovEnabled.value && hasValidSensorFov.value) {
+                syncFovSkyFromPin();
+                emitSensorCenterIfChanged();
+            }
             drawSkyCanvas();
             const ctr = getCurrentCenterRaDec();
             updateStatusReadout(ctr.ra, ctr.dec);
@@ -4498,6 +4022,14 @@ const handleItemClick = async (item, closeMapAfterSelect = false) => {
             const minHrsAlt = props.clientSettings?.min_hours_altitude ?? props.settings?.min_altitude;
             if (minHrsAlt !== undefined && minHrsAlt !== null) {
                 qp.set('min_hours_altitude', String(minHrsAlt));
+            }
+            const eveKey = resolveObservingEvening(
+                isLiveTime.value,
+                liveNowMs.value,
+                effectiveTimeMs.value
+            ).key;
+            if (eveKey && eveKey !== resolveLiveTonightEveningKey(liveNowMs.value)) {
+                qp.set('obs_date', eveKey);
             }
             const qs = qp.toString();
             const res = await fetch(`/api/object-details/${encodeURIComponent(item.name)}${qs ? `?${qs}` : ''}`);
@@ -4787,6 +4319,35 @@ watch(fovCtrlRef, (el) => {
     }
 });
 
+watch(
+    () => [props.isLiveObsTime, props.liveNowMs, props.effectiveObsTimeMs],
+    ([nextLive, nextNow, nextEff]) => {
+        let changed = false;
+        if (typeof nextLive === 'boolean' && nextLive !== isLiveTime.value) {
+            isLiveTime.value = nextLive;
+            changed = true;
+        }
+        if (Number.isFinite(nextNow) && Math.abs(nextNow - liveNowMs.value) >= 1) {
+            liveNowMs.value = nextNow;
+            if (isLiveTime.value) changed = true;
+        }
+        if (
+            !isLiveTime.value &&
+            Number.isFinite(nextEff) &&
+            Math.abs(nextEff - scrubTimeMs.value) >= 1
+        ) {
+            scrubTimeMs.value = nextEff;
+            changed = true;
+        }
+        if (changed) {
+            refreshReadoutAfterTimeChange();
+            if ((showHorizon.value || isHorizonFixed.value) && observerLocation.value) {
+                scheduleDraw();
+            }
+        }
+    }
+);
+
 watch(skyAtlasVersion, () => {
     scheduleDraw();
 });
@@ -4798,15 +4359,17 @@ onMounted(async () => {
     window.addEventListener('resize', refreshCanvasRect, { passive: true });
     window.addEventListener('scroll', refreshCanvasRect, { capture: true, passive: true });
 
-    liveClockTimer = window.setInterval(() => {
-        if (isLiveTime.value) {
-            liveNowMs.value = Date.now();
-            refreshReadoutAfterTimeChange();
-            if ((showHorizon.value || isHorizonFixed.value) && observerLocation.value) {
-                scheduleDraw();
+    if (props.liveNowMs === undefined) {
+        liveClockTimer = window.setInterval(() => {
+            if (isLiveTime.value) {
+                liveNowMs.value = Date.now();
+                refreshReadoutAfterTimeChange();
+                if ((showHorizon.value || isHorizonFixed.value) && observerLocation.value) {
+                    scheduleDraw();
+                }
             }
-        }
-    }, 30000);
+        }, 30000);
+    }
 
     if (containerRef.value) {
         const updateDims = () => {
@@ -5093,182 +4656,57 @@ onUnmounted(() => {
         </div>
 
         <!-- Bottom-Right Observation Time & Date Bar (when Horizon is enabled) -->
-        <div
+        <ObservingDateConsole
             v-if="showHorizon && observerLocation"
+            variant="sky"
             class="sky-time-bar"
-            @mousedown.stop
-            @touchstart.stop
-            @wheel.stop
+            :is-live-time="isLiveTime"
+            :live-now-ms="liveNowMs"
+            :effective-time-ms="effectiveTimeMs"
+            :object="object"
+            :settings="settings"
+            :night-times="nightTimes"
+            @update-time="handleConsoleTimeUpdate"
         >
-            <div class="time-frame-row">
-                <div class="frame-mode-seg" role="group" aria-label="Sky reference frame">
-                    <button
-                        type="button"
-                        class="frame-seg-btn"
-                        :class="{ active: !isHorizonFixed }"
-                        @click="setSkyFrameMode('sky')"
-                        title="Sky Fixed (Equatorial, North up): sky stays fixed while the horizon moves with time"
-                    >
-                        ✦ Sky Fixed
-                    </button>
-                    <button
-                        type="button"
-                        class="frame-seg-btn"
-                        :class="{ active: isHorizonFixed }"
-                        @click="setSkyFrameMode('horizon')"
-                        title="Horizon Fixed (Alt-Az, Zenith up): horizon stays fixed & level while the sky moves with time. Drag horizontally to scan along the horizon."
-                    >
-                        ⛰ Horizon Fixed
-                    </button>
-                </div>
+            <template #header>
+                <div class="time-frame-row">
+                    <div class="frame-mode-seg" role="group" aria-label="Sky reference frame">
+                        <button
+                            type="button"
+                            class="frame-seg-btn"
+                            :class="{ active: !isHorizonFixed }"
+                            @click="setSkyFrameMode('sky')"
+                            title="Sky Fixed (Equatorial, North up): sky stays fixed while the horizon moves with time"
+                        >
+                            ✦ Sky Fixed
+                        </button>
+                        <button
+                            type="button"
+                            class="frame-seg-btn"
+                            :class="{ active: isHorizonFixed }"
+                            @click="setSkyFrameMode('horizon')"
+                            title="Horizon Fixed (Alt-Az, Zenith up): horizon stays fixed & level while the sky moves with time. Drag horizontally to scan along the horizon."
+                        >
+                            ⛰ Horizon Fixed
+                        </button>
+                    </div>
 
-                <button
-                    type="button"
-                    class="drag-sky-pill"
-                    :class="{ active: isTimeDragActive }"
-                    @click="toggleDragTimeMode"
-                    :title="
-                        isTimeDragActive
-                            ? 'Drag Sky active: dragging advances/rewinds sky time across the fixed horizon · Click to return to panning along the horizon'
-                            : 'Drag the sky through time across a fixed horizon & compass (or hold Shift + drag in Horizon Fixed mode)'
-                    "
-                >
-                    <span>⟳ Drag Sky</span>
-                </button>
-            </div>
-
-            <div class="time-date-row">
-                <div class="date-step-group">
                     <button
                         type="button"
-                        class="time-mini-btn"
-                        @click="stepObsDays(-7)"
-                        title="Step back 7 days (keep clock time)"
-                    >
-                        −7d
-                    </button>
-                    <button
-                        type="button"
-                        class="time-mini-btn"
-                        @click="stepObsDays(-1)"
-                        title="Previous day (keep clock time)"
-                    >
-                        −1d
-                    </button>
-                </div>
-
-                <div class="date-picker-wrap" @wheel.prevent="onDateWheel">
-                    <button
-                        type="button"
-                        class="date-picker-pill"
-                        :class="{ 'is-offset': dayOffsetFromToday !== 0 }"
-                        @click="openDatePicker"
-                        title="Click to pick calendar date · Scroll wheel to cycle days (Shift+Wheel ±7d)"
-                    >
-                        <span class="date-cal-icon">📅</span>
-                        <span class="date-label-text">{{ formattedObsDate }}</span>
-                        <span v-if="dayOffsetText" class="date-offset-tag">
-                            {{ dayOffsetText }}
-                        </span>
-                    </button>
-                    <input
-                        ref="dateInputRef"
-                        type="date"
-                        class="native-date-input"
-                        :value="dateInputValue"
-                        tabindex="-1"
-                        aria-label="Select observation date"
-                        @input="onDateInputChange"
-                    />
-                </div>
-
-                <div class="date-step-group">
-                    <button
-                        type="button"
-                        class="time-mini-btn"
-                        @click="stepObsDays(1)"
-                        title="Next day (keep clock time)"
-                    >
-                        +1d
-                    </button>
-                    <button
-                        type="button"
-                        class="time-mini-btn"
-                        @click="stepObsDays(7)"
-                        title="Step forward 7 days (keep clock time)"
-                    >
-                        +7d
-                    </button>
-                </div>
-            </div>
-
-            <div class="time-bar-top">
-                <span class="loc-pill" :title="observerLocation.coordsLabel">
-                    📍 {{ observerLocation.label }}
-                </span>
-
-                <div class="time-readout-group">
-                    <span class="time-mode-dot" :class="{ live: isLiveTime }"></span>
-                    <span class="time-clock-text">{{ formattedObsTime }}</span>
-                </div>
-
-                <div class="time-quick-btns">
-                    <button
-                        type="button"
-                        class="time-mini-btn"
-                        @click="stepObsTime(-60)"
-                        title="Step back 1 hour"
-                    >
-                        −1h
-                    </button>
-                    <button
-                        type="button"
-                        class="time-mini-btn"
-                        @click="stepObsTime(60)"
-                        title="Step forward 1 hour"
-                    >
-                        +1h
-                    </button>
-                    <button
-                        type="button"
-                        class="time-mini-btn"
-                        @click="jumpToTonightMid"
+                        class="drag-sky-pill"
+                        :class="{ active: isTimeDragActive }"
+                        @click="toggleDragTimeMode"
                         :title="
-                            dayOffsetFromToday === 0
-                                ? 'Jump to tonight\'s dark-sky midpoint'
-                                : 'Jump to selected night\'s dark-sky midpoint'
+                            isTimeDragActive
+                                ? 'Drag Sky active: dragging advances/rewinds sky time across the fixed horizon · Click to return to panning along the horizon'
+                                : 'Drag the sky through time across a fixed horizon & compass (or hold Shift + drag in Horizon Fixed mode)'
                         "
                     >
-                        {{ dayOffsetFromToday === 0 ? 'Tonight' : 'Mid' }}
-                    </button>
-                    <button
-                        type="button"
-                        class="time-mini-btn now-btn"
-                        :class="{ active: isLiveTime }"
-                        @click="resetToLiveNow"
-                        title="Reset date & clock to live current time"
-                    >
-                        Now
+                        <span>⟳ Drag Sky</span>
                     </button>
                 </div>
-            </div>
-
-            <div class="time-slider-row">
-                <span class="session-bound">{{ formattedSessionStart }}</span>
-                <input
-                    type="range"
-                    class="sky-time-slider"
-                    :min="sessionRange.startMs"
-                    :max="sessionRange.endMs"
-                    :step="60000"
-                    :value="sliderValueMs"
-                    :style="sliderTrackStyle"
-                    @input="onTimeSliderInput"
-                    title="Scrub through selected night's observing session (Sunset → Astronomical Night → Sunrise)"
-                />
-                <span class="session-bound">{{ formattedSessionEnd }}</span>
-            </div>
-        </div>
+            </template>
+        </ObservingDateConsole>
     </div>
 </template>
 
@@ -5608,17 +5046,7 @@ onUnmounted(() => {
     position: absolute;
     bottom: 10px;
     right: 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-    padding: 6px 10px;
-    border-radius: 8px;
-    background: rgba(9, 14, 23, 0.94);
-    border: 1px solid rgba(148, 163, 184, 0.26);
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
     z-index: 33;
-    min-width: 304px;
-    max-width: 368px;
 }
 
 .time-frame-row {
@@ -5626,8 +5054,6 @@ onUnmounted(() => {
     align-items: center;
     justify-content: space-between;
     gap: 6px;
-    padding-bottom: 4px;
-    border-bottom: 1px solid rgba(148, 163, 184, 0.14);
 }
 
 .frame-mode-seg {
@@ -5706,217 +5132,6 @@ onUnmounted(() => {
     border-color: rgba(245, 158, 11, 0.68);
     color: #fde68a;
     font-weight: 600;
-}
-
-.time-date-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 5px;
-    padding-bottom: 4px;
-    border-bottom: 1px solid rgba(148, 163, 184, 0.14);
-}
-
-.date-step-group {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-    flex-shrink: 0;
-}
-
-.date-picker-wrap {
-    position: relative;
-    flex: 1;
-    display: flex;
-    justify-content: center;
-    min-width: 0;
-}
-
-.date-picker-pill {
-    width: 100%;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 5px;
-    padding: 2px 8px;
-    margin: 0;
-    border-radius: 5px;
-    border: 1px solid rgba(148, 163, 184, 0.24);
-    background: rgba(15, 23, 38, 0.92);
-    color: #e2e8f0;
-    font-size: 0.72rem;
-    font-weight: 500;
-    line-height: 1.25;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
-}
-
-.date-picker-pill:hover {
-    background: rgba(26, 38, 58, 0.96);
-    border-color: rgba(56, 189, 248, 0.48);
-    color: #ffffff;
-}
-
-.date-picker-pill.is-offset {
-    border-color: rgba(245, 158, 11, 0.48);
-    background: rgba(34, 26, 14, 0.88);
-    color: #fef3c7;
-}
-
-.date-picker-pill.is-offset:hover {
-    border-color: rgba(251, 191, 36, 0.72);
-    background: rgba(46, 34, 16, 0.95);
-}
-
-.date-cal-icon {
-    font-size: 0.72rem;
-    line-height: 1;
-}
-
-.date-label-text {
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.date-offset-tag {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.64rem;
-    font-weight: 600;
-    padding: 0 4px;
-    border-radius: 3px;
-    background: rgba(245, 158, 11, 0.2);
-    color: #fcd34d;
-}
-
-.native-date-input {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    opacity: 0;
-    pointer-events: none;
-    border: 0;
-    padding: 0;
-    margin: 0;
-}
-
-.time-bar-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-}
-
-.loc-pill {
-    font-size: 0.71rem;
-    color: #94a3b8;
-    max-width: 112px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.time-readout-group {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-}
-
-.time-mode-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: #f59e0b;
-}
-
-.time-mode-dot.live {
-    background: #34d399;
-}
-
-.time-clock-text {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.78rem;
-    font-weight: 600;
-    color: #f1f5f9;
-}
-
-.time-quick-btns {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-}
-
-.time-mini-btn {
-    padding: 2px 6px;
-    margin: 0;
-    border-radius: 4px;
-    border: 1px solid rgba(148, 163, 184, 0.24);
-    background: rgba(18, 26, 40, 0.92);
-    color: #cbd5e1;
-    font-size: 0.68rem;
-    font-weight: 500;
-    line-height: 1.25;
-    cursor: pointer;
-    transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
-}
-
-.time-mini-btn:hover {
-    background: rgba(30, 41, 59, 0.96);
-    border-color: rgba(148, 163, 184, 0.48);
-    color: #ffffff;
-}
-
-.time-mini-btn.now-btn.active {
-    background: rgba(10, 46, 38, 0.95);
-    border-color: rgba(52, 211, 153, 0.58);
-    color: #a7f3d0;
-}
-
-.time-slider-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-.session-bound {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size: 0.65rem;
-    color: #64748b;
-    flex-shrink: 0;
-}
-
-.sky-time-slider {
-    flex: 1;
-    height: 6px;
-    margin: 0;
-    padding: 0;
-    border-radius: 999px;
-    border: 1px solid rgba(148, 163, 184, 0.24);
-    appearance: none;
-    -webkit-appearance: none;
-    cursor: pointer;
-    outline: none;
-}
-
-.sky-time-slider::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    appearance: none;
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: #34d399;
-    border: 1.5px solid #061018;
-    cursor: pointer;
-}
-
-.sky-time-slider::-moz-range-thumb {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: #34d399;
-    border: 1.5px solid #061018;
-    cursor: pointer;
 }
 
 @media (max-width: 1180px) {

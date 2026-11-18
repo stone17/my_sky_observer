@@ -227,8 +227,8 @@ def get_sorted_objects(
         )
     )
     try:
-        session_start, session_end = calculator.get_observing_session(
-            observer, Time.now()
+        session_start, session_end = calculator.get_observing_session_for_date(
+            observer, settings.get("obs_date")
         )
         altaz_frame, night_duration = calculator.prepare_night_frame(
             location, session_start, session_end
@@ -414,6 +414,9 @@ def apply_stream_query_overrides(
         settings["selected_types"] = types_list
         client_cfg["selected_types"] = types_list
 
+    if "obs_date" in qp and qp["obs_date"].strip():
+        settings["obs_date"] = qp["obs_date"].strip()
+
     return settings
 
 
@@ -502,7 +505,9 @@ def _resolve_single_object_sync(
             lat=location.latitude * u.deg, lon=location.longitude * u.deg
         )
     )
-    session_start, session_end = calculator.get_observing_session(observer, Time.now())
+    session_start, session_end = calculator.get_observing_session_for_date(
+        observer, settings.get("obs_date")
+    )
     session_mid = session_start + 0.5 * (session_end - session_start)
     twilight = calculator.get_twilight_periods(location, session_mid)
     return obj, session_start, session_end, twilight
@@ -556,6 +561,7 @@ async def build_single_object_details(
     detail.setdefault("maj_ax", obj.get("maj_ax", 0))
     detail.setdefault("max_altitude", round(float(obj.get("max_altitude") or 0.0), 1))
     detail["hours_visible"] = detail.get("hours_above_min", 0.0)
+    detail["night_times"] = twilight
     return detail
 
 
@@ -952,8 +958,8 @@ class StreamSession:
                 lat=self.location.latitude * u.deg, lon=self.location.longitude * u.deg
             )
         )
-        self.session_start, self.session_end = calculator.get_observing_session(
-            observer, Time.now()
+        self.session_start, self.session_end = calculator.get_observing_session_for_date(
+            observer, self.settings.get("obs_date")
         )
         session_mid = self.session_start + 0.5 * (
             self.session_end - self.session_start

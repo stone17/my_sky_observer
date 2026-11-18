@@ -316,6 +316,8 @@ async def start_background_downloads(request: Request):
         settings["download_mode"] = str(body["download_mode"])
     elif "mode" in body:
         settings["download_mode"] = str(body["mode"])
+    if "obs_date" in body and body.get("obs_date") and "obs_date" not in qp:
+        settings["obs_date"] = str(body["obs_date"]).strip()
 
     status = await background_download_manager.start_from_settings(settings)
     return JSONResponse(content={"status": "started", **status})
@@ -339,6 +341,7 @@ async def get_object_details(
     longitude: Optional[float] = None,
     tz_offset: Optional[float] = None,
     min_hours_altitude: Optional[float] = None,
+    obs_date: Optional[str] = None,
 ):
     settings = load_settings()
     settings.pop("catalogs", None)
@@ -352,6 +355,8 @@ async def get_object_details(
         settings.setdefault("client_settings", {})["min_hours_altitude"] = (
             min_hours_altitude
         )
+    if obs_date and obs_date.strip():
+        settings["obs_date"] = obs_date.strip()
     return await build_single_object_details(
         obj_id, settings, catalog_manager=catalogs
     )

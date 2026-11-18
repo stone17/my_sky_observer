@@ -168,6 +168,39 @@ class AstroCalculator:
         except Exception:
             return now - 12 * u.hour, now + 12 * u.hour
 
+    def get_observing_session_for_date(
+        self,
+        observer: Observer,
+        obs_date: Optional[str] = None,
+        now: Optional[Time] = None,
+    ) -> Tuple[Time, Time]:
+        """
+        Resolves the single-night observing session for an explicit evening date `YYYY-MM-DD`
+        (evening of `obs_date` -> morning of `obs_date + 1 day`), or falls back to `now` / `Time.now()`.
+        """
+        if obs_date and isinstance(obs_date, str):
+            cleaned = obs_date.strip()
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", cleaned):
+                try:
+                    datetime.strptime(cleaned, "%Y-%m-%d")
+                    lon_deg = float(observer.location.lon.deg)
+                    t_noon = (
+                        Time(f"{cleaned}T12:00:00", format="isot", scale="utc")
+                        - (lon_deg / 15.0) * u.hour
+                    )
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        bounds = self._resolve_observing_night(
+                            observer.location, t_noon
+                        )
+                        if bounds is not None:
+                            sunset, sunrise = bounds
+                            return sunset - 0.5 * u.hour, sunrise + 0.5 * u.hour
+                    return t_noon, t_noon + 24.0 * u.hour
+                except Exception:
+                    pass
+        return self.get_observing_session(observer, now if now is not None else Time.now())
+
     def batch_get_max_altitude(
         self, dec_array: np.ndarray, latitude: float
     ) -> np.ndarray:

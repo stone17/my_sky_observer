@@ -10,6 +10,12 @@ import {
     resolveEffectiveTimeWindow,
     isTimestampInTimeWindow
 } from './utils/timeWindow.js';
+import {
+    resolveObservingEvening,
+    resolveLiveTonightEveningKey,
+    doesGraphMatchEvening,
+    doesNightTimesMatchEvening
+} from './utils/observingTime.js';
 
 const LOCAL_STORAGE_BACKUP_KEY = 'my_sky_observer_settings_backup';
 
@@ -42,6 +48,44 @@ const clientSettings = ref({
 const objects = ref([]);
 const selectedObject = ref(null);
 const customFramingCoords = ref(null);
+
+// --- SHARED OBSERVING DATE & TIME STATE (Sky View + On-Target Framing + Altitude Graph) ---
+const isLiveObsTime = ref(true);
+const liveNowMs = ref(Date.now());
+const scrubObsTimeMs = ref(Date.now());
+let liveObsClockTimer = null;
+let obsDateRefreshTimer = null;
+
+const effectiveObsTimeMs = computed(() =>
+    isLiveObsTime.value ? liveNowMs.value : scrubObsTimeMs.value
+);
+
+const observingEvening = computed(() =>
+    resolveObservingEvening(
+        isLiveObsTime.value,
+        liveNowMs.value,
+        effectiveObsTimeMs.value
+    )
+);
+
+const activeObsDateParam = computed(() => {
+    const tonightKey = resolveLiveTonightEveningKey(liveNowMs.value);
+    return observingEvening.value.key !== tonightKey ? observingEvening.value.key : null;
+});
+
+const handleObsTimeUpdate = (payload) => {
+    if (!payload || typeof payload !== 'object') return;
+    if (payload.isLive) {
+        isLiveObsTime.value = true;
+        liveNowMs.value = Date.now();
+        return;
+    }
+    const nextMs = Number(payload.timeMs);
+    if (Number.isFinite(nextMs)) {
+        scrubObsTimeMs.value = nextMs;
+        isLiveObsTime.value = false;
+    }
+};
 
 const handleFramingCoordsUpdate = (coords) => {
     customFramingCoords.value = coords || null;
@@ -284,11 +328,34 @@ const pendingDetailRequests = new Set();
 
 const mergeObjectDetailsPayload = (d, insertIfMissing = false) => {
     if (!d || !d.name) return null;
-    let o = objectMap.get(d.name) || objects.value.find(obj => obj.name === d.name);
+
+    const currentEveningKey = observingEvening.value?.key;
+    if (d.night_times && typeof d.night_times === 'object') {
+        if (!currentEveningKey || doesNightTimesMatchEvening(d.night_times, currentEveningKey)) {
+            nightTimes.value = d.night_times;
+        }
+    }
+
+    const cleanDetails = { ...d };
+    delete cleanDetails.night_times;
+
+    // Guard against late-arriving graph payloads from a previously selected date
+    if (
+        currentEveningKey &&
+        Array.isArray(cleanDetails.altitude_graph) &&
+        cleanDetails.altitude_graph.length > 1 &&
+        !doesGraphMatchEvening(cleanDetails.altitude_graph, currentEveningKey)
+    ) {
+        delete cleanDetails.altitude_graph;
+        delete cleanDetails.moon_graph;
+        delete cleanDetails.sun_graph;
+    }
+
+    let o = objectMap.get(cleanDetails.name) || objects.value.find(obj => obj.name === cleanDetails.name);
 
     if (!o && insertIfMissing) {
-        applySavedStateToObject(d);
-        objects.value.push(d);
+        applySavedStateToObject(cleanDetails);
+        objects.value.push(cleanDetails);
         o = objects.value[objects.value.length - 1];
         objectMap.set(o.name, o);
     }
@@ -301,7 +368,7 @@ const mergeObjectDetailsPayload = (d, insertIfMissing = false) => {
             (o.image_url && o.custom_framed) ||
             (o.image_url && Number(o.image_resolution) > baseRes && Math.abs((o.image_fov || 0) - targetFov) < 0.01) ||
             (o.image_url && isManualFov.value && Math.abs((o.image_fov || 0) - targetFov) < 0.01) ||
-            (o.image_url && !d.image_url && Math.abs((o.image_fov || 0) - (d.image_fov || 0)) < 0.01);
+            (o.image_url && !cleanDetails.image_url && Math.abs((o.image_fov || 0) - (cleanDetails.image_fov || 0)) < 0.01);
 
         const savedUrl = o.image_url;
         const savedFov = o.image_fov;
@@ -312,7 +379,7 @@ const mergeObjectDetailsPayload = (d, insertIfMissing = false) => {
         const savedCenterDec = o.center_dec;
         const savedCustomFramed = o.custom_framed;
 
-        Object.assign(o, d);
+        Object.assign(o, cleanDetails);
         applySavedStateToObject(o);
 
         if (keepCurrentImage) {
@@ -327,18 +394,22 @@ const mergeObjectDetailsPayload = (d, insertIfMissing = false) => {
         }
     }
 
-    if (selectedObject.value && selectedObject.value.name === d.name) {
+    if (selectedObject.value && selectedObject.value.name === cleanDetails.name) {
         if (o && selectedObject.value !== o) {
             Object.assign(selectedObject.value, o);
             selectedObject.value = o;
         } else if (!o) {
-            Object.assign(selectedObject.value, d);
+            Object.assign(selectedObject.value, cleanDetails);
         }
     }
     return o || selectedObject.value;
 };
 
-const isValidSingleSessionGraph = (graph, currentNightTimes = nightTimes.value) => {
+const isValidSingleSessionGraph = (
+    graph,
+    currentNightTimes = nightTimes.value,
+    expectedEveningKey = observingEvening.value?.key
+) => {
     if (!Array.isArray(graph) || graph.length < 2) return false;
     const t0 = new Date(graph[0]?.time).getTime();
     const t1 = new Date(graph[graph.length - 1]?.time).getTime();
@@ -346,7 +417,15 @@ const isValidSingleSessionGraph = (graph, currentNightTimes = nightTimes.value) 
     const spanHours = (t1 - t0) / 3600000;
     if (spanHours > 25.5) return false;
 
-    if (currentNightTimes && typeof currentNightTimes === 'object') {
+    if (expectedEveningKey && !doesGraphMatchEvening(graph, expectedEveningKey)) {
+        return false;
+    }
+
+    if (
+        currentNightTimes &&
+        typeof currentNightTimes === 'object' &&
+        (!expectedEveningKey || doesNightTimesMatchEvening(currentNightTimes, expectedEveningKey))
+    ) {
         const refRange =
             currentNightTimes.night ||
             currentNightTimes.astronomical ||
@@ -370,18 +449,20 @@ const isValidSingleSessionGraph = (graph, currentNightTimes = nightTimes.value) 
 const ensureObjectDetails = async (targetObj) => {
     const objName = targetObj?.name;
     if (!objName) return;
-    if (isValidSingleSessionGraph(targetObj.altitude_graph)) return;
+    const currentEveningKey = observingEvening.value?.key || '';
+    if (isValidSingleSessionGraph(targetObj.altitude_graph, nightTimes.value, currentEveningKey)) return;
 
     const canonical = objectMap.get(objName);
-    if (canonical && isValidSingleSessionGraph(canonical.altitude_graph)) {
+    if (canonical && isValidSingleSessionGraph(canonical.altitude_graph, nightTimes.value, currentEveningKey)) {
         if (targetObj !== canonical) {
             Object.assign(targetObj, canonical);
         }
         return;
     }
 
-    if (pendingDetailRequests.has(objName)) return;
-    pendingDetailRequests.add(objName);
+    const reqKey = `${objName}::${currentEveningKey}`;
+    if (pendingDetailRequests.has(reqKey)) return;
+    pendingDetailRequests.add(reqKey);
 
     try {
         const qp = new URLSearchParams();
@@ -395,6 +476,9 @@ const ensureObjectDetails = async (targetObj) => {
         if (minHrsAlt !== undefined && minHrsAlt !== null) {
             qp.set('min_hours_altitude', String(minHrsAlt));
         }
+        if (activeObsDateParam.value) {
+            qp.set('obs_date', activeObsDateParam.value);
+        }
         const qs = qp.toString();
         const url = `/api/object-details/${encodeURIComponent(objName)}${qs ? `?${qs}` : ''}`;
         const res = await fetch(url);
@@ -405,7 +489,7 @@ const ensureObjectDetails = async (targetObj) => {
     } catch (err) {
         console.error('Failed to fetch object details on demand:', err);
     } finally {
-        pendingDetailRequests.delete(objName);
+        pendingDetailRequests.delete(reqKey);
     }
 };
 
@@ -886,6 +970,9 @@ const buildStreamQueryParams = (mode = 'selected') => {
         params.append('time_window_end', clientSettings.value.time_window_end);
     }
     params.append('tz_offset', String(new Date().getTimezoneOffset()));
+    if (activeObsDateParam.value) {
+        params.append('obs_date', activeObsDateParam.value);
+    }
 
     params.append('selected_types', (clientSettings.value.selected_types || []).join(','));
     if (clientSettings.value.filter_favorites_only !== undefined) {
@@ -1019,8 +1106,9 @@ const startStream = (mode = 'selected') => {
     streamStatus.value = 'Connecting...';
     isLoading.value = true;
 
+    const streamEveningKey = observingEvening.value.key;
     const locKey = settings.value.location
-        ? `${settings.value.location.latitude}_${settings.value.location.longitude}`
+        ? `${settings.value.location.latitude}_${settings.value.location.longitude}_${streamEveningKey}`
         : '';
     const equipSig = equipmentSignature.value;
     const params = buildStreamQueryParams('selected');
@@ -1047,7 +1135,9 @@ const startStream = (mode = 'selected') => {
     eventSource.addEventListener('night_times', (e) => {
         try {
             const nt = JSON.parse(e.data);
-            nightTimes.value = nt;
+            if (doesNightTimesMatchEvening(nt, observingEvening.value.key)) {
+                nightTimes.value = nt;
+            }
             const defaults = getAstroNightDefaults(nt);
             if (!clientSettings.value.time_window_start) {
                 clientSettings.value.time_window_start = defaults.start;
@@ -1348,9 +1438,30 @@ watch(streamParams, (newVal, oldVal) => {
     }
 }, { deep: true });
 
+watch(
+    () => observingEvening.value.key,
+    (newKey, oldKey) => {
+        if (isInitializing || !newKey || newKey === oldKey) return;
+        if (obsDateRefreshTimer) {
+            clearTimeout(obsDateRefreshTimer);
+            obsDateRefreshTimer = null;
+        }
+        obsDateRefreshTimer = setTimeout(() => {
+            obsDateRefreshTimer = null;
+            if (selectedObject.value) {
+                ensureObjectDetails(selectedObject.value);
+            }
+            startStream('selected');
+        }, 350);
+    }
+);
+
 onMounted(async () => {
     window.addEventListener('beforeunload', flushPendingSave);
     window.addEventListener('pagehide', flushPendingSave);
+    liveObsClockTimer = setInterval(() => {
+        liveNowMs.value = Date.now();
+    }, 30000);
     if (window.innerWidth <= 1024) {
         activeLeftTab.value = null;
     }
@@ -1364,6 +1475,14 @@ onMounted(async () => {
 onUnmounted(() => {
     window.removeEventListener('beforeunload', flushPendingSave);
     window.removeEventListener('pagehide', flushPendingSave);
+    if (liveObsClockTimer) {
+        clearInterval(liveObsClockTimer);
+        liveObsClockTimer = null;
+    }
+    if (obsDateRefreshTimer) {
+        clearTimeout(obsDateRefreshTimer);
+        obsDateRefreshTimer = null;
+    }
     flushPendingSave();
     stopDownloadPolling();
     stopStream();
@@ -1421,6 +1540,9 @@ watch(clientSettings, () => {
                         :nightTimes="nightTimes"
                         :searchQuery="searchQuery"
                         :activeFov="activeFov"
+                        :isLiveObsTime="isLiveObsTime"
+                        :liveNowMs="liveNowMs"
+                        :effectiveObsTimeMs="effectiveObsTimeMs"
                         @update-fov="handleFovUpdate"
                         @update-search="handleSearchUpdate"
                         @select-object="handleExternalSelectObject"
@@ -1428,6 +1550,7 @@ watch(clientSettings, () => {
                         @update-client-settings="updateClientSettings"
                         @update-object-settings="handleObjectSettingsUpdate"
                         @update-framing-coords="handleFramingCoordsUpdate"
+                        @update-obs-time="handleObsTimeUpdate"
                         @open-mobile-list="toggleMobileList"
                     />
                 </div>
@@ -1477,6 +1600,10 @@ watch(clientSettings, () => {
                         :settings="settings"
                         :clientSettings="clientSettings"
                         :customCoords="customFramingCoords"
+                        :isLiveTime="isLiveObsTime"
+                        :liveNowMs="liveNowMs"
+                        :effectiveTimeMs="effectiveObsTimeMs"
+                        :observingEvening="observingEvening"
                     />
                 </div>
                 <div class="list-panel">

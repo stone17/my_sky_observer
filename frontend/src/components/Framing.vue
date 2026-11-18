@@ -1,12 +1,14 @@
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import SkyContextMap from './SkyContextMap.vue';
+import ObservingDateConsole from './ObservingDateConsole.vue';
 import {
     computeSensorFov,
     computeDefaultImageFov,
     normalizeImageFov,
     MIN_IMAGE_FOV_DEG
 } from '../utils/fov.js';
+import { parseObserverLocation } from '../utils/observingTime.js';
 import {
     getObjectTypeLabel,
     getObjectTypeDescription,
@@ -19,8 +21,32 @@ import {
     skyAtlasVersion
 } from '../utils/skyAtlas.js';
 
-const props = defineProps(['object', 'objects', 'filteredObjects', 'settings', 'clientSettings', 'nightTimes', 'searchQuery', 'activeFov']);
-const emit = defineEmits(['update-settings', 'update-client-settings', 'update-search', 'select-object', 'update-fov', 'open-mobile-list', 'update-object-settings', 'update-framing-coords']);
+const props = defineProps([
+    'object',
+    'objects',
+    'filteredObjects',
+    'settings',
+    'clientSettings',
+    'nightTimes',
+    'searchQuery',
+    'activeFov',
+    'isLiveObsTime',
+    'liveNowMs',
+    'effectiveObsTimeMs'
+]);
+const emit = defineEmits([
+    'update-settings',
+    'update-client-settings',
+    'update-search',
+    'select-object',
+    'update-fov',
+    'open-mobile-list',
+    'update-object-settings',
+    'update-framing-coords',
+    'update-obs-time'
+]);
+
+const hasObserverLocation = computed(() => Boolean(parseObserverLocation(props.settings)));
 
 // --- PHYSICAL SENSOR & DEFAULT IMAGE FOV CALCULATION (Single Source of Truth) ---
 const systemSensorFov = computed(() => {
@@ -1185,10 +1211,14 @@ onUnmounted(() => {
                 :rotation="rotation"
                 :baseImageFov="currentBaseImageFov"
                 :initialMapFov="skyMapInitialFov"
+                :isLiveObsTime="isLiveObsTime"
+                :liveNowMs="liveNowMs"
+                :effectiveObsTimeMs="effectiveObsTimeMs"
                 @close="closeSkyMap"
                 @select-object="emit('select-object', $event)"
                 @update-sensor-center="onSkyMapUpdateSensorCenter"
                 @reset-sensor-center="onSkyMapResetSensorCenter"
+                @update-obs-time="emit('update-obs-time', $event)"
             />
 
             <!-- Top-Left Quick Sky Context Button (in Framing mode) -->
@@ -1453,13 +1483,27 @@ onUnmounted(() => {
                 </div>
             </div>
 
-            <!-- Bottom Floating Canvas HUD Toolbar -->
-            <div v-show="!showSkyMap" class="canvas-hud">
-                <!-- Selected Optics Readout -->
-                <div
-                    class="hud-group hud-optics-readout"
-                    title="Selected Optics (Telescope + Camera sensor rectangle)"
-                >
+            <!-- Bottom Floating Observing Date Console + Canvas HUD Stack -->
+            <div v-show="!showSkyMap" class="framing-bottom-hud-stack">
+                <ObservingDateConsole
+                    v-if="hasObserverLocation"
+                    variant="framing"
+                    :is-live-time="isLiveObsTime"
+                    :live-now-ms="liveNowMs"
+                    :effective-time-ms="effectiveObsTimeMs"
+                    :object="object"
+                    :settings="settings"
+                    :night-times="nightTimes"
+                    @update-time="emit('update-obs-time', $event)"
+                />
+
+                <!-- Bottom Floating Canvas HUD Toolbar -->
+                <div class="canvas-hud" @wheel.stop>
+                    <!-- Selected Optics Readout -->
+                    <div
+                        class="hud-group hud-optics-readout"
+                        title="Selected Optics (Telescope + Camera sensor rectangle)"
+                    >
                     <span class="hud-label">OPTICS</span>
                     <span class="hud-optics-badge">
                         {{ systemSensorFov.w.toFixed(2) }}° × {{ systemSensorFov.h.toFixed(2) }}°
@@ -1688,6 +1732,7 @@ onUnmounted(() => {
                     >
                         1:1 Zoom
                     </button>
+                </div>
                 </div>
             </div>
         </div>
@@ -2476,12 +2521,29 @@ onUnmounted(() => {
     font-variant-numeric: tabular-nums;
 }
 
-/* Bottom Floating HUD Toolbar */
-.canvas-hud {
+/* Bottom Floating Observing Date Console + HUD Toolbar Stack */
+.framing-bottom-hud-stack {
     position: absolute;
-    bottom: 16px;
+    bottom: 14px;
     left: 50%;
     transform: translateX(-50%);
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    width: max-content;
+    max-width: 95%;
+    pointer-events: none;
+}
+
+.framing-bottom-hud-stack > * {
+    pointer-events: auto;
+}
+
+/* Bottom Floating HUD Toolbar */
+.canvas-hud {
+    position: relative;
     background: rgba(17, 24, 39, 0.88);
     backdrop-filter: blur(8px);
     border: 1px solid #374151;
@@ -2490,9 +2552,8 @@ onUnmounted(() => {
     display: flex;
     align-items: center;
     gap: 10px;
-    z-index: 100;
     box-shadow: 0 8px 20px rgba(0, 0, 0, 0.6);
-    max-width: 95%;
+    max-width: 100%;
     flex-wrap: wrap;
     justify-content: center;
 }
@@ -2740,11 +2801,17 @@ onUnmounted(() => {
         display: inline;
     }
 
-    .canvas-hud {
+    .framing-bottom-hud-stack {
         bottom: 8px;
+        gap: 6px;
+        width: calc(100% - 16px);
+        max-width: 440px;
+    }
+
+    .canvas-hud {
         padding: 6px 8px;
         gap: 6px 10px;
-        width: calc(100% - 16px);
+        width: 100%;
         max-width: 440px;
         box-sizing: border-box;
     }

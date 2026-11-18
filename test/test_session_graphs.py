@@ -117,3 +117,35 @@ def test_polar_day_and_polar_night_fallbacks():
     assert abs((e_win - s_win).to(u.hour).value - 24.0) < 0.01
     tw_win = calc.get_twilight_periods(loc, t_winter)
     assert any(k in tw_win for k in ("civil", "nautical", "astronomical", "night"))
+
+
+def test_get_observing_session_for_explicit_dates():
+    """Verify explicit YYYY-MM-DD evening selection resolves single-night sessions across seasons and timezones."""
+    calc = AstroCalculator()
+
+    # New York (UTC-5 / UTC-4): winter vs summer evening
+    ny_loc = Location(latitude=40.7128, longitude=-74.0060)
+    ny_obs = Observer(
+        location=EarthLocation(lat=ny_loc.latitude * u.deg, lon=ny_loc.longitude * u.deg)
+    )
+    s_jan, e_jan = calc.get_observing_session_for_date(ny_obs, "2026-01-15")
+    dur_jan = (e_jan - s_jan).to(u.hour).value
+    assert 13.5 < dur_jan < 16.5
+    assert s_jan.isot.startswith("2026-01-15T")
+    assert e_jan.isot.startswith("2026-01-16T")
+
+    s_jul, e_jul = calc.get_observing_session_for_date(ny_obs, "2026-07-15")
+    dur_jul = (e_jul - s_jul).to(u.hour).value
+    assert 9.0 < dur_jul < 12.0
+    assert dur_jan > dur_jul + 3.0
+
+    # Sydney (UTC+10/+11): evening of 2026-06-15 starts in UTC morning of 2026-06-15
+    syd_loc = Location(latitude=-33.8688, longitude=151.2093)
+    syd_obs = Observer(
+        location=EarthLocation(lat=syd_loc.latitude * u.deg, lon=syd_loc.longitude * u.deg)
+    )
+    s_syd, e_syd = calc.get_observing_session_for_date(syd_obs, "2026-06-15")
+    dur_syd = (e_syd - s_syd).to(u.hour).value
+    assert 13.5 < dur_syd < 16.0
+    assert s_syd.isot.startswith("2026-06-15T0")
+

@@ -1,26 +1,38 @@
 <script setup>
-import { computed, ref, watch } from 'vue';
+import { computed, ref } from 'vue';
 import {
     resolveEffectiveTimeWindow,
     isTimestampInTimeWindow
 } from '../utils/timeWindow.js';
+import {
+    DEG2RAD,
+    RAD2DEG,
+    wrapRaDeg,
+    formatShortEveningBadge,
+    resolveObservingEvening,
+    resolveLiveTonightEveningKey,
+    computeLstDeg,
+    computeSolarEquatorial,
+    computeLunarAltitudeDeg,
+    computeNightEphemerisForEvening,
+    buildNightTimesFromEphemeris,
+    doesGraphMatchEvening,
+    doesNightTimesMatchEvening,
+    resolveSessionRangeForEvening
+} from '../utils/observingTime.js';
 
-const props = defineProps(['object', 'location', 'nightTimes', 'settings', 'clientSettings', 'customCoords']);
-
-const DEG2RAD = Math.PI / 180.0;
-const RAD2DEG = 180.0 / Math.PI;
-
-const computeLstDeg = (timeMs, lonDeg) => {
-    const jd = timeMs / 86400000.0 + 2440587.5;
-    const d = jd - 2451545.0;
-    const T = d / 36525.0;
-    const gmst =
-        280.46061837 +
-        360.98564736629 * d +
-        0.000387933 * T * T -
-        (T * T * T) / 38710000.0;
-    return (((gmst + lonDeg) % 360.0) + 360.0) % 360.0;
-};
+const props = defineProps([
+    'object',
+    'location',
+    'nightTimes',
+    'settings',
+    'clientSettings',
+    'customCoords',
+    'isLiveTime',
+    'liveNowMs',
+    'effectiveTimeMs',
+    'observingEvening'
+]);
 
 const observerCoords = computed(() => {
     const loc = props.location || props.settings?.location;
@@ -34,15 +46,125 @@ const observerCoords = computed(() => {
     };
 });
 
-// Pre-parse session timestamps once per target so 60fps FOV updates avoid Date.parse overhead
+const effectiveNowRefMs = computed(() => {
+    const n = Number(props.liveNowMs);
+    return Number.isFinite(n) && n > 0 ? n : Date.now();
+});
+
+const effectiveLiveFlag = computed(() => props.isLiveTime !== false);
+
+const activeTimeMs = computed(() => {
+    if (effectiveLiveFlag.value) return effectiveNowRefMs.value;
+    const t = Number(props.effectiveTimeMs);
+    return Number.isFinite(t) && t > 0 ? t : effectiveNowRefMs.value;
+});
+
+const activeEvening = computed(() => {
+    if (props.observingEvening && props.observingEvening.key) {
+        return props.observingEvening;
+    }
+    return resolveObservingEvening(
+        effectiveLiveFlag.value,
+        effectiveNowRefMs.value,
+        activeTimeMs.value
+    );
+});
+
+const isDateOffset = computed(() => {
+    return activeEvening.value.key !== resolveLiveTonightEveningKey(effectiveNowRefMs.value);
+});
+
+const eveningBadgeText = computed(() => {
+    if (!isDateOffset.value) return '';
+    return formatShortEveningBadge(activeEvening.value, effectiveNowRefMs.value);
+});
+
+const backendGraphMatchesEvening = computed(() => {
+    return doesGraphMatchEvening(props.object?.altitude_graph, activeEvening.value?.key);
+});
+
+const backendNightTimesMatchesEvening = computed(() => {
+    return doesNightTimesMatchEvening(props.nightTimes, activeEvening.value?.key);
+});
+
+const activeNightEphemeris = computed(() => {
+    if (!observerCoords.value || !activeEvening.value) return null;
+    return computeNightEphemerisForEvening(
+        activeEvening.value.year,
+        activeEvening.value.month0,
+        activeEvening.value.day,
+        observerCoords.value.lat,
+        observerCoords.value.lon
+    );
+});
+
+const effectiveNightTimes = computed(() => {
+    if (backendNightTimesMatchesEvening.value) {
+        return props.nightTimes;
+    }
+    if (activeNightEphemeris.value) {
+        return buildNightTimesFromEphemeris(activeNightEphemeris.value);
+    }
+    return props.nightTimes;
+});
+
+// Session timeline: uses exact Astropy backend curve when matching active evening,
+// or synthesizes a 0ms 50-point ephemeris curve immediately when scrubbing dates.
 const baseGraphTimeline = computed(() => {
-    const src = props.object?.altitude_graph;
-    if (!Array.isArray(src) || src.length === 0) return [];
-    return src.map((pt) => ({
-        time: pt.time,
-        ms: new Date(pt.time).getTime(),
-        altitude: pt.altitude
-    }));
+    if (!props.object) return [];
+    const src = props.object.altitude_graph;
+
+    if (backendGraphMatchesEvening.value && Array.isArray(src) && src.length > 0) {
+        return src.map((pt) => ({
+            time: pt.time,
+            ms: new Date(pt.time).getTime(),
+            altitude: pt.altitude
+        }));
+    }
+
+    if (observerCoords.value && activeEvening.value) {
+        const range = resolveSessionRangeForEvening({
+            evening: activeEvening.value,
+            observerLocation: observerCoords.value,
+            object: null,
+            nightTimes: backendNightTimesMatchesEvening.value ? props.nightTimes : null
+        });
+        const startMs = range.startMs;
+        const endMs = range.endMs;
+        if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
+            const { lat, lon } = observerCoords.value;
+            const raDeg = wrapRaDeg(parseFloat(props.object.ra) || 0);
+            const decDeg = Math.max(-89.999, Math.min(89.999, parseFloat(props.object.dec) || 0));
+            const sinLat = Math.sin(lat * DEG2RAD);
+            const cosLat = Math.cos(lat * DEG2RAD);
+            const sinDec = Math.sin(decDeg * DEG2RAD);
+            const cosDec = Math.cos(decDeg * DEG2RAD);
+
+            const steps = 50;
+            const out = new Array(steps);
+            for (let i = 0; i < steps; i++) {
+                const ms = startMs + (i / (steps - 1)) * (endMs - startMs);
+                const haRad = (computeLstDeg(ms, lon) - raDeg) * DEG2RAD;
+                const sinAlt = sinLat * sinDec + cosLat * cosDec * Math.cos(haRad);
+                const alt = Math.asin(Math.max(-1.0, Math.min(1.0, sinAlt))) * RAD2DEG;
+                out[i] = {
+                    time: new Date(ms).toISOString(),
+                    ms,
+                    altitude: alt
+                };
+            }
+            return out;
+        }
+    }
+
+    if (Array.isArray(src) && src.length > 0) {
+        return src.map((pt) => ({
+            time: pt.time,
+            ms: new Date(pt.time).getTime(),
+            altitude: pt.altitude
+        }));
+    }
+    return [];
 });
 
 const hasCustomFovCoords = computed(() => {
@@ -53,7 +175,7 @@ const hasCustomFovCoords = computed(() => {
 
 const customCoordTooltip = computed(() => {
     if (!hasCustomFovCoords.value) return '';
-    const ra = (((Number(props.customCoords.ra) % 360) + 360) % 360);
+    const ra = wrapRaDeg(Number(props.customCoords.ra));
     const dec = Number(props.customCoords.dec);
     const totalMin = Math.round((ra / 15.0) * 60);
     const hh = Math.floor(totalMin / 60) % 24;
@@ -66,11 +188,11 @@ const effectiveAltitudeGraph = computed(() => {
     const timeline = baseGraphTimeline.value;
     if (timeline.length === 0) return [];
     if (!hasCustomFovCoords.value) {
-        return props.object.altitude_graph;
+        return timeline;
     }
 
     const { lat, lon } = observerCoords.value;
-    const raDeg = (((Number(props.customCoords.ra) % 360) + 360) % 360);
+    const raDeg = wrapRaDeg(Number(props.customCoords.ra));
     const decRad = Math.max(-89.999, Math.min(89.999, Number(props.customCoords.dec))) * DEG2RAD;
     const latRad = lat * DEG2RAD;
     const sinLat = Math.sin(latRad);
@@ -86,7 +208,59 @@ const effectiveAltitudeGraph = computed(() => {
         const alt = Math.asin(Math.max(-1.0, Math.min(1.0, sinAlt))) * RAD2DEG;
         out[i] = {
             time: item.time,
+            ms: item.ms,
             altitude: alt
+        };
+    }
+    return out;
+});
+
+const effectiveMoonGraph = computed(() => {
+    const timeline = baseGraphTimeline.value;
+    if (timeline.length === 0) return [];
+    if (
+        backendGraphMatchesEvening.value &&
+        Array.isArray(props.object?.moon_graph) &&
+        props.object.moon_graph.length === timeline.length
+    ) {
+        return props.object.moon_graph;
+    }
+    if (!observerCoords.value) return [];
+    const { lat, lon } = observerCoords.value;
+    const out = new Array(timeline.length);
+    for (let i = 0; i < timeline.length; i++) {
+        const item = timeline[i];
+        out[i] = {
+            time: item.time,
+            altitude: computeLunarAltitudeDeg(item.ms, lat, lon)
+        };
+    }
+    return out;
+});
+
+const effectiveSunGraph = computed(() => {
+    const timeline = baseGraphTimeline.value;
+    if (timeline.length === 0) return [];
+    if (
+        backendGraphMatchesEvening.value &&
+        Array.isArray(props.object?.sun_graph) &&
+        props.object.sun_graph.length === timeline.length
+    ) {
+        return props.object.sun_graph;
+    }
+    if (!observerCoords.value) return [];
+    const { lat, lon } = observerCoords.value;
+    const sinLat = Math.sin(lat * DEG2RAD);
+    const cosLat = Math.cos(lat * DEG2RAD);
+    const out = new Array(timeline.length);
+    for (let i = 0; i < timeline.length; i++) {
+        const item = timeline[i];
+        const sun = computeSolarEquatorial(item.ms);
+        const haRad = (computeLstDeg(item.ms, lon) - sun.raDeg) * DEG2RAD;
+        const sinAlt = sinLat * sun.sinDec + cosLat * sun.cosDec * Math.cos(haRad);
+        out[i] = {
+            time: item.time,
+            altitude: Math.asin(Math.max(-1.0, Math.min(1.0, sinAlt))) * RAD2DEG
         };
     }
     return out;
@@ -115,39 +289,47 @@ const hoverAlt = ref(null);
 const hoverSunAlt = ref(null);
 const hoverZone = ref(null);
 
-const getX = (timeStr) => {
-    if (!props.object || !props.object.altitude_graph || props.object.altitude_graph.length === 0) return 0;
+const getXFromMs = (targetMs) => {
+    const timeline = baseGraphTimeline.value;
+    if (!timeline || timeline.length < 2 || !Number.isFinite(targetMs)) return -1;
 
-    const start = new Date(props.object.altitude_graph[0].time).getTime();
-    const end = new Date(props.object.altitude_graph[props.object.altitude_graph.length - 1].time).getTime();
-    const target = new Date(timeStr).getTime();
-
+    const start = timeline[0].ms;
+    const end = timeline[timeline.length - 1].ms;
     const range = end - start;
-    if (range <= 0) return 0;
+    if (range <= 0) return -1;
 
-    const pct = (target - start) / range;
+    const pct = (targetMs - start) / range;
     return pct * width;
 };
 
-// Calculate "Now" position
+const getX = (timeStr) => {
+    const targetMs = new Date(timeStr).getTime();
+    return getXFromMs(targetMs);
+};
+
+// Real-time "Now" position (when live night overlaps chart range)
 const nowX = computed(() => {
-    return getX(new Date().toISOString());
+    return getXFromMs(effectiveNowRefMs.value);
+});
+
+// Active observing / scrubbed time cursor position
+const activeCursorX = computed(() => {
+    return getXFromMs(activeTimeMs.value);
 });
 
 // Generate Time Ticks (Full hours and half hours)
 const timeTicks = computed(() => {
-    if (!props.object || !props.object.altitude_graph || props.object.altitude_graph.length === 0) return [];
+    const timeline = baseGraphTimeline.value;
+    if (!timeline || timeline.length < 2) return [];
 
-    const start = new Date(props.object.altitude_graph[0].time);
-    const end = new Date(props.object.altitude_graph[props.object.altitude_graph.length - 1].time);
-    const startTime = start.getTime();
-    const endTime = end.getTime();
+    const startTime = timeline[0].ms;
+    const endTime = timeline[timeline.length - 1].ms;
     const range = endTime - startTime;
 
     if (range <= 0) return [];
 
     const ticks = [];
-    
+
     // Start at the next half-hour boundary
     let current = new Date(startTime);
     if (current.getMinutes() > 30) {
@@ -162,14 +344,14 @@ const timeTicks = computed(() => {
         const t = current.getTime();
         const pct = (t - startTime) / range;
         const x = pct * width;
-        
-        const isFullHour = current.getMinutes() === 0;
-        const label = isFullHour ? current.getHours() : null; // Only show hour number
 
-        ticks.push({ 
-            x, 
-            label, 
-            isMajor: isFullHour 
+        const isFullHour = current.getMinutes() === 0;
+        const label = isFullHour ? current.getHours() : null;
+
+        ticks.push({
+            x,
+            label,
+            isMajor: isFullHour
         });
 
         // Increment by 30 mins
@@ -204,23 +386,24 @@ const objectPath = computed(() => {
 });
 
 const catalogRefPath = computed(() => {
-    if (!hasCustomFovCoords.value || !props.object?.altitude_graph) return "";
-    return getPath(props.object.altitude_graph, true);
+    if (!hasCustomFovCoords.value || baseGraphTimeline.value.length === 0) return "";
+    return getPath(baseGraphTimeline.value, true);
 });
 
 const moonPath = computed(() => {
-    if (!showMoon.value || !props.object || !props.object.moon_graph) return "";
-    return getPath(props.object.moon_graph, true);
+    if (!showMoon.value || effectiveMoonGraph.value.length === 0) return "";
+    return getPath(effectiveMoonGraph.value, true);
 });
 
 const nightZones = computed(() => {
-    if (!props.nightTimes) return [];
+    const nt = effectiveNightTimes.value;
+    if (!nt) return [];
 
     const zones = [];
     const mapZone = (key, color, opacity, label) => {
-        if (props.nightTimes[key] && props.nightTimes[key].length === 2) {
-            const x1 = Math.max(0, getX(props.nightTimes[key][0]));
-            const x2 = Math.min(width, getX(props.nightTimes[key][1]));
+        if (nt[key] && nt[key].length === 2) {
+            const x1 = Math.max(0, getX(nt[key][0]));
+            const x2 = Math.min(width, getX(nt[key][1]));
             if (x2 > x1) {
                 zones.push({ x: x1, width: x2 - x1, color, opacity, label });
             }
@@ -240,12 +423,12 @@ const nightZones = computed(() => {
 });
 
 const timeWindowInfo = computed(() => {
-    return resolveEffectiveTimeWindow(props.clientSettings, props.nightTimes);
+    return resolveEffectiveTimeWindow(props.clientSettings, effectiveNightTimes.value);
 });
 
 const timeWindowOverlay = computed(() => {
     const tw = timeWindowInfo.value;
-    const pts = props.object?.altitude_graph;
+    const pts = baseGraphTimeline.value;
     if (!tw.active || !pts || pts.length < 2) {
         return { excludedRects: [], boundaryLines: [] };
     }
@@ -259,7 +442,6 @@ const timeWindowOverlay = computed(() => {
 
     let currentExcludedStart = null;
     for (let i = 0; i < n; i++) {
-        const x = i * stepX;
         if (!inFlags[i]) {
             if (currentExcludedStart === null) {
                 currentExcludedStart = i === 0 ? 0 : (i - 0.5) * stepX;
@@ -317,9 +499,10 @@ const updateHoverFromClientX = (clientX, targetEl) => {
         hoverAlt.value = (alt1 + (alt2 - alt1) * pct).toFixed(1);
     }
 
-    if (props.object.sun_graph && props.object.sun_graph[i1] && props.object.sun_graph[i2]) {
-        const salt1 = props.object.sun_graph[i1].altitude;
-        const salt2 = props.object.sun_graph[i2].altitude;
+    const sunGraph = effectiveSunGraph.value;
+    if (sunGraph && sunGraph[i1] && sunGraph[i2]) {
+        const salt1 = sunGraph[i1].altitude;
+        const salt2 = sunGraph[i2].altitude;
         hoverSunAlt.value = (salt1 + (salt2 - salt1) * pct).toFixed(1);
     } else {
         hoverSunAlt.value = null;
@@ -357,7 +540,16 @@ const handleMouseLeave = () => {
 <template>
     <div class="altitude-wrapper">
         <div class="chart-header">
-            <span class="title">Altitude & Visibility</span>
+            <div class="chart-title-wrap">
+                <span class="title">Altitude & Visibility</span>
+                <span
+                    v-if="eveningBadgeText"
+                    class="chart-date-badge"
+                    :title="`Showing observing night of ${eveningBadgeText}`"
+                >
+                    📅 {{ eveningBadgeText }}
+                </span>
+            </div>
             <!-- Moved Legend Here -->
             <div class="legend-inline" v-if="object">
                  <span
@@ -471,9 +663,35 @@ const handleMouseLeave = () => {
                         stroke-dasharray="3,2"
                     />
                     
-                    <!-- Now Line -->
-                    <line v-if="nowX > 0 && nowX < width" :x1="nowX" y1="0" :x2="nowX" :y2="height" stroke="#ef4444" stroke-width="1" stroke-dasharray="2" />
-                    
+                    <!-- Real-time Now Line (dashed red) -->
+                    <line
+                        v-if="nowX > 0 && nowX < width && (effectiveLiveFlag || Math.abs(nowX - activeCursorX) > 2)"
+                        :x1="nowX"
+                        y1="0"
+                        :x2="nowX"
+                        :y2="height"
+                        stroke="#ef4444"
+                        :stroke-opacity="effectiveLiveFlag ? 1 : 0.45"
+                        stroke-width="1"
+                        stroke-dasharray="2"
+                    />
+
+                    <!-- Scrubbed / Offset Observing Time Cursor (solid amber) -->
+                    <g v-if="!effectiveLiveFlag && activeCursorX >= 0 && activeCursorX <= width">
+                        <line
+                            :x1="activeCursorX"
+                            y1="0"
+                            :x2="activeCursorX"
+                            :y2="height"
+                            stroke="#f59e0b"
+                            stroke-width="1.4"
+                        />
+                        <polygon
+                            :points="`${activeCursorX - 3.5},0 ${activeCursorX + 3.5},0 ${activeCursorX},5`"
+                            fill="#f59e0b"
+                        />
+                    </g>
+
                     <!-- Hover Line -->
                     <line v-if="hoverX !== null" :x1="hoverX" y1="0" :x2="hoverX" :y2="height" stroke="#fff" stroke-width="1" />
                 </g>
@@ -536,6 +754,25 @@ const handleMouseLeave = () => {
     margin-bottom: 5px;
     font-size: 0.8rem;
     color: #9ca3af;
+    gap: 8px;
+}
+.chart-title-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.chart-date-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    color: #fcd34d;
+    background: rgba(245, 158, 11, 0.16);
+    border: 1px solid rgba(245, 158, 11, 0.42);
+    white-space: nowrap;
 }
 .controls {
     display: flex;

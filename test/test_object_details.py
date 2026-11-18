@@ -137,4 +137,42 @@ def test_real_catalog_single_object_details():
     assert len(detail["altitude_graph"]) == 60
     assert len(detail["moon_graph"]) == 60
     assert len(detail["sun_graph"]) == 60
+    assert "night_times" in detail
+
+
+def test_api_object_details_obs_date_updates_graph_and_night_times():
+    stub_cm = _StubCatalogManager(_make_sample_catalog_df())
+    mock_settings = {
+        "location": {"latitude": 40.7128, "longitude": -74.0060},
+        "telescope": {"focal_length": 500.0},
+        "camera": {"sensor_width": 23.5, "sensor_height": 15.6},
+        "min_altitude": 25.0,
+    }
+
+    with (
+        patch("backend.main.load_settings", return_value=dict(mock_settings)),
+        patch("backend.main.catalogs", stub_cm),
+    ):
+        client = TestClient(app)
+        winter_resp = client.get(
+            "/api/object-details/M%2042",
+            params={"obs_date": "2026-01-15"},
+        )
+        summer_resp = client.get(
+            "/api/object-details/M%2042",
+            params={"obs_date": "2026-06-15"},
+        )
+        assert winter_resp.status_code == 200
+        assert summer_resp.status_code == 200
+
+        winter = winter_resp.json()
+        summer = summer_resp.json()
+
+        assert winter["altitude_graph"][0]["time"].startswith("2026-01-15T")
+        assert summer["altitude_graph"][0]["time"].startswith("2026-06-15T")
+        assert "night_times" in winter and "night" in winter["night_times"]
+        assert "night_times" in summer and "night" in summer["night_times"]
+        # M 42 (Orion) is prominent on January nights and low/daytime in June
+        assert winter["hours_visible"] > summer["hours_visible"] + 4.0
+
 
