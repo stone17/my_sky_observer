@@ -41,6 +41,18 @@ const clientSettings = ref({
 });
 const objects = ref([]);
 const selectedObject = ref(null);
+const customFramingCoords = ref(null);
+
+const handleFramingCoordsUpdate = (coords) => {
+    customFramingCoords.value = coords || null;
+};
+
+watch(
+    () => selectedObject.value?.name,
+    () => {
+        customFramingCoords.value = null;
+    }
+);
 const pinnedTopObjectId = ref('');
 const pinnedTopSeq = ref(0);
 const streamStatus = ref('Idle');
@@ -1415,6 +1427,7 @@ watch(clientSettings, () => {
                         @update-settings="saveSettings"
                         @update-client-settings="updateClientSettings"
                         @update-object-settings="handleObjectSettingsUpdate"
+                        @update-framing-coords="handleFramingCoordsUpdate"
                         @open-mobile-list="toggleMobileList"
                     />
                 </div>
@@ -1457,7 +1470,14 @@ watch(clientSettings, () => {
                     </button>
                 </header>
                 <div class="graph-panel">
-                    <AltitudeGraph :object="selectedObject" :location="settings.location" :nightTimes="nightTimes" :settings="settings" :clientSettings="clientSettings" />
+                    <AltitudeGraph
+                        :object="selectedObject"
+                        :location="settings.location"
+                        :nightTimes="nightTimes"
+                        :settings="settings"
+                        :clientSettings="clientSettings"
+                        :customCoords="customFramingCoords"
+                    />
                 </div>
                 <div class="list-panel">
                     <ObjectList

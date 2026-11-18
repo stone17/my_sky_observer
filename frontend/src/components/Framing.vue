@@ -20,7 +20,7 @@ import {
 } from '../utils/skyAtlas.js';
 
 const props = defineProps(['object', 'objects', 'filteredObjects', 'settings', 'clientSettings', 'nightTimes', 'searchQuery', 'activeFov']);
-const emit = defineEmits(['update-settings', 'update-client-settings', 'update-search', 'select-object', 'update-fov', 'open-mobile-list', 'update-object-settings']);
+const emit = defineEmits(['update-settings', 'update-client-settings', 'update-search', 'select-object', 'update-fov', 'open-mobile-list', 'update-object-settings', 'update-framing-coords']);
 
 // --- PHYSICAL SENSOR & DEFAULT IMAGE FOV CALCULATION (Single Source of Truth) ---
 const systemSensorFov = computed(() => {
@@ -839,6 +839,54 @@ const currentSensorCenter = computed(() => {
     return getCurrentCenterCoordinates();
 });
 
+let lastEmittedFramingCoords = null;
+watch(
+    [currentSensorCenter, () => props.object?.name, () => props.object?.ra, () => props.object?.dec],
+    ([ctr]) => {
+        if (!props.object || !ctr || !Number.isFinite(ctr.ra) || !Number.isFinite(ctr.dec)) {
+            if (lastEmittedFramingCoords !== null) {
+                lastEmittedFramingCoords = null;
+                emit('update-framing-coords', null);
+            }
+            return;
+        }
+
+        const catRa = parseFloat(props.object.ra);
+        const catDec = parseFloat(props.object.dec);
+        const normRa = (((ctr.ra % 360) + 360) % 360);
+        const clampedDec = Math.max(-89.99, Math.min(89.99, ctr.dec));
+
+        let isDetached = Boolean(skyMapSensorOverride.value);
+        if (!isDetached && Number.isFinite(catRa) && Number.isFinite(catDec)) {
+            let dRa = normRa - (((catRa % 360) + 360) % 360);
+            if (dRa > 180) dRa -= 360;
+            if (dRa < -180) dRa += 360;
+            const dDec = clampedDec - catDec;
+            const cosD = Math.cos(((catDec + clampedDec) * 0.5 * Math.PI) / 180.0);
+            const sepDeg = Math.hypot(dRa * cosD, dDec);
+            isDetached = sepDeg > 0.02;
+        }
+
+        if (!isDetached) {
+            if (lastEmittedFramingCoords !== null) {
+                lastEmittedFramingCoords = null;
+                emit('update-framing-coords', null);
+            }
+            return;
+        }
+
+        if (
+            !lastEmittedFramingCoords ||
+            Math.abs(normRa - lastEmittedFramingCoords.ra) > 1e-4 ||
+            Math.abs(clampedDec - lastEmittedFramingCoords.dec) > 1e-4
+        ) {
+            lastEmittedFramingCoords = { ra: normRa, dec: clampedDec };
+            emit('update-framing-coords', lastEmittedFramingCoords);
+        }
+    },
+    { immediate: true }
+);
+
 const isZoomModified = computed(() => Math.abs(zoomLevel.value - 1.0) > 0.01);
 
 const isFovModified = computed(() => {
@@ -1045,6 +1093,7 @@ onUnmounted(() => {
     if (resizeObserver) resizeObserver.disconnect();
     document.removeEventListener('click', handleDocumentClick);
     stopRotate();
+    emit('update-framing-coords', null);
 });
 </script>
 

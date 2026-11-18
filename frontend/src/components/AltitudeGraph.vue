@@ -5,7 +5,92 @@ import {
     isTimestampInTimeWindow
 } from '../utils/timeWindow.js';
 
-const props = defineProps(['object', 'location', 'nightTimes', 'settings', 'clientSettings']);
+const props = defineProps(['object', 'location', 'nightTimes', 'settings', 'clientSettings', 'customCoords']);
+
+const DEG2RAD = Math.PI / 180.0;
+const RAD2DEG = 180.0 / Math.PI;
+
+const computeLstDeg = (timeMs, lonDeg) => {
+    const jd = timeMs / 86400000.0 + 2440587.5;
+    const d = jd - 2451545.0;
+    const T = d / 36525.0;
+    const gmst =
+        280.46061837 +
+        360.98564736629 * d +
+        0.000387933 * T * T -
+        (T * T * T) / 38710000.0;
+    return (((gmst + lonDeg) % 360.0) + 360.0) % 360.0;
+};
+
+const observerCoords = computed(() => {
+    const loc = props.location || props.settings?.location;
+    if (!loc) return null;
+    const lat = Number(loc.latitude);
+    const lon = Number(loc.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    return {
+        lat: Math.max(-89.999, Math.min(89.999, lat)),
+        lon
+    };
+});
+
+// Pre-parse session timestamps once per target so 60fps FOV updates avoid Date.parse overhead
+const baseGraphTimeline = computed(() => {
+    const src = props.object?.altitude_graph;
+    if (!Array.isArray(src) || src.length === 0) return [];
+    return src.map((pt) => ({
+        time: pt.time,
+        ms: new Date(pt.time).getTime(),
+        altitude: pt.altitude
+    }));
+});
+
+const hasCustomFovCoords = computed(() => {
+    const c = props.customCoords;
+    if (!c || !observerCoords.value || baseGraphTimeline.value.length === 0) return false;
+    return Number.isFinite(Number(c.ra)) && Number.isFinite(Number(c.dec));
+});
+
+const customCoordTooltip = computed(() => {
+    if (!hasCustomFovCoords.value) return '';
+    const ra = (((Number(props.customCoords.ra) % 360) + 360) % 360);
+    const dec = Number(props.customCoords.dec);
+    const totalMin = Math.round((ra / 15.0) * 60);
+    const hh = Math.floor(totalMin / 60) % 24;
+    const mm = totalMin % 60;
+    const sign = dec >= 0 ? '+' : '−';
+    return `Live Sensor FOV: RA ${String(hh).padStart(2, '0')}h ${String(mm).padStart(2, '0')}m, Dec ${sign}${Math.abs(dec).toFixed(1)}°`;
+});
+
+const effectiveAltitudeGraph = computed(() => {
+    const timeline = baseGraphTimeline.value;
+    if (timeline.length === 0) return [];
+    if (!hasCustomFovCoords.value) {
+        return props.object.altitude_graph;
+    }
+
+    const { lat, lon } = observerCoords.value;
+    const raDeg = (((Number(props.customCoords.ra) % 360) + 360) % 360);
+    const decRad = Math.max(-89.999, Math.min(89.999, Number(props.customCoords.dec))) * DEG2RAD;
+    const latRad = lat * DEG2RAD;
+    const sinLat = Math.sin(latRad);
+    const cosLat = Math.cos(latRad);
+    const sinDec = Math.sin(decRad);
+    const cosDec = Math.cos(decRad);
+
+    const out = new Array(timeline.length);
+    for (let i = 0; i < timeline.length; i++) {
+        const item = timeline[i];
+        const haRad = (computeLstDeg(item.ms, lon) - raDeg) * DEG2RAD;
+        const sinAlt = sinLat * sinDec + cosLat * cosDec * Math.cos(haRad);
+        const alt = Math.asin(Math.max(-1.0, Math.min(1.0, sinAlt))) * RAD2DEG;
+        out[i] = {
+            time: item.time,
+            altitude: alt
+        };
+    }
+    return out;
+});
 
 const showMoon = ref(true);
 
@@ -113,8 +198,14 @@ const getPath = (data, isMoon = false) => {
 };
 
 const objectPath = computed(() => {
-    if (!props.object || !props.object.altitude_graph) return "";
-    return getPath(props.object.altitude_graph);
+    const graph = effectiveAltitudeGraph.value;
+    if (!graph || graph.length === 0) return "";
+    return getPath(graph);
+});
+
+const catalogRefPath = computed(() => {
+    if (!hasCustomFovCoords.value || !props.object?.altitude_graph) return "";
+    return getPath(props.object.altitude_graph, true);
 });
 
 const moonPath = computed(() => {
@@ -191,7 +282,8 @@ const timeWindowOverlay = computed(() => {
 });
 
 const updateHoverFromClientX = (clientX, targetEl) => {
-    if (!props.object || !props.object.altitude_graph || props.object.altitude_graph.length === 0) return;
+    const graph = effectiveAltitudeGraph.value;
+    if (!props.object || !graph || graph.length === 0) return;
 
     const rect = targetEl.getBoundingClientRect();
     const x = clientX - rect.left;
@@ -205,22 +297,23 @@ const updateHoverFromClientX = (clientX, targetEl) => {
     hoverX.value = constrainedX;
 
     // Calculate Time
-    const start = new Date(props.object.altitude_graph[0].time).getTime();
-    const end = new Date(props.object.altitude_graph[props.object.altitude_graph.length - 1].time).getTime();
+    const timeline = baseGraphTimeline.value;
+    const start = timeline.length > 0 ? timeline[0].ms : new Date(graph[0].time).getTime();
+    const end = timeline.length > 0 ? timeline[timeline.length - 1].ms : new Date(graph[graph.length - 1].time).getTime();
     const range = end - start;
     const timeAtX = new Date(start + (constrainedX / width) * range);
 
     hoverTime.value = timeAtX.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
     // Calculate Altitude (approximate linear interpolation)
-    const idx = (constrainedX / width) * (props.object.altitude_graph.length - 1);
+    const idx = (constrainedX / width) * (graph.length - 1);
     const i1 = Math.floor(idx);
     const i2 = Math.ceil(idx);
     const pct = idx - i1;
 
-    if (props.object.altitude_graph[i1] && props.object.altitude_graph[i2]) {
-        const alt1 = props.object.altitude_graph[i1].altitude;
-        const alt2 = props.object.altitude_graph[i2].altitude;
+    if (graph[i1] && graph[i2]) {
+        const alt1 = graph[i1].altitude;
+        const alt2 = graph[i2].altitude;
         hoverAlt.value = (alt1 + (alt2 - alt1) * pct).toFixed(1);
     }
 
@@ -267,7 +360,16 @@ const handleMouseLeave = () => {
             <span class="title">Altitude & Visibility</span>
             <!-- Moved Legend Here -->
             <div class="legend-inline" v-if="object">
-                 <span class="target-label">■ {{ object.name }}</span>
+                 <span
+                     v-if="hasCustomFovCoords"
+                     class="fov-live-label"
+                     :title="customCoordTooltip"
+                 >⬚ FOV</span>
+                 <span
+                     class="target-label"
+                     :class="{ 'is-ref': hasCustomFovCoords }"
+                     :title="hasCustomFovCoords ? `Reference target: ${object.name}` : object.name"
+                 >{{ hasCustomFovCoords ? '┄' : '■' }} {{ object.name }}</span>
                  <span v-if="showMoon" class="moon-label">■ Moon</span>
                  <span class="night-label" title="Civil, Nautical, Astro, Night">■ Twilights/Night</span>
                  <span
@@ -325,8 +427,24 @@ const handleMouseLeave = () => {
                     <!-- Horizon -->
                     <line x1="0" :y1="height" :x2="width" :y2="height" stroke="#666" stroke-width="2" />
 
-                    <!-- Target Graph -->
-                    <path v-if="objectPath" :d="objectPath" fill="rgba(16, 185, 129, 0.4)" stroke="#10b981" stroke-width="2" />
+                    <!-- Catalog Target Reference Outline (when FOV is offset/pinned elsewhere) -->
+                    <path
+                        v-if="catalogRefPath"
+                        :d="catalogRefPath"
+                        fill="none"
+                        stroke="rgba(16, 185, 129, 0.48)"
+                        stroke-width="1.4"
+                        stroke-dasharray="3,3"
+                    />
+
+                    <!-- Active Target / Live Sensor FOV Graph -->
+                    <path
+                        v-if="objectPath"
+                        :d="objectPath"
+                        :fill="hasCustomFovCoords ? 'rgba(45, 212, 191, 0.34)' : 'rgba(16, 185, 129, 0.4)'"
+                        :stroke="hasCustomFovCoords ? '#2dd4bf' : '#10b981'"
+                        stroke-width="2"
+                    />
 
                     <!-- Moon Graph -->
                     <path v-if="moonPath" :d="moonPath" fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,2" />
@@ -392,7 +510,7 @@ const handleMouseLeave = () => {
                 <g v-if="hoverX !== null && hoverTime">
                     <rect :x="Math.min(width - 70, Math.max(0, hoverX - 35))" :y="10" width="70" :height="hoverSunAlt !== null ? 54 : 42" rx="4" fill="rgba(0,0,0,0.8)" stroke="#666" />
                     <text :x="Math.min(width - 35, Math.max(35, hoverX))" :y="22" fill="#fff" font-size="10" text-anchor="middle" font-weight="bold">{{ hoverTime }}</text>
-                    <text :x="Math.min(width - 35, Math.max(35, hoverX))" :y="34" fill="#10b981" font-size="10" text-anchor="middle">Alt: {{ hoverAlt }}°</text>
+                    <text :x="Math.min(width - 35, Math.max(35, hoverX))" :y="34" :fill="hasCustomFovCoords ? '#2dd4bf' : '#10b981'" font-size="10" text-anchor="middle">{{ hasCustomFovCoords ? 'FOV' : 'Alt' }}: {{ hoverAlt }}°</text>
                     <text v-if="hoverSunAlt !== null" :x="Math.min(width - 35, Math.max(35, hoverX))" :y="46" fill="#f59e0b" font-size="10" text-anchor="middle">Sun: {{ hoverSunAlt }}°</text>
                     <text :x="Math.min(width - 35, Math.max(35, hoverX))" :y="hoverSunAlt !== null ? 58 : 46" fill="#9ca3af" font-size="9" text-anchor="middle">{{ hoverZone }}</text>
                 </g>
@@ -440,6 +558,8 @@ const handleMouseLeave = () => {
     font-size: 0.75rem;
 }
 .target-label { color: #10b981; }
+.target-label.is-ref { color: rgba(16, 185, 129, 0.72); }
+.fov-live-label { color: #2dd4bf; font-weight: 600; cursor: help; }
 .moon-label { color: #fbbf24; }
 .night-label { color: #1e3a8a; font-weight: bold; cursor: help; }
 .window-label { color: #38bdf8; font-weight: 600; cursor: help; }
