@@ -4214,6 +4214,20 @@ const applyZoomFactor = (factor, anchorPx = null, anchorPy = null) => {
         }
     }
 
+    if (hasValidSensorFov.value && !fixFovEnabled.value) {
+        if (animFrameId) {
+            cancelAnimationFrame(animFrameId);
+            animFrameId = null;
+        }
+        mapFovDeg.value = nextFov;
+        viewRa.value = wrapRaDeg(fovRa.value);
+        viewDec.value = clampDecDeg(fovDec.value);
+        syncHorizFromRaDec(viewRa.value, viewDec.value, effectiveTimeMs.value);
+        updateStatusReadout(viewRa.value, viewDec.value);
+        scheduleDraw();
+        return;
+    }
+
     if (anchorPx !== null && anchorPy !== null) {
         if (isHorizonFixed.value) {
             const beforeAA = screenToAltAz(anchorPx, anchorPy, viewAz.value, viewAlt.value);
