@@ -98,6 +98,12 @@ export const OBJECT_TYPE_META = {
         short: 'Clust+Neb+Gx',
         icon: '🌠',
         description: 'Composite field with cluster, nebula, and galaxy'
+    },
+    'Sky Field': {
+        label: 'Custom Sky Field',
+        short: 'Sky Field',
+        icon: '🎯',
+        description: 'Custom framed celestial coordinates'
     }
 };
 

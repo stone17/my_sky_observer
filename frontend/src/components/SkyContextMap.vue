@@ -39,6 +39,7 @@ const props = defineProps({
 const emit = defineEmits([
     'close',
     'select-object',
+    'frame-position',
     'update-sensor-center',
     'reset-sensor-center',
     'update-obs-time'
@@ -766,6 +767,7 @@ const lastFovHit = {
     sinR: 0.0
 };
 let fovDragOffset = { dx: 0, dy: 0 };
+let suppressUnmountSync = false;
 
 const hasValidSensorFov = computed(() =>
     Boolean(props.object && Number(props.sensorFov?.w) > 0 && Number(props.sensorFov?.h) > 0)
@@ -1228,10 +1230,8 @@ const syncUnpinnedFovToCenter = (cam = getActiveCameraBasis()) => {
     fovDec.value = clampDecDeg(Math.asin(Math.max(-1.0, Math.min(1.0, cam.Cz))) * RAD2DEG);
 };
 
-const hitTestSensorFov = (px, py) => {
-    // Only capture direct FOV drag when pinned to the sky; when unpinned, FOV stays
-    // locked at viewport center so dragging anywhere pans the sky underneath it.
-    if (!fovPinned.value || !hasValidSensorFov.value || !lastFovHit.valid) {
+const isPointInsideSensorFov = (px, py) => {
+    if (!hasValidSensorFov.value || !lastFovHit.valid) {
         return false;
     }
     const dx = px - lastFovHit.cx;
@@ -1239,6 +1239,12 @@ const hitTestSensorFov = (px, py) => {
     const lx = dx * lastFovHit.cosR + dy * lastFovHit.sinR;
     const ly = -dx * lastFovHit.sinR + dy * lastFovHit.cosR;
     return Math.abs(lx) <= lastFovHit.halfW && Math.abs(ly) <= lastFovHit.halfH;
+};
+
+const hitTestSensorFov = (px, py) => {
+    // Only capture direct FOV drag when pinned to the sky; when unpinned, FOV stays
+    // locked at viewport center so dragging anywhere pans the sky underneath it.
+    return fovPinned.value && isPointInsideSensorFov(px, py);
 };
 
 const updateFovFloatingCtrlPosition = (leftPx, topPx, visible) => {
@@ -3408,15 +3414,13 @@ const drawSkyCanvas = () => {
             const sinR = Math.sin(totalRotRad);
 
             const isPinned = fovPinned.value;
-            if (isPinned) {
-                lastFovHit.valid = true;
-                lastFovHit.cx = sp.x;
-                lastFovHit.cy = sp.y;
-                lastFovHit.halfW = Math.max(drawW * 0.5 + 6, 14);
-                lastFovHit.halfH = Math.max(drawH * 0.5 + 6, 14);
-                lastFovHit.cosR = cosR;
-                lastFovHit.sinR = sinR;
-            }
+            lastFovHit.valid = true;
+            lastFovHit.cx = sp.x;
+            lastFovHit.cy = sp.y;
+            lastFovHit.halfW = Math.max(drawW * 0.5 + 6, 14);
+            lastFovHit.halfH = Math.max(drawH * 0.5 + 6, 14);
+            lastFovHit.cosR = cosR;
+            lastFovHit.sinR = sinR;
 
             const isDragActive = isPinned && isDraggingFov.value;
             const isDragHover = isPinned && isHoveringFov.value;
@@ -4030,7 +4034,26 @@ const handleItemClick = async (item, closeMapAfterSelect = false) => {
 
 const onDoubleClick = (e) => {
     if (!canvasRectValid && !refreshCanvasRect()) return;
-    const hit = findHitItem(e.clientX - canvasLeft, e.clientY - canvasTop);
+    const px = e.clientX - canvasLeft;
+    const py = e.clientY - canvasTop;
+    if (isPointInsideSensorFov(px, py)) {
+        if (!isFovDetached.value && !props.object?.is_custom) {
+            emitSensorCenterIfChanged(true);
+            emit('close');
+            return;
+        }
+        const ra = wrapRaDeg(fovRa.value);
+        const dec = clampDecDeg(fovDec.value);
+        suppressUnmountSync = true;
+        emit('frame-position', {
+            ra,
+            dec,
+            constellation: findConstellationName(ra, dec),
+            cachedImages: cachedServerImages.value
+        });
+        return;
+    }
+    const hit = findHitItem(px, py);
     if (hit) {
         handleItemClick({ ...hit }, true);
     }
@@ -4064,10 +4087,14 @@ const onMouseUp = (e) => {
     isDraggingFov.value = false;
     if (wasPanning && !panMoved) {
         if (canvasRectValid || refreshCanvasRect()) {
-            const hit = findHitItem(e.clientX - canvasLeft, e.clientY - canvasTop);
-            if (hit && (!wasFovDrag || hit.kind !== 'active' || isFovDetached.value)) {
-                handleItemClick({ ...hit });
-                return;
+            const px = e.clientX - canvasLeft;
+            const py = e.clientY - canvasTop;
+            if (!isPointInsideSensorFov(px, py)) {
+                const hit = findHitItem(px, py);
+                if (hit && (!wasFovDrag || hit.kind !== 'active' || isFovDetached.value)) {
+                    handleItemClick({ ...hit });
+                    return;
+                }
             }
         }
         if (wasFovDrag) {
@@ -4366,7 +4393,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-    if (isFovDetached.value) {
+    if (!suppressUnmountSync && isFovDetached.value) {
         emitSensorCenterIfChanged();
     }
     window.removeEventListener('keydown', onKeyDown);
@@ -4425,8 +4452,8 @@ onUnmounted(() => {
                 :aria-pressed="fovPinned"
                 :title="
                     fovPinned
-                        ? 'FOV pinned to sky: moves and zooms with the sky (drag frame to reposition) · Click to unpin & lock to view center'
-                        : 'FOV unpinned: stays locked in the center of the view while panning or zooming · Click to pin to current sky coordinates'
+                        ? 'FOV pinned to sky: moves and zooms with the sky (drag frame to reposition, double-click frame to enter Framing) · Click to unpin & lock to view center'
+                        : 'FOV unpinned: stays locked in the center of the view while panning or zooming (double-click frame to enter Framing) · Click to pin to current sky coordinates'
                 "
             >
                 <svg

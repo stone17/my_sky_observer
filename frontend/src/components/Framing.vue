@@ -39,6 +39,7 @@ const emit = defineEmits([
     'update-client-settings',
     'update-search',
     'select-object',
+    'frame-custom-position',
     'update-fov',
     'open-mobile-list',
     'update-object-settings',
@@ -365,29 +366,31 @@ const fovOverlayObjects = computed(() => {
 
     const items = [];
 
-    // 1. Primary selected object
-    const primaryProj = projectCoord(props.object.ra, props.object.dec);
-    const primaryMaj = parseSizeArcmin(props.object);
-    if (primaryProj) {
-        items.push({
-            key: `primary-${props.object.name}`,
-            name: props.object.name,
-            commonName:
-                props.object.common_name && props.object.common_name !== 'N/A'
-                    ? props.object.common_name
-                    : '',
-            aliases: props.object.aliases || '',
-            type: props.object.type || '',
-            ra: parseFloat(props.object.ra),
-            dec: parseFloat(props.object.dec),
-            majArcmin: primaryMaj,
-            xPct: primaryProj.xPct,
-            yPct: primaryProj.yPct,
-            diameterPct: computeDiameterPct(primaryMaj, true),
-            isPrimary: true,
-            isSubObject: false,
-            catalogRef: props.object
-        });
+    // 1. Primary selected object (skip synthetic custom sky positions)
+    if (!props.object.is_custom) {
+        const primaryProj = projectCoord(props.object.ra, props.object.dec);
+        const primaryMaj = parseSizeArcmin(props.object);
+        if (primaryProj) {
+            items.push({
+                key: `primary-${props.object.name}`,
+                name: props.object.name,
+                commonName:
+                    props.object.common_name && props.object.common_name !== 'N/A'
+                        ? props.object.common_name
+                        : '',
+                aliases: props.object.aliases || '',
+                type: props.object.type || '',
+                ra: parseFloat(props.object.ra),
+                dec: parseFloat(props.object.dec),
+                majArcmin: primaryMaj,
+                xPct: primaryProj.xPct,
+                yPct: primaryProj.yPct,
+                diameterPct: computeDiameterPct(primaryMaj, true),
+                isPrimary: true,
+                isSubObject: false,
+                catalogRef: props.object
+            });
+        }
     }
 
     // Helper to check if a candidate is too close (< 0.35 arcmin) to an existing marker
@@ -572,7 +575,7 @@ let rotTimeout = null;
 let isRestoringObjectState = false;
 
 const emitObjectPatch = (patch) => {
-    if (!props.object?.name || isRestoringObjectState) return;
+    if (!props.object?.name || props.object?.is_custom || isRestoringObjectState) return;
     emit('update-object-settings', {
         name: props.object.name,
         patch
@@ -636,9 +639,9 @@ const applySavedObjectState = (objName) => {
     isRestoringObjectState = false;
 };
 
-watch(() => props.object?.name, (newName, oldName) => {
-    if (newName !== oldName) {
-        applySavedObjectState(newName);
+watch(() => props.object, (newObj, oldObj) => {
+    if (newObj && (newObj.name !== oldObj?.name || (newObj.is_custom && newObj !== oldObj))) {
+        applySavedObjectState(newObj.name);
     }
 }, { immediate: true });
 
@@ -724,7 +727,19 @@ const currentBaseImageFov = computed(() => {
     return Number.isFinite(val) && val > 0 ? val : 1.0;
 });
 
+let skyMapEntryOffset = null;
+
 const openSkyMap = (targetFov = null) => {
+    if (props.object?.name && !props.object?.is_custom) {
+        const saved = props.clientSettings?.object_settings?.[props.object.name] || {};
+        skyMapEntryOffset = {
+            name: props.object.name,
+            offset_x_pct: Number(saved.offset_x_pct) || 0,
+            offset_y_pct: Number(saved.offset_y_pct) || 0
+        };
+    } else {
+        skyMapEntryOffset = null;
+    }
     const base = currentBaseImageFov.value;
     skyMapInitialFov.value =
         targetFov !== null && Number.isFinite(targetFov)
@@ -734,8 +749,49 @@ const openSkyMap = (targetFov = null) => {
 };
 
 const closeSkyMap = () => {
+    skyMapEntryOffset = null;
     showSkyMap.value = false;
     zoomLevel.value = 1.0;
+};
+
+const onSkyMapFramePosition = (payload) => {
+    if (!payload) return;
+    const ra = Number(payload.ra);
+    const dec = Number(payload.dec);
+    if (!Number.isFinite(ra) || !Number.isFinite(dec)) return;
+
+    if (
+        skyMapEntryOffset &&
+        props.object?.name === skyMapEntryOffset.name &&
+        !props.object?.is_custom
+    ) {
+        emitObjectPatch({
+            offset_x_pct: skyMapEntryOffset.offset_x_pct,
+            offset_y_pct: skyMapEntryOffset.offset_y_pct
+        });
+    }
+    skyMapEntryOffset = null;
+
+    skyMapSensorOverride.value = null;
+    offsetX.value = 0;
+    offsetY.value = 0;
+    zoomLevel.value = 1.0;
+    showSkyMap.value = false;
+
+    emit('frame-custom-position', {
+        ra,
+        dec,
+        constellation: payload.constellation || '',
+        fov: localFov.value,
+        rotation: rotation.value,
+        cachedImages: payload.cachedImages || null
+    });
+
+    nextTick(() => {
+        if (props.object?.name && !props.object?.is_custom) {
+            applySavedObjectState(props.object.name);
+        }
+    });
 };
 
 const onWheel = (e) => {
@@ -995,7 +1051,8 @@ const updateImage = async (explicitRes = null) => {
         Boolean(skyMapSensorOverride.value) ||
         Math.abs(offsetX.value) > 0.01 ||
         Math.abs(offsetY.value) > 0.01;
-    const isOffCenter = hasOffset || Boolean(props.object.custom_framed);
+    const isOffCenter =
+        hasOffset || Boolean(props.object.custom_framed) || Boolean(props.object.is_custom);
 
     // If centered on catalog coordinates, use standard object download via App.vue
     if (!isOffCenter) {
@@ -1130,6 +1187,7 @@ onUnmounted(() => {
             <div class="target-identity">
                 <div class="title-line">
                     <button
+                        v-if="!object.is_custom"
                         type="button"
                         class="fav-star-btn"
                         :class="{ 'is-fav': isCurrentFavorite }"
@@ -1161,10 +1219,12 @@ onUnmounted(() => {
                         {{ object.common_name }}
                     </span>
                     <span class="meta-sep" v-if="object.common_name && object.common_name !== 'N/A'">•</span>
-                    <span>Mag: <strong>{{ formatMagnitude(object.mag) }}</strong></span>
-                    <span class="meta-sep">•</span>
-                    <span>Size: <strong>{{ object.size }}</strong></span>
-                    <span class="meta-sep">•</span>
+                    <template v-if="!object.is_custom">
+                        <span>Mag: <strong>{{ formatMagnitude(object.mag) }}</strong></span>
+                        <span class="meta-sep">•</span>
+                        <span>Size: <strong>{{ object.size }}</strong></span>
+                        <span class="meta-sep">•</span>
+                    </template>
                     <span>RA/DEC: <strong>{{ typeof object.ra === 'number' ? object.ra.toFixed(2) : object.ra }}° / {{ typeof object.dec === 'number' ? object.dec.toFixed(2) : object.dec }}°</strong></span>
                 </div>
             </div>
@@ -1216,6 +1276,7 @@ onUnmounted(() => {
                 :effectiveObsTimeMs="effectiveObsTimeMs"
                 @close="closeSkyMap"
                 @select-object="emit('select-object', $event)"
+                @frame-position="onSkyMapFramePosition"
                 @update-sensor-center="onSkyMapUpdateSensorCenter"
                 @reset-sensor-center="onSkyMapResetSensorCenter"
                 @update-obs-time="emit('update-obs-time', $event)"

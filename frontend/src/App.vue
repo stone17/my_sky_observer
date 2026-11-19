@@ -4,7 +4,7 @@ import LeftPanel from './components/LeftPanel.vue';
 import ObjectList from './components/ObjectList.vue';
 import Framing from './components/Framing.vue';
 import AltitudeGraph from './components/AltitudeGraph.vue';
-import { computeDefaultImageFov, normalizeImageFov } from './utils/fov.js';
+import { computeDefaultImageFov, computeSensorFov, normalizeImageFov } from './utils/fov.js';
 import {
     getAstroNightDefaults,
     resolveEffectiveTimeWindow,
@@ -153,6 +153,18 @@ const equipmentSignature = computed(() => {
 const downloadImage = async (obj, explicitFov = null, explicitResolution = null) => {
     if (!obj) return;
 
+    if (obj.is_custom) {
+        const ra = obj.center_ra !== undefined ? obj.center_ra : obj.ra;
+        const dec = obj.center_dec !== undefined ? obj.center_dec : obj.dec;
+        const fovToUse =
+            explicitFov !== null
+                ? explicitFov
+                : isManualFov.value
+                  ? activeFov.value
+                  : systemFov.value;
+        return fetchCustomFramedImageForObject(obj, ra, dec, fovToUse, explicitResolution);
+    }
+
     const targetName = obj.name;
     const requestedFov = normalizeImageFov(
         explicitFov !== null ? explicitFov : (isManualFov.value ? activeFov.value : systemFov.value),
@@ -286,15 +298,17 @@ const fetchCustomFramedImageForObject = async (obj, centerRa, centerDec, fov, ex
             if (selectedObject.value?.name === targetName && selectedObject.value !== obj) {
                 applyCustom(selectedObject.value);
             }
-            updateObjectSettingsEntry(targetName, {
-                fov: effectiveFov,
-                is_manual_fov: Math.abs(effectiveFov - systemFov.value) >= 0.01,
-                custom_framed: true,
-                center_ra: centerRa,
-                center_dec: centerDec,
-                image_url: data.url,
-                image_resolution: effectiveRes
-            });
+            if (!obj.is_custom) {
+                updateObjectSettingsEntry(targetName, {
+                    fov: effectiveFov,
+                    is_manual_fov: Math.abs(effectiveFov - systemFov.value) >= 0.01,
+                    custom_framed: true,
+                    center_ra: centerRa,
+                    center_dec: centerDec,
+                    image_url: data.url,
+                    image_resolution: effectiveRes
+                });
+            }
         } else {
             obj.status = 'error';
             delete obj.downloading_resolution;
@@ -448,7 +462,7 @@ const isValidSingleSessionGraph = (
 
 const ensureObjectDetails = async (targetObj) => {
     const objName = targetObj?.name;
-    if (!objName) return;
+    if (!objName || targetObj?.is_custom) return;
     const currentEveningKey = observingEvening.value?.key || '';
     if (isValidSingleSessionGraph(targetObj.altitude_graph, nightTimes.value, currentEveningKey)) return;
 
@@ -511,6 +525,375 @@ const handleExternalSelectObject = (incomingObj) => {
     ensureObjectDetails(canonical);
 };
 
+const formatCustomSkyPositionName = (raDeg, decDeg) => {
+    const normRa = (((raDeg % 360) + 360) % 360);
+    const totalRaSec = Math.round((normRa / 15.0) * 3600) % 86400;
+    const rh = Math.floor(totalRaSec / 3600);
+    const rm = Math.floor((totalRaSec % 3600) / 60);
+    const rs = totalRaSec % 60;
+
+    const sign = decDeg >= 0 ? '+' : '−';
+    const totalDecMin = Math.round(Math.min(90, Math.abs(decDeg)) * 60);
+    const dd = Math.floor(totalDecMin / 60);
+    const dm = totalDecMin % 60;
+
+    return `${String(rh).padStart(2, '0')}h${String(rm).padStart(2, '0')}m${String(rs).padStart(2, '0')}s ${sign}${String(dd).padStart(2, '0')}°${String(dm).padStart(2, '0')}′`;
+};
+
+const wrapDeltaRaDeg = (dRa) => (((dRa + 180) % 360) + 360) % 360 - 180;
+
+const findMatchingKnownTargetForFraming = (normRa, clampedDec, cleanRot, cachedImages) => {
+    const sFov = computeSensorFov(settings.value?.telescope, settings.value?.camera);
+    const sensorW = sFov ? Number(sFov.w) || 0 : 0;
+    const sensorH = sFov ? Number(sFov.h) || 0 : 0;
+    const halfSensorW = sensorW * 0.5;
+    const halfSensorH = sensorH * 0.5;
+
+    const rotRad = (cleanRot * Math.PI) / 180.0;
+    const cosR = Math.cos(rotRad);
+    const sinR = Math.sin(rotRad);
+    const absCosR = Math.abs(cosR);
+    const absSinR = Math.abs(sinR);
+    const halfSensorSpanX = 0.5 * (sensorW * absCosR + sensorH * absSinR);
+    const halfSensorSpanY = 0.5 * (sensorW * absSinR + sensorH * absCosR);
+    const sensorBoxArea = 4 * halfSensorSpanX * halfSensorSpanY;
+    const cosSensorDec = Math.max(Math.cos((clampedDec * Math.PI) / 180.0), 0.01);
+
+    const serverCachedByName = new Map();
+    if (Array.isArray(cachedImages)) {
+        for (let i = 0; i < cachedImages.length; i++) {
+            const img = cachedImages[i];
+            if (!img?.name || !img?.url || img.is_custom) continue;
+            const nameStr = String(img.name);
+            if (nameStr.startsWith('SKYFILL_') || serverCachedByName.has(nameStr)) continue;
+            serverCachedByName.set(nameStr, {
+                url: String(img.url).split('?')[0],
+                ra: Number(img.ra),
+                dec: Number(img.dec),
+                fov: Number(img.fov)
+            });
+        }
+    }
+
+    const activeCatalogName =
+        selectedObject.value && !selectedObject.value.is_custom
+            ? selectedObject.value.name
+            : '';
+
+    const evalBoundaryPoint = (ptRa, ptDec, majArcmin) => {
+        if (!Number.isFinite(ptRa) || !Number.isFinite(ptDec)) return null;
+        const dEastDeg = wrapDeltaRaDeg(ptRa - normRa) * cosSensorDec;
+        const dNorthDeg = ptDec - clampedDec;
+        const distDeg = Math.hypot(dEastDeg, dNorthDeg);
+        const ptRadiusDeg = Math.max(0, ((Number(majArcmin) || 0) * 0.5) / 60.0);
+        const sensorCenterInsideDso = ptRadiusDeg > 0 && distDeg <= ptRadiusDeg;
+
+        let targetCenterInsideSensor = false;
+        let dsoOverlapsSensor = false;
+        if (halfSensorW > 1e-6 && halfSensorH > 1e-6) {
+            const dxScreen = -dEastDeg;
+            const dyScreen = -dNorthDeg;
+            const u = dxScreen * cosR + dyScreen * sinR;
+            const v = -dxScreen * sinR + dyScreen * cosR;
+            targetCenterInsideSensor = Math.abs(u) <= halfSensorW && Math.abs(v) <= halfSensorH;
+            if (ptRadiusDeg > 0) {
+                const clampedU = Math.max(-halfSensorW, Math.min(halfSensorW, u));
+                const clampedV = Math.max(-halfSensorH, Math.min(halfSensorH, v));
+                dsoOverlapsSensor = Math.hypot(u - clampedU, v - clampedV) <= ptRadiusDeg;
+            }
+        }
+        return {
+            sensorCenterInsideDso,
+            targetCenterInsideSensor,
+            dsoOverlapsSensor,
+            ptRadiusDeg
+        };
+    };
+
+    let bestCached = null;
+    let bestUncached = null;
+    const list = objects.value;
+
+    for (let i = 0; i < list.length; i++) {
+        const cand = list[i];
+        if (!cand || cand.is_custom || !cand.name) continue;
+        const candRa = Number(cand.ra);
+        const candDec = Number(cand.dec);
+        if (!Number.isFinite(candRa) || !Number.isFinite(candDec)) continue;
+        if (Math.abs(candDec - clampedDec) > 12.0) continue;
+
+        let isCached = false;
+        let cutoutUrl = '';
+        let cutoutFov = systemFov.value;
+        let cutoutRa = candRa;
+        let cutoutDec = candDec;
+        let isCustomFramedCutout = false;
+
+        if (cand.status === 'cached' && cand.image_url) {
+            isCached = true;
+            cutoutUrl = String(cand.image_url);
+            cutoutFov = normalizeImageFov(cand.image_fov || systemFov.value, systemFov.value);
+            cutoutRa = Number(cand.center_ra !== undefined ? cand.center_ra : candRa);
+            cutoutDec = Number(cand.center_dec !== undefined ? cand.center_dec : candDec);
+            isCustomFramedCutout = Boolean(cand.custom_framed);
+        } else {
+            const srv = serverCachedByName.get(cand.name);
+            if (srv && srv.url) {
+                isCached = true;
+                cutoutUrl = srv.url;
+                cutoutFov = normalizeImageFov(srv.fov || systemFov.value, systemFov.value);
+                cutoutRa = Number.isFinite(srv.ra) ? srv.ra : candRa;
+                cutoutDec = Number.isFinite(srv.dec) ? srv.dec : candDec;
+                const dCatX =
+                    wrapDeltaRaDeg(cutoutRa - candRa) *
+                    Math.max(Math.cos((candDec * Math.PI) / 180.0), 0.01);
+                isCustomFramedCutout = Math.hypot(dCatX, cutoutDec - candDec) > 0.02;
+            }
+        }
+
+        const halfCutout = cutoutFov * 0.5;
+        if (halfCutout <= 0.05) continue;
+
+        const cosCutoutDec = Math.max(Math.cos((cutoutDec * Math.PI) / 180.0), 0.01);
+        const angOffsetX = wrapDeltaRaDeg(normRa - cutoutRa) * cosCutoutDec;
+        const angOffsetY = clampedDec - cutoutDec;
+
+        if (Math.abs(angOffsetX) > halfCutout * 0.85 || Math.abs(angOffsetY) > halfCutout * 0.85) {
+            continue;
+        }
+
+        let overlapFraction = 1.0;
+        if (sensorBoxArea > 1e-8) {
+            const ox = Math.max(
+                0,
+                Math.min(halfCutout, angOffsetX + halfSensorSpanX) -
+                    Math.max(-halfCutout, angOffsetX - halfSensorSpanX)
+            );
+            const oy = Math.max(
+                0,
+                Math.min(halfCutout, angOffsetY + halfSensorSpanY) -
+                    Math.max(-halfCutout, angOffsetY - halfSensorSpanY)
+            );
+            overlapFraction = (ox * oy) / sensorBoxArea;
+        }
+
+        const minOverlap = isCached ? 0.90 : 0.95;
+        if (overlapFraction < minOverlap) continue;
+
+        const primaryEval = evalBoundaryPoint(candRa, candDec, cand.maj_ax);
+        let sensorCenterInsideDso = Boolean(primaryEval?.sensorCenterInsideDso);
+        let targetCenterInsideSensor = Boolean(primaryEval?.targetCenterInsideSensor);
+        let dsoOverlapsSensor = Boolean(primaryEval?.dsoOverlapsSensor);
+        let maxRadiusDeg = primaryEval?.ptRadiusDeg || 0;
+
+        if (Array.isArray(cand.sub_objects)) {
+            for (let s = 0; s < cand.sub_objects.length; s++) {
+                const sub = cand.sub_objects[s];
+                const subEval = evalBoundaryPoint(
+                    Number(sub?.ra),
+                    Number(sub?.dec),
+                    sub?.maj_ax || 0
+                );
+                if (!subEval) continue;
+                if (subEval.sensorCenterInsideDso) sensorCenterInsideDso = true;
+                if (subEval.targetCenterInsideSensor) targetCenterInsideSensor = true;
+                if (subEval.dsoOverlapsSensor) dsoOverlapsSensor = true;
+                if (subEval.ptRadiusDeg > maxRadiusDeg) maxRadiusDeg = subEval.ptRadiusDeg;
+            }
+        }
+
+        const isActiveTarget = cand.name === activeCatalogName;
+        const hasBoundaryMatch =
+            isActiveTarget ||
+            sensorCenterInsideDso ||
+            targetCenterInsideSensor ||
+            dsoOverlapsSensor;
+
+        const offsetDistDeg = Math.hypot(angOffsetX, angOffsetY);
+        const offsetXPct = Math.round(-(angOffsetX / cutoutFov) * 10000) / 100;
+        const offsetYPct = Math.round(-(angOffsetY / cutoutFov) * 10000) / 100;
+
+        if (isCached) {
+            if (!hasBoundaryMatch && overlapFraction < 0.99) continue;
+
+            const fullContainmentTier = overlapFraction >= 0.99 ? 1 : 0;
+            const activeFitTier = isActiveTarget && overlapFraction >= 0.98 ? 1 : 0;
+            const boundaryTier = sensorCenterInsideDso
+                ? 3
+                : targetCenterInsideSensor || dsoOverlapsSensor
+                  ? 2
+                  : isActiveTarget
+                    ? 1
+                    : 0;
+
+            const candidateEntry = {
+                target: cand,
+                isCached: true,
+                cutoutUrl,
+                cutoutFov,
+                cutoutRa,
+                cutoutDec,
+                isCustomFramedCutout,
+                offsetXPct,
+                offsetYPct,
+                fullContainmentTier,
+                activeFitTier,
+                boundaryTier,
+                overlapFraction,
+                offsetDistDeg,
+                maxRadiusDeg
+            };
+
+            if (!bestCached) {
+                bestCached = candidateEntry;
+            } else {
+                const better =
+                    candidateEntry.fullContainmentTier !== bestCached.fullContainmentTier
+                        ? candidateEntry.fullContainmentTier > bestCached.fullContainmentTier
+                        : candidateEntry.activeFitTier !== bestCached.activeFitTier
+                          ? candidateEntry.activeFitTier > bestCached.activeFitTier
+                          : candidateEntry.boundaryTier !== bestCached.boundaryTier
+                            ? candidateEntry.boundaryTier > bestCached.boundaryTier
+                            : Math.abs(candidateEntry.overlapFraction - bestCached.overlapFraction) > 0.015
+                              ? candidateEntry.overlapFraction > bestCached.overlapFraction
+                              : candidateEntry.offsetDistDeg < bestCached.offsetDistDeg;
+                if (better) {
+                    bestCached = candidateEntry;
+                }
+            }
+        } else {
+            const hasStrongPhysicalMatch =
+                isActiveTarget ||
+                (sensorCenterInsideDso && (Number(cand.maj_ax) || 0) >= 4.0) ||
+                targetCenterInsideSensor;
+            if (!hasStrongPhysicalMatch) continue;
+
+            const boundaryTier = isActiveTarget
+                ? 3
+                : sensorCenterInsideDso
+                  ? 2
+                  : 1;
+            const candidateEntry = {
+                target: cand,
+                isCached: false,
+                cutoutUrl: '',
+                cutoutFov,
+                cutoutRa,
+                cutoutDec,
+                isCustomFramedCutout: false,
+                offsetXPct,
+                offsetYPct,
+                boundaryTier,
+                overlapFraction,
+                offsetDistDeg,
+                maxRadiusDeg
+            };
+
+            if (!bestUncached) {
+                bestUncached = candidateEntry;
+            } else {
+                const better =
+                    candidateEntry.boundaryTier !== bestUncached.boundaryTier
+                        ? candidateEntry.boundaryTier > bestUncached.boundaryTier
+                        : candidateEntry.offsetDistDeg < bestUncached.offsetDistDeg;
+                if (better) {
+                    bestUncached = candidateEntry;
+                }
+            }
+        }
+    }
+
+    return bestCached || bestUncached;
+};
+
+const handleFrameCustomPosition = (payload) => {
+    if (!payload) return;
+    const rawRa = Number(payload.ra);
+    const rawDec = Number(payload.dec);
+    if (!Number.isFinite(rawRa) || !Number.isFinite(rawDec)) return;
+
+    const normRa = (((rawRa % 360) + 360) % 360);
+    const clampedDec = Math.max(-89.99, Math.min(89.99, rawDec));
+    const normFov = normalizeImageFov(payload.fov, systemFov.value);
+    const cleanRot = Number.isFinite(Number(payload.rotation)) ? Number(payload.rotation) : 0;
+
+    const matched = findMatchingKnownTargetForFraming(
+        normRa,
+        clampedDec,
+        cleanRot,
+        payload.cachedImages
+    );
+
+    if (matched && matched.target) {
+        const canonical = objectMap.get(matched.target.name) || matched.target;
+        const cutoutFov = matched.cutoutFov;
+        const isCutoutManualFov = Math.abs(cutoutFov - systemFov.value) >= 0.01;
+
+        if (matched.isCached && matched.cutoutUrl) {
+            canonical.image_url = matched.cutoutUrl;
+            canonical.image_fov = cutoutFov;
+            canonical.status = 'cached';
+            if (matched.isCustomFramedCutout) {
+                canonical.custom_framed = true;
+                canonical.center_ra = matched.cutoutRa;
+                canonical.center_dec = matched.cutoutDec;
+            } else {
+                canonical.custom_framed = false;
+                delete canonical.center_ra;
+                delete canonical.center_dec;
+            }
+        }
+
+        canonical.rotation = cleanRot;
+        isManualFov.value = isCutoutManualFov;
+        activeFov.value = cutoutFov;
+
+        const settingsPatch = {
+            offset_x_pct: matched.offsetXPct,
+            offset_y_pct: matched.offsetYPct,
+            rotation: cleanRot,
+            fov: isCutoutManualFov ? cutoutFov : null,
+            is_manual_fov: isCutoutManualFov
+        };
+        if (matched.isCached && matched.cutoutUrl) {
+            settingsPatch.custom_framed = Boolean(matched.isCustomFramedCutout);
+            settingsPatch.center_ra = matched.isCustomFramedCutout ? matched.cutoutRa : null;
+            settingsPatch.center_dec = matched.isCustomFramedCutout ? matched.cutoutDec : null;
+            if (matched.isCustomFramedCutout || isCutoutManualFov) {
+                settingsPatch.image_url = matched.cutoutUrl;
+            }
+        }
+        updateObjectSettingsEntry(canonical.name, settingsPatch);
+
+        pinnedTopObjectId.value = canonical.name;
+        pinnedTopSeq.value += 1;
+        selectedObject.value = canonical;
+        ensureObjectDetails(canonical);
+        return;
+    }
+
+    pinnedTopObjectId.value = '';
+    customFramingCoords.value = null;
+    isManualFov.value = Math.abs(normFov - systemFov.value) >= 0.01;
+    activeFov.value = normFov;
+
+    selectedObject.value = {
+        is_custom: true,
+        name: formatCustomSkyPositionName(normRa, clampedDec),
+        common_name: 'Custom Sky Position',
+        type: 'Sky Field',
+        constellation: payload.constellation || '',
+        ra: normRa,
+        dec: clampedDec,
+        mag: null,
+        size: '—',
+        rotation: cleanRot,
+        image_fov: normFov,
+        image_url: null,
+        status: 'idle'
+    };
+};
+
 const handleListSelectObject = (item) => {
     if (!item) return;
     if (pinnedTopObjectId.value && item.name !== pinnedTopObjectId.value) {
@@ -524,20 +907,26 @@ const handleListSelectObject = (item) => {
 // Watcher 2: Object Selection
 watch(selectedObject, (newVal, oldVal) => {
     if (!newVal) return;
-    const isSameObject = newVal?.name === oldVal?.name;
+    const isSameObject =
+        newVal === oldVal ||
+        (!newVal.is_custom && !oldVal?.is_custom && newVal?.name === oldVal?.name);
 
     ensureObjectDetails(newVal);
 
-    if (clientSettings.value.selected_object !== newVal.name) {
+    if (!newVal.is_custom && clientSettings.value.selected_object !== newVal.name) {
         clientSettings.value.selected_object = newVal.name;
         if (!isInitializing) {
             saveSettings({});
         }
     }
 
-    const savedObj = getValidSavedObjectState(newVal.name);
+    const savedObj = newVal.is_custom ? null : getValidSavedObjectState(newVal.name);
     if (!isSameObject) {
-        if (savedObj?.is_manual_fov && savedObj.fov) {
+        if (newVal.is_custom && newVal.image_fov) {
+            const normCustomFov = normalizeImageFov(newVal.image_fov, systemFov.value);
+            isManualFov.value = Math.abs(normCustomFov - systemFov.value) >= 0.01;
+            activeFov.value = normCustomFov;
+        } else if (savedObj?.is_manual_fov && savedObj.fov) {
             const normSavedFov = normalizeImageFov(savedObj.fov, systemFov.value);
             isManualFov.value = Math.abs(normSavedFov - systemFov.value) >= 0.01;
             activeFov.value = normSavedFov;
@@ -606,17 +995,19 @@ const handleFovUpdate = (payload) => {
             delete selectedObject.value.center_ra;
             delete selectedObject.value.center_dec;
             delete selectedObject.value.image_resolution;
-            updateObjectSettingsEntry(objName, {
-                fov: null,
-                is_manual_fov: false,
-                custom_framed: false,
-                center_ra: null,
-                center_dec: null,
-                image_url: null,
-                image_resolution: null,
-                offset_x_pct: 0,
-                offset_y_pct: 0
-            });
+            if (!selectedObject.value.is_custom) {
+                updateObjectSettingsEntry(objName, {
+                    fov: null,
+                    is_manual_fov: false,
+                    custom_framed: false,
+                    center_ra: null,
+                    center_dec: null,
+                    image_url: null,
+                    image_resolution: null,
+                    offset_x_pct: 0,
+                    offset_y_pct: 0
+                });
+            }
             if (!skipDownload) {
                 downloadImage(selectedObject.value, systemFov.value, explicitResolution);
             }
@@ -629,10 +1020,12 @@ const handleFovUpdate = (payload) => {
     activeFov.value = normalized;
 
     if (selectedObject.value) {
-        updateObjectSettingsEntry(selectedObject.value.name, {
-            fov: normalized,
-            is_manual_fov: isManualFov.value
-        });
+        if (!selectedObject.value.is_custom) {
+            updateObjectSettingsEntry(selectedObject.value.name, {
+                fov: normalized,
+                is_manual_fov: isManualFov.value
+            });
+        }
         if (!skipDownload) {
             downloadImage(selectedObject.value, normalized, explicitResolution);
         }
@@ -1218,7 +1611,7 @@ const startStream = (mode = 'selected') => {
                     }
                     selectedObject.value = found;
                     ensureObjectDetails(found);
-                } else if (prevSelected) {
+                } else if (prevSelected && !prevSelected.is_custom) {
                     selectedObject.value = null;
                 }
             }
@@ -1546,6 +1939,7 @@ watch(clientSettings, () => {
                         @update-fov="handleFovUpdate"
                         @update-search="handleSearchUpdate"
                         @select-object="handleExternalSelectObject"
+                        @frame-custom-position="handleFrameCustomPosition"
                         @update-settings="saveSettings"
                         @update-client-settings="updateClientSettings"
                         @update-object-settings="handleObjectSettingsUpdate"
