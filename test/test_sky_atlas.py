@@ -440,3 +440,165 @@ def test_fill_sky_gaps_readonly_nas_fallback_and_resume(tmp_path, monkeypatch):
     assert res_extra["lod0_sectors"] == expected_lod0
 
 
+def test_photometric_harmonization_and_multiband_seam_suppression(tmp_path):
+    import math
+    import numpy as np
+    from PIL import Image
+    from backend.sky_atlas import (
+        DEG2RAD,
+        _compute_cutout_harmonization,
+        _load_or_extract_bg_grids,
+        _make_tangent_basis,
+        _prepare_cutout_bands,
+        _render_sector_rgba,
+    )
+
+    px = 256
+    yy, xx = np.mgrid[0:px, 0:px].astype(np.float32)
+    r2 = ((xx - 127.5) / 127.5) ** 2 + ((yy - 127.5) / 127.5) ** 2
+
+    # Cutout 0 (RA=179.0, Dec=0.0): dark auto-stretch (38 DN) + corner vignetting + 255 white star
+    img0 = np.clip(38.0 - 12.0 * r2, 0.0, 255.0)
+    img0[60:64, 60:64] = 255.0  # bright star outside overlap
+
+    # Cutout 1 (RA=181.0, Dec=0.0): bright auto-stretch (86 DN) + corner vignetting
+    img1 = np.clip(86.0 - 14.0 * r2, 0.0, 255.0)
+
+    p0 = str(tmp_path / "cut0.jpg")
+    p1 = str(tmp_path / "cut1.jpg")
+    Image.fromarray(np.repeat(img0[:, :, None].astype(np.uint8), 3, axis=2)).save(
+        p0, format="JPEG", quality=96
+    )
+    Image.fromarray(np.repeat(img1[:, :, None].astype(np.uint8), 3, axis=2)).save(
+        p1, format="JPEG", quality=96
+    )
+
+    fov = 4.0
+    half_tan = math.tan(0.5 * fov * DEG2RAD)
+    cone_rad = math.atan(math.sqrt(2.0) * half_tan)
+    metas = [
+        {
+            "filepath": p0,
+            "ra": 179.0,
+            "dec": 0.0,
+            "fov": fov,
+            "basis": _make_tangent_basis(179.0, 0.0),
+            "half_tan": half_tan,
+            "cone_rad": cone_rad,
+            "detail_weight": 1.15,  # catalog target boost
+        },
+        {
+            "filepath": p1,
+            "ra": 181.0,
+            "dec": 0.0,
+            "fov": fov,
+            "basis": _make_tangent_basis(181.0, 0.0),
+            "half_tan": half_tan,
+            "cone_rad": cone_rad,
+            "detail_weight": 1.0,  # SKYFILL weight
+        },
+    ]
+
+    bg_grids, valid = _load_or_extract_bg_grids(metas, str(tmp_path))
+    harm = _compute_cutout_harmonization(metas, bg_grids, valid)
+    assert harm[0] is not None and harm[1] is not None
+
+    raw0 = np.asarray(Image.open(p0).convert("RGB"), dtype=np.uint8)
+    raw1 = np.asarray(Image.open(p1).convert("RGB"), dtype=np.uint8)
+    h0, low0 = _prepare_cutout_bands(raw0, harm[0])
+    h1, low1 = _prepare_cutout_bands(raw1, harm[1])
+
+    # Star core stays crisp white (>= 245 DN) despite background gain/offset adjustment
+    assert int(np.max(h0[60:64, 60:64])) >= 245
+
+    # Render sector spanning RA 177..183 deg across the overlap boundary
+    sec_span = 6.0
+    sec_ht = math.tan(0.5 * sec_span * DEG2RAD)
+    sec = {
+        "b": 1,
+        "c": 0,
+        "ra0": 180.0,
+        "dec0": 0.0,
+        "ra_min": 176.5,
+        "ra_max": 183.5,
+        "ra_step": 7.0,
+        "dec_min": -3.5,
+        "dec_max": 3.5,
+        "d_step": 7.0,
+        "pole": 0,
+        "basis": _make_tangent_basis(180.0, 0.0),
+        "half_tan": sec_ht,
+        "span_deg": sec_span,
+        "cone_rad": math.atan(math.sqrt(2.0) * sec_ht),
+        "tile_px": 256,
+    }
+
+    # Compare naive raw stitching vs harmonized 2-band stitching along equatorial scanline (y=128)
+    rendered_harm = np.asarray(
+        _render_sector_rgba(sec, [0, 1], metas, {0: h0, 1: h1}, {0: low0, 1: low1}),
+        dtype=np.float32,
+    )
+    profile = rendered_harm[128, 64:192, 0]
+    adj_diffs = np.abs(np.diff(profile))
+    # Smooth gradient everywhere across cutout edges (< 1.5 DN/px step) and small end-to-end drift
+    assert float(np.max(adj_diffs)) < 1.5
+    assert float(np.max(profile) - np.min(profile)) < 8.0
+
+
+def test_voronoi_plate_seam_cutout_downweighted_by_clean_neighbors(tmp_path):
+    import math
+    import numpy as np
+    from PIL import Image
+    from backend.sky_atlas import (
+        DEG2RAD,
+        _compute_cutout_harmonization,
+        _load_or_extract_bg_grids,
+        _make_tangent_basis,
+    )
+
+    px = 192
+    yy, xx = np.mgrid[0:px, 0:px].astype(np.float32)
+    fov = 3.2
+    half_tan = math.tan(0.5 * fov * DEG2RAD)
+    cone_rad = math.atan(math.sqrt(2.0) * half_tan)
+
+    centers = [
+        (272.2, -12.8),
+        (274.4, -12.8),
+        (273.3, -11.7),
+        (273.3, -13.9),
+        (273.3, -12.8),  # index 4: broken diagonal Voronoi Schmidt-plate seam cutout
+    ]
+    metas = []
+    for i, (ra, dec) in enumerate(centers):
+        if i < 4:
+            arr = np.full((px, px, 3), 58, dtype=np.uint8)
+        else:
+            # Sharp diagonal step: 26 DN in NW half, 58 DN in SE half
+            diag = np.where((xx + yy) < px, 26, 58).astype(np.uint8)
+            arr = np.repeat(diag[:, :, None], 3, axis=2)
+        fpath = str(tmp_path / f"plate_{i}.jpg")
+        Image.fromarray(arr).save(fpath, format="JPEG", quality=96)
+        metas.append(
+            {
+                "filepath": fpath,
+                "ra": ra,
+                "dec": dec,
+                "fov": fov,
+                "basis": _make_tangent_basis(ra, dec),
+                "half_tan": half_tan,
+                "cone_rad": cone_rad,
+                "detail_weight": 1.0,
+            }
+        )
+
+    bg_grids, valid = _load_or_extract_bg_grids(metas, str(tmp_path))
+    harm = _compute_cutout_harmonization(metas, bg_grids, valid)
+    assert harm[4] is not None
+    # Clean surrounding cutouts keep high plate_quality (> 0.85), broken Voronoi cutout is down-weighted (< 0.50)
+    for i in range(4):
+        assert metas[i]["plate_quality"] > 0.85
+    assert metas[4]["plate_quality"] < 0.50
+
+
+
