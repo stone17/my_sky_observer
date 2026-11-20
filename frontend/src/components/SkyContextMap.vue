@@ -817,6 +817,33 @@ const applyTargetFilters = ref(readSavedApplyFilters());
 const isOptionsDrawerOpen = ref(false);
 const isEphemerisModalOpen = ref(false);
 
+const openSkyOptionsPanel = () => {
+    window.dispatchEvent(new CustomEvent('open-left-tab', { detail: 'sky' }));
+};
+
+const syncSkyOptionsFromStorage = () => {
+    showSolarSystem.value = readSavedBool(SKY_SHOW_SOLAR_SYSTEM_STORAGE_KEY, true);
+    showEphemeris.value = readSavedBool(SKY_SHOW_EPHEMERIS_STORAGE_KEY, true);
+    showMeridian.value = readSavedBool(SKY_SHOW_MERIDIAN_STORAGE_KEY, false);
+    showGrid.value = readSavedBool(SKY_SHOW_GRID_STORAGE_KEY, true);
+    showConstellations.value = readSavedBool(SKY_SHOW_CONSTELLATIONS_STORAGE_KEY, true);
+    showDsos.value = readSavedBool(SKY_SHOW_DSOS_STORAGE_KEY, true);
+    showCachedPhotos.value = readSavedBool(SKY_SHOW_PHOTOS_STORAGE_KEY, true);
+    showHorizon.value = readSavedBool(SKY_SHOW_HORIZON_STORAGE_KEY, true);
+    const mode = window.localStorage?.getItem('sky_observer_sky_frame_mode_v1');
+    if (mode === 'sky' || mode === 'horizon') {
+        skyFrameMode.value = mode;
+    }
+    if (showSolarSystem.value && (!solarSystemPositions.value || solarSystemPositions.value.length === 0)) {
+        fetchSolarSystemPositions();
+    }
+    scheduleDraw();
+};
+
+const handleOpenEphemerisModal = () => {
+    isEphemerisModalOpen.value = true;
+};
+
 const solarSystemPositions = ref([]);
 const solarSystemLoading = ref(false);
 
@@ -1531,7 +1558,7 @@ const fetchSolarSystemPositions = async () => {
         const res = await fetch(`/api/solar-system-positions?${qp.toString()}`);
         if (res.ok) {
             const data = await res.json();
-            solarSystemPositions.value = data.bodies || [];
+            solarSystemPositions.value = Array.isArray(data) ? data : (data.bodies || []);
             scheduleDraw();
         }
     } catch (err) {
@@ -2017,7 +2044,7 @@ const drawMeridianLine = (ctx, cam, w, h, horizBasis, minPointCos, overlapsPlace
 
     ctx.beginPath();
     let drawing = false;
-    let labelPlaced = false;
+    let labelInfo = null;
 
     const numSteps = 120;
     for (let i = 0; i <= numSteps; i++) {
@@ -2051,35 +2078,39 @@ const drawMeridianLine = (ctx, cam, w, h, horizBasis, minPointCos, overlapsPlace
             ctx.lineTo(sx, sy);
         }
 
-        if (!labelPlaced && theta >= Math.PI * 0.35 && theta <= Math.PI * 0.65) {
+        if (!labelInfo && theta >= Math.PI * 0.35 && theta <= Math.PI * 0.65) {
             if (sx > 60 && sx < w - 60 && sy > 40 && sy < h - 40) {
-                const text = "Local Meridian";
-                ctx.font = '500 10px system-ui, -apple-system, sans-serif';
-                const tw = getMeasuredTextWidth(ctx, 'meridian', text);
-                const x1 = sx - tw * 0.5 - 4;
-                const y1 = sy - 8;
-                if (!overlapsPlaced(x1, y1, x1 + tw + 8, y1 + 16, 3)) {
-                    pushPlacedBox(x1, y1, x1 + tw + 8, y1 + 16);
-                    ctx.save();
-                    ctx.fillStyle = 'rgba(6, 18, 30, 0.88)';
-                    ctx.strokeStyle = 'rgba(0, 229, 255, 0.65)';
-                    ctx.lineWidth = 1;
-                    if (ctx.roundRect) ctx.roundRect(x1, y1, tw + 8, 16, 4);
-                    else ctx.rect(x1, y1, tw + 8, 16);
-                    ctx.fill();
-                    ctx.stroke();
-                    ctx.fillStyle = 'rgba(0, 229, 255, 0.95)';
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'middle';
-                    ctx.fillText(text, sx, sy + 0.5);
-                    ctx.restore();
-                    labelPlaced = true;
-                }
+                labelInfo = { sx, sy };
             }
         }
     }
     ctx.stroke();
     ctx.restore();
+
+    if (labelInfo) {
+        const text = "Local Meridian";
+        ctx.save();
+        ctx.font = '500 10px system-ui, -apple-system, sans-serif';
+        const tw = getMeasuredTextWidth(ctx, 'meridian', text);
+        const x1 = labelInfo.sx - tw * 0.5 - 4;
+        const y1 = labelInfo.sy - 8;
+        if (!overlapsPlaced(x1, y1, x1 + tw + 8, y1 + 16, 3)) {
+            pushPlacedBox(x1, y1, x1 + tw + 8, y1 + 16);
+            ctx.fillStyle = 'rgba(6, 18, 30, 0.88)';
+            ctx.strokeStyle = 'rgba(0, 229, 255, 0.65)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            if (ctx.roundRect) ctx.roundRect(x1, y1, tw + 8, 16, 4);
+            else ctx.rect(x1, y1, tw + 8, 16);
+            ctx.fill();
+            ctx.stroke();
+            ctx.fillStyle = 'rgba(0, 229, 255, 0.95)';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, labelInfo.sx, labelInfo.sy + 0.5);
+        }
+        ctx.restore();
+    }
 };
 
 const drawSolarSystemObjects = (ctx, cam, w, h, fov, minPointCos, overlapsPlaced, horizBasis, buildHitItems = true) => {
@@ -2143,33 +2174,40 @@ const drawSolarSystemObjects = (ctx, cam, w, h, fov, minPointCos, overlapsPlaced
             }
         }
 
+        // Accent target ring for Solar System body
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.75)';
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.arc(sx, sy, 8.5, 0, Math.PI * 2);
+        ctx.stroke();
+
         ctx.font = '600 11px system-ui, -apple-system, sans-serif';
         const labelText = body.id === 'moon' && body.phase_percent !== undefined
             ? `${body.symbol || ''} Moon (${Math.round(body.phase_percent)}%)`
             : `${body.symbol || ''} ${body.name} (mag ${body.mag?.toFixed(1) || 'N/A'})`;
 
         const tw = getMeasuredTextWidth(ctx, 'solarsys', labelText);
-        const lx1 = sx + 9;
-        const ly1 = sy - 7;
-        const lx2 = lx1 + tw + 6;
+        const lx1 = sx + 11;
+        const ly1 = sy - 7.5;
+        const lx2 = lx1 + tw + 8;
         const ly2 = ly1 + 15;
 
         if (!overlapsPlaced(lx1, ly1, lx2, ly2, 2)) {
             pushPlacedBox(lx1, ly1, lx2, ly2);
 
-            ctx.fillStyle = 'rgba(8, 14, 24, 0.85)';
-            ctx.strokeStyle = body.color || 'rgba(255, 255, 255, 0.4)';
+            ctx.fillStyle = 'rgba(20, 6, 8, 0.92)';
+            ctx.strokeStyle = 'rgba(239, 68, 68, 0.9)';
             ctx.lineWidth = 1;
             ctx.beginPath();
-            if (ctx.roundRect) ctx.roundRect(lx1, ly1, tw + 6, 15, 3);
-            else ctx.rect(lx1, ly1, tw + 6, 15);
+            if (ctx.roundRect) ctx.roundRect(lx1, ly1, tw + 8, 15, 4);
+            else ctx.rect(lx1, ly1, tw + 8, 15);
             ctx.fill();
             ctx.stroke();
 
-            ctx.fillStyle = '#FFFFFF';
+            ctx.fillStyle = '#FF4D4D';
             ctx.textAlign = 'left';
             ctx.textBaseline = 'middle';
-            ctx.fillText(labelText, lx1 + 3, ly1 + 7.5);
+            ctx.fillText(labelText, lx1 + 4, ly1 + 7.5);
         }
 
         if (buildHitItems) {
@@ -4852,6 +4890,8 @@ onMounted(async () => {
     window.addEventListener('blur', onWindowBlur);
     window.addEventListener('resize', refreshCanvasRect, { passive: true });
     window.addEventListener('scroll', refreshCanvasRect, { capture: true, passive: true });
+    window.addEventListener('sky-options-updated', syncSkyOptionsFromStorage);
+    window.addEventListener('open-ephemeris-modal', handleOpenEphemerisModal);
 
     fetchSavedEphemerides();
     fetchSolarSystemPositions();
@@ -4903,6 +4943,8 @@ onUnmounted(() => {
     window.removeEventListener('blur', onWindowBlur);
     window.removeEventListener('resize', refreshCanvasRect);
     window.removeEventListener('scroll', refreshCanvasRect, { capture: true });
+    window.removeEventListener('sky-options-updated', syncSkyOptionsFromStorage);
+    window.removeEventListener('open-ephemeris-modal', handleOpenEphemerisModal);
     if (liveClockTimer) clearInterval(liveClockTimer);
     if (resizeObserver) resizeObserver.disconnect();
     if (rafId) cancelAnimationFrame(rafId);
@@ -5117,11 +5159,10 @@ onUnmounted(() => {
             <button
                 type="button"
                 class="sky-layer-chip options-panel-chip"
-                :class="{ active: isOptionsDrawerOpen }"
-                @click="isOptionsDrawerOpen = !isOptionsDrawerOpen"
-                title="Open Sky View Options & Layers side panel"
+                @click="openSkyOptionsPanel"
+                title="Open Sky View Options & Layers in left panel"
             >
-                <span>⚙ Sky View</span>
+                <span>⚙ Sky Options</span>
             </button>
 
             <div class="sky-zoom-stepper">
@@ -5221,92 +5262,6 @@ onUnmounted(() => {
                 </div>
             </template>
         </ObservingDateConsole>
-
-        <!-- Sky View Options & Layers Side Drawer Panel -->
-        <transition name="sky-drawer">
-            <div v-if="isOptionsDrawerOpen" class="sky-options-drawer" @mousedown.stop @touchstart.stop>
-                <div class="drawer-header">
-                    <div class="header-title">
-                        <span class="header-icon">⚙</span>
-                        <h3>Sky View Options & Layers</h3>
-                    </div>
-                    <button type="button" class="drawer-close-btn" @click="isOptionsDrawerOpen = false" title="Close panel">✕</button>
-                </div>
-
-                <div class="drawer-content">
-                    <!-- Solar System & Ephemerides -->
-                    <div class="drawer-group">
-                        <div class="group-title">☀️ Solar System & Objects</div>
-                        <label class="drawer-toggle">
-                            <input type="checkbox" v-model="showSolarSystem" @change="persistBool(SKY_SHOW_SOLAR_SYSTEM_STORAGE_KEY, showSolarSystem)" />
-                            <span class="toggle-label">Sun, Moon & Planets</span>
-                        </label>
-                        <label class="drawer-toggle">
-                            <input type="checkbox" v-model="showEphemeris" @change="persistBool(SKY_SHOW_EPHEMERIS_STORAGE_KEY, showEphemeris)" />
-                            <span class="toggle-label">Ephemeris Trajectories</span>
-                        </label>
-                        <button type="button" class="drawer-action-btn" @click="isEphemerisModalOpen = true">
-                            <span>☄ Manage / Download Ephemerides</span>
-                        </button>
-                    </div>
-
-                    <!-- Grids & Reference Lines -->
-                    <div class="drawer-group">
-                        <div class="group-title">🌐 Grids & Reference Lines</div>
-                        <label class="drawer-toggle">
-                            <input type="checkbox" v-model="showGrid" />
-                            <span class="toggle-label">Celestial RA/Dec Grid</span>
-                        </label>
-                        <label class="drawer-toggle" v-if="observerLocation">
-                            <input type="checkbox" v-model="showMeridian" @change="persistBool(SKY_SHOW_MERIDIAN_STORAGE_KEY, showMeridian)" />
-                            <span class="toggle-label">Local Meridian Line</span>
-                        </label>
-                        <label class="drawer-toggle">
-                            <input type="checkbox" v-model="showConstellations" />
-                            <span class="toggle-label">Constellation Lines & Labels</span>
-                        </label>
-                    </div>
-
-                    <!-- Deep Sky Objects & Catalog Filters -->
-                    <div class="drawer-group">
-                        <div class="group-title">✨ Deep-Sky Objects</div>
-                        <label class="drawer-toggle">
-                            <input type="checkbox" v-model="showDsos" />
-                            <span class="toggle-label">Deep-Sky Object Markers</span>
-                        </label>
-                        <label class="drawer-toggle">
-                            <input type="checkbox" v-model="applyTargetFilters" @change="toggleApplyTargetFilters" />
-                            <span class="toggle-label">Restrict to Filtered Target List ({{ filteredTargetCount }})</span>
-                        </label>
-                    </div>
-
-                    <!-- Sky Imagery & Survey -->
-                    <div class="drawer-group">
-                        <div class="group-title">📷 Survey & Photos</div>
-                        <label class="drawer-toggle">
-                            <input type="checkbox" v-model="showCachedPhotos" />
-                            <span class="toggle-label">Pre-composited Sky Survey Map</span>
-                        </label>
-                    </div>
-
-                    <!-- Horizon & Observation Mode -->
-                    <div class="drawer-group" v-if="observerLocation">
-                        <div class="group-title">⛰ Observation & Horizon</div>
-                        <label class="drawer-toggle">
-                            <input type="checkbox" v-model="showHorizon" @change="toggleHorizonLayer" />
-                            <span class="toggle-label">Local Horizon & Min-Altitude Ring</span>
-                        </label>
-                        <div class="drawer-frame-selector">
-                            <span class="frame-label">Sky Reference Frame:</span>
-                            <div class="frame-mode-btns">
-                                <button type="button" class="drawer-mode-btn" :class="{ active: !isHorizonFixed }" @click="setSkyFrameMode('sky')">✦ Equatorial (Sky Fixed)</button>
-                                <button type="button" class="drawer-mode-btn" :class="{ active: isHorizonFixed }" @click="setSkyFrameMode('horizon')">🧭 Alt-Az (Horizon Fixed)</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </transition>
 
         <!-- JPL Horizons Ephemeris Downloader Modal -->
         <transition name="sky-modal">
