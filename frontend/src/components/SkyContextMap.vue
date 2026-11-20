@@ -168,7 +168,7 @@ const clampDecDeg = (dec) => Math.max(-89.99, Math.min(89.99, Number(dec)));
 const clampAltDeg = (alt) => Math.max(-89.5, Math.min(89.5, Number(alt)));
 const MS_PER_SIDEREAL_RAD = (86400000.0 * RAD2DEG) / 360.98564736629;
 
-const SKY_FRAME_STORAGE_KEY = 'sky_observer_sky_frame_mode';
+const SKY_FRAME_STORAGE_KEY = 'sky_observer_sky_frame_mode_v1';
 const readSavedSkyFrameMode = () => {
     try {
         const saved = window.localStorage?.getItem(SKY_FRAME_STORAGE_KEY);
@@ -224,6 +224,11 @@ const persistFovPinned = (pinned) => {
 const SKY_SHOW_MERIDIAN_STORAGE_KEY = 'sky_observer_show_meridian_v1';
 const SKY_SHOW_SOLAR_SYSTEM_STORAGE_KEY = 'sky_observer_show_solar_system_v1';
 const SKY_SHOW_EPHEMERIS_STORAGE_KEY = 'sky_observer_show_ephemeris_v1';
+const SKY_SHOW_GRID_STORAGE_KEY = 'sky_observer_show_grid_v1';
+const SKY_SHOW_CONSTELLATIONS_STORAGE_KEY = 'sky_observer_show_constellations_v1';
+const SKY_SHOW_DSOS_STORAGE_KEY = 'sky_observer_show_dsos_v1';
+const SKY_SHOW_PHOTOS_STORAGE_KEY = 'sky_observer_show_photos_v1';
+const SKY_SHOW_HORIZON_STORAGE_KEY = 'sky_observer_show_horizon_v1';
 
 const readSavedBool = (key, defaultVal = true) => {
     try {
@@ -803,14 +808,66 @@ const isFovDetached = computed(() => {
 });
 
 // Layer visibility toggles
-const showCachedPhotos = ref(true);
-const showConstellations = ref(true);
-const showGrid = ref(true);
-const showDsos = ref(true);
-const showHorizon = ref(true);
+const showCachedPhotos = ref(readSavedBool(SKY_SHOW_PHOTOS_STORAGE_KEY, true));
+const showConstellations = ref(readSavedBool(SKY_SHOW_CONSTELLATIONS_STORAGE_KEY, true));
+const showGrid = ref(readSavedBool(SKY_SHOW_GRID_STORAGE_KEY, true));
+const showDsos = ref(readSavedBool(SKY_SHOW_DSOS_STORAGE_KEY, true));
+const showHorizon = ref(readSavedBool(SKY_SHOW_HORIZON_STORAGE_KEY, true));
 const showMeridian = ref(readSavedBool(SKY_SHOW_MERIDIAN_STORAGE_KEY, false));
 const showSolarSystem = ref(readSavedBool(SKY_SHOW_SOLAR_SYSTEM_STORAGE_KEY, true));
 const showEphemeris = ref(readSavedBool(SKY_SHOW_EPHEMERIS_STORAGE_KEY, true));
+
+const togglePhotosLayer = () => {
+    showCachedPhotos.value = !showCachedPhotos.value;
+    persistBool(SKY_SHOW_PHOTOS_STORAGE_KEY, showCachedPhotos.value);
+    window.dispatchEvent(new CustomEvent('sky-options-updated'));
+    scheduleDraw();
+};
+
+const toggleConstellationsLayer = () => {
+    showConstellations.value = !showConstellations.value;
+    persistBool(SKY_SHOW_CONSTELLATIONS_STORAGE_KEY, showConstellations.value);
+    window.dispatchEvent(new CustomEvent('sky-options-updated'));
+    scheduleDraw();
+};
+
+const toggleDsosLayer = () => {
+    showDsos.value = !showDsos.value;
+    persistBool(SKY_SHOW_DSOS_STORAGE_KEY, showDsos.value);
+    window.dispatchEvent(new CustomEvent('sky-options-updated'));
+    scheduleDraw();
+};
+
+const toggleGridLayer = () => {
+    showGrid.value = !showGrid.value;
+    persistBool(SKY_SHOW_GRID_STORAGE_KEY, showGrid.value);
+    window.dispatchEvent(new CustomEvent('sky-options-updated'));
+    scheduleDraw();
+};
+
+const toggleMeridianLayer = () => {
+    showMeridian.value = !showMeridian.value;
+    persistBool(SKY_SHOW_MERIDIAN_STORAGE_KEY, showMeridian.value);
+    window.dispatchEvent(new CustomEvent('sky-options-updated'));
+    scheduleDraw();
+};
+
+const toggleSolarSystemLayer = () => {
+    showSolarSystem.value = !showSolarSystem.value;
+    persistBool(SKY_SHOW_SOLAR_SYSTEM_STORAGE_KEY, showSolarSystem.value);
+    window.dispatchEvent(new CustomEvent('sky-options-updated'));
+    if (showSolarSystem.value && (!solarSystemPositions.value || solarSystemPositions.value.length === 0)) {
+        fetchSolarSystemPositions();
+    }
+    scheduleDraw();
+};
+
+const toggleEphemerisLayer = () => {
+    showEphemeris.value = !showEphemeris.value;
+    persistBool(SKY_SHOW_EPHEMERIS_STORAGE_KEY, showEphemeris.value);
+    window.dispatchEvent(new CustomEvent('sky-options-updated'));
+    scheduleDraw();
+};
 
 const applyTargetFilters = ref(readSavedApplyFilters());
 
@@ -830,7 +887,7 @@ const syncSkyOptionsFromStorage = () => {
     showDsos.value = readSavedBool(SKY_SHOW_DSOS_STORAGE_KEY, true);
     showCachedPhotos.value = readSavedBool(SKY_SHOW_PHOTOS_STORAGE_KEY, true);
     showHorizon.value = readSavedBool(SKY_SHOW_HORIZON_STORAGE_KEY, true);
-    const mode = window.localStorage?.getItem('sky_observer_sky_frame_mode_v1');
+    const mode = window.localStorage?.getItem(SKY_FRAME_STORAGE_KEY);
     if (mode === 'sky' || mode === 'horizon') {
         skyFrameMode.value = mode;
     }
@@ -5110,7 +5167,7 @@ onUnmounted(() => {
                 type="button"
                 class="sky-layer-chip"
                 :class="{ active: showCachedPhotos }"
-                @click="showCachedPhotos = !showCachedPhotos"
+                @click="togglePhotosLayer"
                 title="Toggle pre-composited sky survey map at true celestial coordinates"
             >
                 <span v-if="skyAtlasSectorMode">📷 Sky Survey</span>
@@ -5120,7 +5177,7 @@ onUnmounted(() => {
                 type="button"
                 class="sky-layer-chip"
                 :class="{ active: showConstellations }"
-                @click="showConstellations = !showConstellations"
+                @click="toggleConstellationsLayer"
                 title="Toggle constellation lines, boundaries, and names"
             >
                 <span>✦ Constellations</span>
@@ -5129,7 +5186,7 @@ onUnmounted(() => {
                 type="button"
                 class="sky-layer-chip"
                 :class="{ active: showDsos }"
-                @click="showDsos = !showDsos"
+                @click="toggleDsosLayer"
                 title="Toggle nearby deep-sky object markers"
             >
                 <span>◎ DSOs</span>
@@ -5151,7 +5208,7 @@ onUnmounted(() => {
                 type="button"
                 class="sky-layer-chip"
                 :class="{ active: showGrid }"
-                @click="showGrid = !showGrid"
+                @click="toggleGridLayer"
                 title="Toggle celestial RA/Dec coordinate grid"
             >
                 <span>⊞ Grid</span>
