@@ -25,6 +25,7 @@ import {
     showEphemeris,
     showCachedPhotos,
     showConstellations,
+    showStarLabels,
     showDsos,
     applyTargetFilters,
     showGrid,
@@ -3637,44 +3638,46 @@ const drawSkyCanvas = () => {
         }
 
         // 6c. Star proper names (warm amber-gold with dark outline halo for gray survey tiles)
-        ctx.font = '600 11.5px system-ui, -apple-system, sans-serif';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.lineJoin = 'round';
-        ctx.miterLimit = 2;
-        ctx.lineWidth = 3.2;
-        ctx.strokeStyle = 'rgba(3, 6, 12, 0.94)';
+        if (showStarLabels.value) {
+            ctx.font = '600 11.5px system-ui, -apple-system, sans-serif';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.lineJoin = 'round';
+            ctx.miterLimit = 2;
+            ctx.lineWidth = 3.2;
+            ctx.strokeStyle = 'rgba(3, 6, 12, 0.94)';
 
-        for (let i = 0; i < labeledStars.length; i++) {
-            const ls = labeledStars[i];
-            if (ls.mag > nameMagLimit) break;
-            const starName = ls.properName || (fov < 12 && ls.mag < 3.8 ? ls.desig : '');
-            if (!starName) continue;
+            for (let i = 0; i < labeledStars.length; i++) {
+                const ls = labeledStars[i];
+                if (ls.mag > nameMagLimit) break;
+                const starName = ls.properName || (fov < 12 && ls.mag < 3.8 ? ls.desig : '');
+                if (!starName) continue;
 
-            const o = ls.idx * 3;
-            const x = starXYZ[o];
-            const y = starXYZ[o + 1];
-            const z = starXYZ[o + 2];
-            const cosC = x * cam.Cx + y * cam.Cy + z * cam.Cz;
-            if (cosC < minPointCos) continue;
+                const o = ls.idx * 3;
+                const x = starXYZ[o];
+                const y = starXYZ[o + 1];
+                const z = starXYZ[o + 2];
+                const cosC = x * cam.Cx + y * cam.Cy + z * cam.Cz;
+                if (cosC < minPointCos) continue;
 
-            const fk = (cam.f * 2.0) / (1.0 + cosC);
-            const sx = cam.halfW - fk * (x * cam.Ex + y * cam.Ey + z * cam.Ez);
-            const sy = cam.halfH - fk * (x * cam.Nx + y * cam.Ny + z * cam.Nz);
-            if (sx <= 30 || sx >= w - 65 || sy <= 24 || sy >= h - 30) continue;
+                const fk = (cam.f * 2.0) / (1.0 + cosC);
+                const sx = cam.halfW - fk * (x * cam.Ex + y * cam.Ey + z * cam.Ez);
+                const sy = cam.halfH - fk * (x * cam.Nx + y * cam.Ny + z * cam.Nz);
+                if (sx <= 30 || sx >= w - 65 || sy <= 24 || sy >= h - 30) continue;
 
-            const tw = getMeasuredTextWidth(ctx, 'star', starName);
-            const lx = sx + starRadius[ls.idx] + 5;
-            const x1 = lx - 2;
-            const y1 = sy - 7;
-            const x2 = lx + tw + 2;
-            const y2 = sy + 7;
+                const tw = getMeasuredTextWidth(ctx, 'star', starName);
+                const lx = sx + starRadius[ls.idx] + 5;
+                const x1 = lx - 2;
+                const y1 = sy - 7;
+                const x2 = lx + tw + 2;
+                const y2 = sy + 7;
 
-            if (!overlapsPlaced(x1, y1, x2, y2, 2)) {
-                pushPlacedBox(x1, y1, x2, y2);
-                ctx.strokeText(starName, lx, sy);
-                ctx.fillStyle = ls.isBright ? '#fbbf24' : 'rgba(234, 179, 8, 0.92)';
-                ctx.fillText(starName, lx, sy);
+                if (!overlapsPlaced(x1, y1, x2, y2, 2)) {
+                    pushPlacedBox(x1, y1, x2, y2);
+                    ctx.strokeText(starName, lx, sy);
+                    ctx.fillStyle = ls.isBright ? '#fbbf24' : 'rgba(234, 179, 8, 0.92)';
+                    ctx.fillText(starName, lx, sy);
+                }
             }
         }
     }
@@ -4925,6 +4928,7 @@ watch(
         props.comparisonRectangles?.length,
         showCachedPhotos.value,
         showConstellations.value,
+        showStarLabels.value,
         showGrid.value,
         showDsos.value,
         showMeridian.value,

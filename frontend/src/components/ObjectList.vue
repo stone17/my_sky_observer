@@ -41,6 +41,7 @@ const props = defineProps([
 ]);
 const emit = defineEmits([
     'select',
+    'enter-frame',
     'fetch-all',
     'download-filtered',
     'stop-download',
@@ -769,6 +770,11 @@ const handleObjectClick = (item) => {
     emit('select', item);
 };
 
+const handleObjectDoubleClick = (item) => {
+    if (!item) return;
+    emit('enter-frame', item);
+};
+
 const miniThresholdY = computed(() => {
     const alt = Math.max(0, Math.min(90, Number(localClientSettings.value.min_hours_altitude ?? localSettings.value.min_altitude ?? 30)));
     return Math.round((40 - (alt / 90) * 40) * 10) / 10;
@@ -969,6 +975,7 @@ onUnmounted(() => {
                     class="object-card"
                     :class="{ active: selectedId === item.name, 'search-match': isItemSearchMatch(item) }"
                     @click="handleObjectClick(item)"
+                    @dblclick="handleObjectDoubleClick(item)"
                 >
                     <div class="card-content">
                         <div class="img-col">
@@ -1003,6 +1010,7 @@ onUnmounted(() => {
                                     class="card-fav-btn"
                                     :class="{ 'is-fav': isFavorite(item.name) }"
                                     @click.stop="toggleFavorite(item.name)"
+                                    @dblclick.stop
                                     :title="isFavorite(item.name) ? 'Remove from Favorites' : 'Save to Favorites'"
                                     :aria-label="isFavorite(item.name) ? 'Remove from Favorites' : 'Save to Favorites'"
                                 >
@@ -1016,7 +1024,7 @@ onUnmounted(() => {
                                 >
                                     {{ getObjectTypeShort(item.type) }}
                                 </span>
-                                <button type="button" class="info-icon" @click.stop="openInfo(item)" title="Target Details">ⓘ</button>
+                                <button type="button" class="info-icon" @click.stop="openInfo(item)" @dblclick.stop title="Target Details">ⓘ</button>
 
                                 <div class="status-indicator" :class="`status-${item.status}`" :title="item.status">
                                     <span v-if="item.status === 'cached'">✓</span>

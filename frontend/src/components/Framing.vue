@@ -20,7 +20,7 @@ import {
     drawAtlasFrameToCanvas,
     skyAtlasVersion
 } from '../utils/skyAtlas.js';
-import { pendingSkyMapCenter } from '../utils/skyViewOptions.js';
+import { pendingSkyMapCenter, enterFrameModeToken } from '../utils/skyViewOptions.js';
 
 const props = defineProps([
     'object',
@@ -758,6 +758,12 @@ const closeSkyMap = () => {
 watch(pendingSkyMapCenter, (req) => {
     if (req && !showSkyMap.value && props.object) {
         openSkyMap(Number.isFinite(req.fov) ? req.fov : 30.0);
+    }
+});
+
+watch(enterFrameModeToken, () => {
+    if (showSkyMap.value) {
+        closeSkyMap();
     }
 });
 

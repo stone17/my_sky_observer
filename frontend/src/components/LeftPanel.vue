@@ -15,6 +15,7 @@ import {
     showEphemeris,
     showCachedPhotos,
     showConstellations,
+    showStarLabels,
     showDsos,
     applyTargetFilters,
     showGrid,
@@ -1160,6 +1161,12 @@ const activeFiltersCount = computed(() => {
                             <label class="toggle-label">
                                 <input type="checkbox" v-model="showConstellations" />
                                 <span>Constellation Lines &amp; Labels</span>
+                            </label>
+                        </div>
+                        <div class="threshold-item">
+                            <label class="toggle-label">
+                                <input type="checkbox" v-model="showStarLabels" />
+                                <span>Star Labels</span>
                             </label>
                         </div>
                     </div>

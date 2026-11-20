@@ -21,6 +21,7 @@ import {
     prepareCatalogTrigTable,
     computeCatalogVisibilityHours
 } from './utils/observingTime.js';
+import { requestEnterFrameMode } from './utils/skyViewOptions.js';
 
 const LOCAL_STORAGE_BACKUP_KEY = 'my_sky_observer_settings_backup';
 
@@ -971,6 +972,12 @@ const handleListSelectObject = (item) => {
     const canonical = objectMap.get(item.name) || item;
     selectedObject.value = canonical;
     ensureObjectDetails(canonical);
+};
+
+const handleListEnterFrame = (item) => {
+    handleListSelectObject(item);
+    closeMobileList();
+    requestEnterFrameMode();
 };
 
 // Watcher 2: Object Selection
@@ -2092,6 +2099,7 @@ watch(clientSettings, () => {
                         :isDownloading="isDownloading"
                         :downloadProgress="downloadProgress"
                         @select="handleListSelectObject"
+                        @enter-frame="handleListEnterFrame"
                         @update-search="handleSearchUpdate"
                         @update-settings="saveSettings"
                         @update-client-settings="updateClientSettings"

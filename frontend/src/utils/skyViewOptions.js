@@ -13,6 +13,7 @@ const STORAGE_KEYS = {
     showEphemeris: 'sky_observer_show_ephemeris_v1',
     showCachedPhotos: 'sky_observer_show_photos_v1',
     showConstellations: 'sky_observer_show_constellations_v1',
+    showStarLabels: 'sky_observer_show_star_labels_v1',
     showDsos: 'sky_observer_show_dsos_v1',
     applyTargetFilters: 'sky_observer_sky_apply_filters_v1',
     showGrid: 'sky_observer_show_grid_v1'
@@ -71,9 +72,15 @@ export const showSolarSystem = bindPersistedBool(STORAGE_KEYS.showSolarSystem, t
 export const showEphemeris = bindPersistedBool(STORAGE_KEYS.showEphemeris, true);
 export const showCachedPhotos = bindPersistedBool(STORAGE_KEYS.showCachedPhotos, true);
 export const showConstellations = bindPersistedBool(STORAGE_KEYS.showConstellations, true);
+export const showStarLabels = bindPersistedBool(STORAGE_KEYS.showStarLabels, true);
 export const showDsos = bindPersistedBool(STORAGE_KEYS.showDsos, true);
 export const applyTargetFilters = bindPersistedBool(STORAGE_KEYS.applyTargetFilters, false);
 export const showGrid = bindPersistedBool(STORAGE_KEYS.showGrid, true);
+
+export const enterFrameModeToken = ref(0);
+export const requestEnterFrameMode = () => {
+    enterFrameModeToken.value += 1;
+};
 
 // --- Shared Ephemeris Modal & Pre-Indexed Trajectory Store ---
 export const isEphemerisModalOpen = ref(false);
