@@ -21,10 +21,12 @@ from .config import (
     USER_DATA_DIR,
     get_resource_path,
     invalidate_settings_cache,
+    load_ephemerides,
     load_favorites,
     load_presets,
     load_settings,
     merge_settings_update,
+    save_ephemerides,
     save_favorites,
     save_settings,
     validate_nina_host,
@@ -216,6 +218,137 @@ async def geocode_city(city: str):
         return JSONResponse(content=results)
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+# --- Solar System & Ephemeris Endpoints ---
+@app.get("/api/solar-system-positions")
+def get_solar_system_positions_endpoint(
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    elevation: Optional[float] = 0.0,
+    time_str: Optional[str] = None,
+):
+    settings = load_settings()
+    loc = settings.get("location", {})
+    eff_lat = lat if lat is not None else float(loc.get("latitude", 51.5))
+    eff_lon = lon if lon is not None else float(loc.get("longitude", -0.1))
+    eff_elev = (
+        elevation if elevation is not None else float(loc.get("elevation", 0.0))
+    )
+
+    positions = calculator.get_solar_system_positions(
+        lat=eff_lat, lon=eff_lon, elevation=eff_elev, time_str=time_str
+    )
+    return JSONResponse(content=positions)
+
+
+@app.get("/api/ephemeris/search")
+async def search_ephemeris_objects(q: str):
+    query = q.strip()
+    if not query or len(query) < 2:
+        return JSONResponse(content=[])
+
+    presets = [
+        {
+            "id": "c2023a3",
+            "name": "C/2023 A3 (Tsuchinshan-ATLAS)",
+            "type": "Comet",
+            "command": "DES = C/2023 A3",
+        },
+        {
+            "id": "12p",
+            "name": "12P/Pons-Brooks",
+            "type": "Comet",
+            "command": "12P",
+        },
+        {"id": "1p", "name": "1P/Halley", "type": "Comet", "command": "1P"},
+        {"id": "1ceres", "name": "1 Ceres", "type": "Asteroid", "command": "1;"},
+        {"id": "4vesta", "name": "4 Vesta", "type": "Asteroid", "command": "4;"},
+        {"id": "433eros", "name": "433 Eros", "type": "Asteroid", "command": "433;"},
+        {
+            "id": "999pluto",
+            "name": "999 Pluto",
+            "type": "Dwarf Planet",
+            "command": "999",
+        },
+    ]
+
+    matches = [
+        p
+        for p in presets
+        if query.lower() in p["name"].lower()
+        or query.lower() in p["command"].lower()
+    ]
+
+    if not matches:
+        matches.append({
+            "id": f"custom_{query}",
+            "name": f"JPL Search: '{query}'",
+            "type": "Solar System Body / Small Body",
+            "command": query,
+        })
+
+    return JSONResponse(content=matches)
+
+
+@app.post("/api/ephemeris/download")
+async def download_ephemeris_endpoint(request: Request):
+    data = await request.json()
+    object_name = data.get("object_name", "").strip()
+    command = data.get("command", "").strip()
+    start_time = data.get("start_time", "").strip()
+    stop_time = data.get("stop_time", "").strip()
+    step_hours = int(data.get("step_hours", 6))
+
+    if not command and not object_name:
+        raise HTTPException(
+            status_code=400, detail="Object name or JPL command is required"
+        )
+
+    settings = load_settings()
+    loc = settings.get("location", {})
+    lat = float(data.get("lat", loc.get("latitude", 51.5)))
+    lon = float(data.get("lon", loc.get("longitude", -0.1)))
+    elevation = float(data.get("elevation", loc.get("elevation", 0.0)))
+
+    try:
+        ephem_data = calculator.fetch_horizons_ephemeris(
+            command=command,
+            object_name=object_name,
+            start_time_str=start_time,
+            stop_time_str=stop_time,
+            step_hours=step_hours,
+            lat=lat,
+            lon=lon,
+            elevation=elevation,
+        )
+
+        ephems = load_ephemerides()
+        ephems = [e for e in ephems if e.get("id") != ephem_data["id"]]
+        ephems.append(ephem_data)
+        save_ephemerides(ephems)
+
+        return JSONResponse(content=ephem_data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to download ephemeris: {exc}"
+        ) from exc
+
+
+@app.get("/api/ephemeris/list")
+def list_ephemerides_endpoint():
+    ephems = load_ephemerides()
+    return JSONResponse(content=ephems)
+
+
+@app.delete("/api/ephemeris/{ephem_id}")
+def delete_ephemeris_endpoint(ephem_id: str):
+    ephems = load_ephemerides()
+    updated = [e for e in ephems if e.get("id") != ephem_id]
+    save_ephemerides(updated)
+    return JSONResponse(content={"status": "ok", "remaining": len(updated)})
 
 
 # --- Streaming & Object Details Endpoints ---

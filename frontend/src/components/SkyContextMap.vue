@@ -221,6 +221,29 @@ const persistFovPinned = (pinned) => {
     }
 };
 
+const SKY_SHOW_MERIDIAN_STORAGE_KEY = 'sky_observer_show_meridian_v1';
+const SKY_SHOW_SOLAR_SYSTEM_STORAGE_KEY = 'sky_observer_show_solar_system_v1';
+const SKY_SHOW_EPHEMERIS_STORAGE_KEY = 'sky_observer_show_ephemeris_v1';
+
+const readSavedBool = (key, defaultVal = true) => {
+    try {
+        const val = window.localStorage?.getItem(key);
+        if (val === '0') return false;
+        if (val === '1') return true;
+    } catch {
+        // Ignore storage errors
+    }
+    return defaultVal;
+};
+
+const persistBool = (key, boolVal) => {
+    try {
+        window.localStorage?.setItem(key, boolVal ? '1' : '0');
+    } catch {
+        // Ignore storage errors
+    }
+};
+
 const angularDistanceDeg = (ra1, dec1, ra2, dec2) => {
     const a1 = ra1 * DEG2RAD;
     const d1 = dec1 * DEG2RAD;
@@ -785,7 +808,32 @@ const showConstellations = ref(true);
 const showGrid = ref(true);
 const showDsos = ref(true);
 const showHorizon = ref(true);
+const showMeridian = ref(readSavedBool(SKY_SHOW_MERIDIAN_STORAGE_KEY, false));
+const showSolarSystem = ref(readSavedBool(SKY_SHOW_SOLAR_SYSTEM_STORAGE_KEY, true));
+const showEphemeris = ref(readSavedBool(SKY_SHOW_EPHEMERIS_STORAGE_KEY, true));
+
 const applyTargetFilters = ref(readSavedApplyFilters());
+
+const isOptionsDrawerOpen = ref(false);
+const isEphemerisModalOpen = ref(false);
+
+const solarSystemPositions = ref([]);
+const solarSystemLoading = ref(false);
+
+const ephemeridesList = ref([]);
+const ephemerisSearchQuery = ref('');
+const ephemerisSearchResults = ref([]);
+const ephemerisSearching = ref(false);
+const downloadingEphemeris = ref(false);
+
+const ephemerisForm = ref({
+    command: '',
+    object_name: '',
+    start_time: '',
+    stop_time: '',
+    step_hours: 12,
+    color: '#2ed573'
+});
 
 const filteredNameSet = computed(() => {
     const list = Array.isArray(props.filteredObjects) ? props.filteredObjects : props.objects;
@@ -1467,6 +1515,136 @@ const toggleHorizonLayer = () => {
     }
 };
 
+// --- SOLAR SYSTEM & EPHEMERIS API HELPERS ---
+let solarSystemTimer = null;
+const fetchSolarSystemPositions = async () => {
+    const loc = observerLocation.value;
+    if (!loc) return;
+    try {
+        solarSystemLoading.value = true;
+        const qp = new URLSearchParams({
+            lat: String(loc.lat),
+            lon: String(loc.lon),
+            elevation: String(loc.elevation || 0),
+            time_str: new Date(effectiveTimeMs.value).toISOString()
+        });
+        const res = await fetch(`/api/solar-system-positions?${qp.toString()}`);
+        if (res.ok) {
+            const data = await res.json();
+            solarSystemPositions.value = data.bodies || [];
+            scheduleDraw();
+        }
+    } catch (err) {
+        console.warn('Failed to fetch solar system positions:', err);
+    } finally {
+        solarSystemLoading.value = false;
+    }
+};
+
+const triggerDebouncedSolarSystemFetch = () => {
+    if (solarSystemTimer) clearTimeout(solarSystemTimer);
+    solarSystemTimer = setTimeout(() => {
+        fetchSolarSystemPositions();
+    }, 250);
+};
+
+const fetchSavedEphemerides = async () => {
+    try {
+        const res = await fetch('/api/ephemeris/list');
+        if (res.ok) {
+            const data = await res.json();
+            ephemeridesList.value = data || [];
+            scheduleDraw();
+        }
+    } catch (err) {
+        console.warn('Failed to fetch ephemerides list:', err);
+    }
+};
+
+const searchEphemerisObjects = async () => {
+    const q = ephemerisSearchQuery.value.trim();
+    if (!q) {
+        ephemerisSearchResults.value = [];
+        return;
+    }
+    try {
+        ephemerisSearching.value = true;
+        const res = await fetch(`/api/ephemeris/search?q=${encodeURIComponent(q)}`);
+        if (res.ok) {
+            ephemerisSearchResults.value = await res.json();
+        }
+    } catch (err) {
+        console.warn('Failed to search ephemeris objects:', err);
+    } finally {
+        ephemerisSearching.value = false;
+    }
+};
+
+const selectEphemerisSearchResult = (res) => {
+    ephemerisForm.value.command = res.command;
+    ephemerisForm.value.object_name = res.name;
+    const now = new Date(effectiveTimeMs.value);
+    const start = new Date(now.getTime() - 7 * 86400 * 1000);
+    const stop = new Date(now.getTime() + 30 * 86400 * 1000);
+    ephemerisForm.value.start_time = start.toISOString().split('T')[0];
+    ephemerisForm.value.stop_time = stop.toISOString().split('T')[0];
+};
+
+const downloadEphemeris = async () => {
+    if (!ephemerisForm.value.command || !ephemerisForm.value.object_name) return;
+    const loc = observerLocation.value;
+    try {
+        downloadingEphemeris.value = true;
+        const payload = {
+            command: ephemerisForm.value.command,
+            object_name: ephemerisForm.value.object_name,
+            start_time: ephemerisForm.value.start_time,
+            stop_time: ephemerisForm.value.stop_time,
+            step_hours: ephemerisForm.value.step_hours,
+            lat: loc?.lat ?? 0.0,
+            lon: loc?.lon ?? 0.0,
+            elevation: loc?.elevation ?? 0.0,
+            color: ephemerisForm.value.color
+        };
+        const res = await fetch('/api/ephemeris/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (res.ok) {
+            await fetchSavedEphemerides();
+            ephemerisForm.value.command = '';
+            ephemerisForm.value.object_name = '';
+            ephemerisSearchResults.value = [];
+            ephemerisSearchQuery.value = '';
+        } else {
+            const errData = await res.json();
+            alert(`Download failed: ${errData.detail || 'Unknown error'}`);
+        }
+    } catch (err) {
+        console.warn('Failed to download ephemeris:', err);
+        alert('Failed to download ephemeris from JPL Horizons.');
+    } finally {
+        downloadingEphemeris.value = false;
+    }
+};
+
+const toggleEphemerisVisibility = (eph) => {
+    eph.visible = eph.visible === false ? true : false;
+    scheduleDraw();
+};
+
+const deleteEphemeris = async (id) => {
+    try {
+        const res = await fetch(`/api/ephemeris/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (res.ok) {
+            await fetchSavedEphemerides();
+        }
+    } catch (err) {
+        console.warn('Failed to delete ephemeris:', err);
+    }
+};
+
 const toggleDragTimeMode = () => {
     if (!isHorizonFixed.value) {
         setSkyFrameMode('horizon');
@@ -1826,6 +2004,302 @@ const drawHorizonOverlay = (ctx, cam, w, h, fov, minPointCos, overlapsPlaced, pr
             ctx.fillText('Zenith', zsx + 8, zsy);
         }
     }
+};
+
+// --- MERIDIAN, SOLAR SYSTEM & EPHEMERIS CANVAS RENDERERS ---
+const drawMeridianLine = (ctx, cam, w, h, horizBasis, minPointCos, overlapsPlaced) => {
+    if (!horizBasis) return;
+    
+    ctx.save();
+    ctx.strokeStyle = 'rgba(0, 229, 255, 0.72)';
+    ctx.lineWidth = 1.4;
+    ctx.setLineDash([6, 5]);
+
+    ctx.beginPath();
+    let drawing = false;
+    let labelPlaced = false;
+
+    const numSteps = 120;
+    for (let i = 0; i <= numSteps; i++) {
+        const theta = (i / numSteps) * Math.PI * 2.0;
+        const cosT = Math.cos(theta);
+        const sinT = Math.sin(theta);
+
+        const x = cosT * horizBasis.Nhx + sinT * horizBasis.Zx;
+        const y = cosT * horizBasis.Nhy + sinT * horizBasis.Zy;
+        const z = cosT * horizBasis.Nhz + sinT * horizBasis.Zz;
+
+        const cosC = x * cam.Cx + y * cam.Cy + z * cam.Cz;
+        if (cosC <= -0.35) {
+            drawing = false;
+            continue;
+        }
+
+        const fk = (cam.f * 2.0) / (1.0 + cosC);
+        const sx = cam.halfW - fk * (x * cam.Ex + y * cam.Ey + z * cam.Ez);
+        const sy = cam.halfH - fk * (x * cam.Nx + y * cam.Ny + z * cam.Nz);
+
+        if (sx < -100 || sx > w + 100 || sy < -100 || sy > h + 100) {
+            drawing = false;
+            continue;
+        }
+
+        if (!drawing) {
+            ctx.moveTo(sx, sy);
+            drawing = true;
+        } else {
+            ctx.lineTo(sx, sy);
+        }
+
+        if (!labelPlaced && theta >= Math.PI * 0.35 && theta <= Math.PI * 0.65) {
+            if (sx > 60 && sx < w - 60 && sy > 40 && sy < h - 40) {
+                const text = "Local Meridian";
+                ctx.font = '500 10px system-ui, -apple-system, sans-serif';
+                const tw = getMeasuredTextWidth(ctx, 'meridian', text);
+                const x1 = sx - tw * 0.5 - 4;
+                const y1 = sy - 8;
+                if (!overlapsPlaced(x1, y1, x1 + tw + 8, y1 + 16, 3)) {
+                    pushPlacedBox(x1, y1, x1 + tw + 8, y1 + 16);
+                    ctx.save();
+                    ctx.fillStyle = 'rgba(6, 18, 30, 0.88)';
+                    ctx.strokeStyle = 'rgba(0, 229, 255, 0.65)';
+                    ctx.lineWidth = 1;
+                    if (ctx.roundRect) ctx.roundRect(x1, y1, tw + 8, 16, 4);
+                    else ctx.rect(x1, y1, tw + 8, 16);
+                    ctx.fill();
+                    ctx.stroke();
+                    ctx.fillStyle = 'rgba(0, 229, 255, 0.95)';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(text, sx, sy + 0.5);
+                    ctx.restore();
+                    labelPlaced = true;
+                }
+            }
+        }
+    }
+    ctx.stroke();
+    ctx.restore();
+};
+
+const drawSolarSystemObjects = (ctx, cam, w, h, fov, minPointCos, overlapsPlaced, horizBasis, buildHitItems = true) => {
+    if (!showSolarSystem.value || !solarSystemPositions.value?.length) return;
+
+    ctx.save();
+
+    for (let i = 0; i < solarSystemPositions.value.length; i++) {
+        const body = solarSystemPositions.value[i];
+
+        if ((isHorizonFixed.value || showHorizon.value) && body.alt !== undefined && body.alt < -1.0) {
+            continue;
+        }
+
+        const p = projectRaDecWithBasis(body.ra, body.dec, cam);
+        if (!p || p.cosC <= minPointCos) continue;
+        if (p.x < -40 || p.x > w + 40 || p.y < -40 || p.y > h + 40) continue;
+
+        const sx = p.x;
+        const sy = p.y;
+
+        if (body.id === 'sun') {
+            const grad = ctx.createRadialGradient(sx, sy, 2, sx, sy, 18);
+            grad.addColorStop(0, 'rgba(255, 255, 200, 1)');
+            grad.addColorStop(0.3, 'rgba(255, 215, 0, 0.8)');
+            grad.addColorStop(1, 'rgba(255, 140, 0, 0)');
+            ctx.fillStyle = grad;
+            ctx.beginPath();
+            ctx.arc(sx, sy, 18, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = '#FFD700';
+            ctx.beginPath();
+            ctx.arc(sx, sy, 5, 0, Math.PI * 2);
+            ctx.fill();
+        } else if (body.id === 'moon') {
+            ctx.fillStyle = '#F5F6FA';
+            ctx.beginPath();
+            ctx.arc(sx, sy, 6, 0, Math.PI * 2);
+            ctx.fill();
+
+            if (body.phase_percent !== undefined && body.phase_percent < 95) {
+                ctx.fillStyle = 'rgba(15, 23, 42, 0.65)';
+                ctx.beginPath();
+                ctx.arc(sx, sy, 6.2, Math.PI * 0.5, Math.PI * 1.5, body.phase_name?.includes('Waning'));
+                ctx.fill();
+            }
+        } else {
+            const color = body.color || '#38ef7d';
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(sx, sy, 4.5, 0, Math.PI * 2);
+            ctx.fill();
+
+            if (body.id === 'saturn') {
+                ctx.strokeStyle = '#fbc531';
+                ctx.lineWidth = 1.2;
+                ctx.beginPath();
+                ctx.ellipse(sx, sy, 8, 3, Math.PI * 0.15, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+        }
+
+        ctx.font = '600 11px system-ui, -apple-system, sans-serif';
+        const labelText = body.id === 'moon' && body.phase_percent !== undefined
+            ? `${body.symbol || ''} Moon (${Math.round(body.phase_percent)}%)`
+            : `${body.symbol || ''} ${body.name} (mag ${body.mag?.toFixed(1) || 'N/A'})`;
+
+        const tw = getMeasuredTextWidth(ctx, 'solarsys', labelText);
+        const lx1 = sx + 9;
+        const ly1 = sy - 7;
+        const lx2 = lx1 + tw + 6;
+        const ly2 = ly1 + 15;
+
+        if (!overlapsPlaced(lx1, ly1, lx2, ly2, 2)) {
+            pushPlacedBox(lx1, ly1, lx2, ly2);
+
+            ctx.fillStyle = 'rgba(8, 14, 24, 0.85)';
+            ctx.strokeStyle = body.color || 'rgba(255, 255, 255, 0.4)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            if (ctx.roundRect) ctx.roundRect(lx1, ly1, tw + 6, 15, 3);
+            else ctx.rect(lx1, ly1, tw + 6, 15);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = '#FFFFFF';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(labelText, lx1 + 3, ly1 + 7.5);
+        }
+
+        if (buildHitItems) {
+            pushInteractiveItem(
+                'solar_system',
+                body.name,
+                body.ra,
+                body.dec,
+                sx,
+                sy,
+                14,
+                { ...body, is_solar_system: true, type: 'Solar System Body' }
+            );
+        }
+    }
+
+    ctx.restore();
+};
+
+const drawEphemerisTrails = (ctx, cam, w, h, fov, minPointCos, overlapsPlaced, horizBasis, buildHitItems = true) => {
+    if (!showEphemeris.value || !ephemeridesList.value?.length) return;
+
+    ctx.save();
+    const currTimeMs = effectiveTimeMs.value;
+
+    for (let eIdx = 0; eIdx < ephemeridesList.value.length; eIdx++) {
+        const eph = ephemeridesList.value[eIdx];
+        if (eph.visible === false) continue;
+        if (!eph.points || eph.points.length === 0) continue;
+
+        const color = eph.color || '#2ed573';
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.6;
+        ctx.setLineDash([5, 4]);
+
+        ctx.beginPath();
+        let drawing = false;
+        let closestPoint = null;
+        let minTimeDiff = Infinity;
+
+        for (let pIdx = 0; pIdx < eph.points.length; pIdx++) {
+            const pt = eph.points[pIdx];
+
+            const ptMs = new Date(pt.time).getTime();
+            const diff = Math.abs(ptMs - currTimeMs);
+            if (diff < minTimeDiff) {
+                minTimeDiff = diff;
+                closestPoint = pt;
+            }
+
+            const proj = projectRaDecWithBasis(pt.ra, pt.dec, cam);
+            if (!proj || proj.cosC <= minPointCos) {
+                drawing = false;
+                continue;
+            }
+
+            if (proj.x < -100 || proj.x > w + 100 || proj.y < -100 || proj.y > h + 100) {
+                drawing = false;
+                continue;
+            }
+
+            if (!drawing) {
+                ctx.moveTo(proj.x, proj.y);
+                drawing = true;
+            } else {
+                ctx.lineTo(proj.x, proj.y);
+            }
+
+            if (pIdx % Math.max(1, Math.floor(eph.points.length / 6)) === 0) {
+                if (proj.x > 40 && proj.x < w - 40 && proj.y > 30 && proj.y < h - 30) {
+                    ctx.save();
+                    ctx.fillStyle = color;
+                    ctx.font = '500 9px system-ui, sans-serif';
+                    ctx.fillText(pt.display_time || '', proj.x + 4, proj.y - 4);
+                    ctx.restore();
+                }
+            }
+        }
+        ctx.stroke();
+
+        if (closestPoint) {
+            const cpProj = projectRaDecWithBasis(closestPoint.ra, closestPoint.dec, cam);
+            if (cpProj && cpProj.cosC > minPointCos && cpProj.x >= -20 && cpProj.x <= w + 20 && cpProj.y >= -20 && cpProj.y <= h + 20) {
+                ctx.save();
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(cpProj.x, cpProj.y, 5, 0, Math.PI * 2);
+                ctx.fill();
+
+                const ephLabel = `☄ ${eph.object_name || eph.name} (mag ${closestPoint.mag?.toFixed(1) || 'N/A'})`;
+                ctx.font = '600 11px system-ui, -apple-system, sans-serif';
+                const tw = getMeasuredTextWidth(ctx, 'ephobj', ephLabel);
+                const lx1 = cpProj.x + 9;
+                const ly1 = cpProj.y - 7;
+
+                if (!overlapsPlaced(lx1, ly1, lx1 + tw + 6, ly1 + 15, 2)) {
+                    pushPlacedBox(lx1, ly1, lx1 + tw + 6, ly1 + 15);
+                    ctx.fillStyle = 'rgba(8, 14, 24, 0.88)';
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    if (ctx.roundRect) ctx.roundRect(lx1, ly1, tw + 6, 15, 3);
+                    else ctx.rect(lx1, ly1, tw + 6, 15);
+                    ctx.fill();
+                    ctx.stroke();
+
+                    ctx.fillStyle = '#FFFFFF';
+                    ctx.textAlign = 'left';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(ephLabel, lx1 + 3, ly1 + 7.5);
+                }
+
+                if (buildHitItems) {
+                    pushInteractiveItem(
+                        'ephemeris',
+                        eph.object_name || eph.name,
+                        closestPoint.ra,
+                        closestPoint.dec,
+                        cpProj.x,
+                        cpProj.y,
+                        14,
+                        { ...eph, ...closestPoint, is_ephemeris: true, type: 'Ephemeris Object' }
+                    );
+                }
+                ctx.restore();
+            }
+        }
+    }
+
+    ctx.restore();
 };
 
 // --- PRE-INDEXED NON-REACTIVE SCENE TABLES + 3D SPHERICAL PATCH SOA ---
@@ -3355,9 +3829,24 @@ const drawSkyCanvas = () => {
         }
     }
 
+    // 8.4 Local Meridian Great Circle
+    if (showMeridian.value && observerLocation.value) {
+        drawMeridianLine(ctx, cam, w, h, horizBasis, minPointCos, overlapsPlaced);
+    }
+
     // 8.5 Local Observer Horizon, Ground Veil, Min-Altitude Ring & Compass Points
     if ((showHorizon.value || isHorizonFixed.value) && observerLocation.value) {
         drawHorizonOverlay(ctx, cam, w, h, fov, minPointCos, overlapsPlaced, horizBasis);
+    }
+
+    // 8.6 Ephemeris Trajectory Trails
+    if (showEphemeris.value) {
+        drawEphemerisTrails(ctx, cam, w, h, fov, minPointCos, overlapsPlaced, horizBasis, buildHitItems);
+    }
+
+    // 8.7 Solar System Objects (Sun, Moon, Planets)
+    if (showSolarSystem.value) {
+        drawSolarSystemObjects(ctx, cam, w, h, fov, minPointCos, overlapsPlaced, horizBasis, buildHitItems);
     }
 
     // 9. Active Target Highlight Ring, Rotated Sensor FOV Frame & Comparison Setups
@@ -4273,6 +4762,9 @@ watch(
         showConstellations.value,
         showGrid.value,
         showDsos.value,
+        showMeridian.value,
+        showSolarSystem.value,
+        showEphemeris.value,
         applyTargetFilters.value,
         filteredNameSet.value,
         showHorizon.value,
@@ -4295,6 +4787,9 @@ watch(
             syncHorizFromRaDec(viewRa.value, viewDec.value);
         }
         updateStatusReadout(lastReadoutCoords.ra, lastReadoutCoords.dec, true);
+        if (showSolarSystem.value) {
+            triggerDebouncedSolarSystemFetch();
+        }
         scheduleDraw();
     }
 );
@@ -4337,6 +4832,9 @@ watch(
         }
         if (changed) {
             refreshReadoutAfterTimeChange();
+            if (showSolarSystem.value) {
+                triggerDebouncedSolarSystemFetch();
+            }
             if ((showHorizon.value || isHorizonFixed.value) && observerLocation.value) {
                 scheduleDraw();
             }
@@ -4353,6 +4851,10 @@ onMounted(async () => {
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', onWindowBlur);
     window.addEventListener('resize', refreshCanvasRect, { passive: true });
+    window.addEventListener('scroll', refreshCanvasRect, { capture: true, passive: true });
+
+    fetchSavedEphemerides();
+    fetchSolarSystemPositions();
     window.addEventListener('scroll', refreshCanvasRect, { capture: true, passive: true });
 
     if (props.liveNowMs === undefined) {
@@ -4612,6 +5114,15 @@ onUnmounted(() => {
             >
                 <span>⊞ Grid</span>
             </button>
+            <button
+                type="button"
+                class="sky-layer-chip options-panel-chip"
+                :class="{ active: isOptionsDrawerOpen }"
+                @click="isOptionsDrawerOpen = !isOptionsDrawerOpen"
+                title="Open Sky View Options & Layers side panel"
+            >
+                <span>⚙ Sky View</span>
+            </button>
 
             <div class="sky-zoom-stepper">
                 <button
@@ -4710,6 +5221,190 @@ onUnmounted(() => {
                 </div>
             </template>
         </ObservingDateConsole>
+
+        <!-- Sky View Options & Layers Side Drawer Panel -->
+        <transition name="sky-drawer">
+            <div v-if="isOptionsDrawerOpen" class="sky-options-drawer" @mousedown.stop @touchstart.stop>
+                <div class="drawer-header">
+                    <div class="header-title">
+                        <span class="header-icon">⚙</span>
+                        <h3>Sky View Options & Layers</h3>
+                    </div>
+                    <button type="button" class="drawer-close-btn" @click="isOptionsDrawerOpen = false" title="Close panel">✕</button>
+                </div>
+
+                <div class="drawer-content">
+                    <!-- Solar System & Ephemerides -->
+                    <div class="drawer-group">
+                        <div class="group-title">☀️ Solar System & Objects</div>
+                        <label class="drawer-toggle">
+                            <input type="checkbox" v-model="showSolarSystem" @change="persistBool(SKY_SHOW_SOLAR_SYSTEM_STORAGE_KEY, showSolarSystem)" />
+                            <span class="toggle-label">Sun, Moon & Planets</span>
+                        </label>
+                        <label class="drawer-toggle">
+                            <input type="checkbox" v-model="showEphemeris" @change="persistBool(SKY_SHOW_EPHEMERIS_STORAGE_KEY, showEphemeris)" />
+                            <span class="toggle-label">Ephemeris Trajectories</span>
+                        </label>
+                        <button type="button" class="drawer-action-btn" @click="isEphemerisModalOpen = true">
+                            <span>☄ Manage / Download Ephemerides</span>
+                        </button>
+                    </div>
+
+                    <!-- Grids & Reference Lines -->
+                    <div class="drawer-group">
+                        <div class="group-title">🌐 Grids & Reference Lines</div>
+                        <label class="drawer-toggle">
+                            <input type="checkbox" v-model="showGrid" />
+                            <span class="toggle-label">Celestial RA/Dec Grid</span>
+                        </label>
+                        <label class="drawer-toggle" v-if="observerLocation">
+                            <input type="checkbox" v-model="showMeridian" @change="persistBool(SKY_SHOW_MERIDIAN_STORAGE_KEY, showMeridian)" />
+                            <span class="toggle-label">Local Meridian Line</span>
+                        </label>
+                        <label class="drawer-toggle">
+                            <input type="checkbox" v-model="showConstellations" />
+                            <span class="toggle-label">Constellation Lines & Labels</span>
+                        </label>
+                    </div>
+
+                    <!-- Deep Sky Objects & Catalog Filters -->
+                    <div class="drawer-group">
+                        <div class="group-title">✨ Deep-Sky Objects</div>
+                        <label class="drawer-toggle">
+                            <input type="checkbox" v-model="showDsos" />
+                            <span class="toggle-label">Deep-Sky Object Markers</span>
+                        </label>
+                        <label class="drawer-toggle">
+                            <input type="checkbox" v-model="applyTargetFilters" @change="toggleApplyTargetFilters" />
+                            <span class="toggle-label">Restrict to Filtered Target List ({{ filteredTargetCount }})</span>
+                        </label>
+                    </div>
+
+                    <!-- Sky Imagery & Survey -->
+                    <div class="drawer-group">
+                        <div class="group-title">📷 Survey & Photos</div>
+                        <label class="drawer-toggle">
+                            <input type="checkbox" v-model="showCachedPhotos" />
+                            <span class="toggle-label">Pre-composited Sky Survey Map</span>
+                        </label>
+                    </div>
+
+                    <!-- Horizon & Observation Mode -->
+                    <div class="drawer-group" v-if="observerLocation">
+                        <div class="group-title">⛰ Observation & Horizon</div>
+                        <label class="drawer-toggle">
+                            <input type="checkbox" v-model="showHorizon" @change="toggleHorizonLayer" />
+                            <span class="toggle-label">Local Horizon & Min-Altitude Ring</span>
+                        </label>
+                        <div class="drawer-frame-selector">
+                            <span class="frame-label">Sky Reference Frame:</span>
+                            <div class="frame-mode-btns">
+                                <button type="button" class="drawer-mode-btn" :class="{ active: !isHorizonFixed }" @click="setSkyFrameMode('sky')">✦ Equatorial (Sky Fixed)</button>
+                                <button type="button" class="drawer-mode-btn" :class="{ active: isHorizonFixed }" @click="setSkyFrameMode('horizon')">🧭 Alt-Az (Horizon Fixed)</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </transition>
+
+        <!-- JPL Horizons Ephemeris Downloader Modal -->
+        <transition name="sky-modal">
+            <div v-if="isEphemerisModalOpen" class="sky-modal-backdrop" @click.self="isEphemerisModalOpen = false" @mousedown.stop @touchstart.stop>
+                <div class="sky-modal-container ephemeris-modal">
+                    <div class="modal-header">
+                        <div class="modal-title">
+                            <span class="modal-icon">☄</span>
+                            <h3>JPL Horizons Ephemeris Downloader</h3>
+                        </div>
+                        <button type="button" class="modal-close-btn" @click="isEphemerisModalOpen = false">✕</button>
+                    </div>
+
+                    <div class="modal-body">
+                        <!-- Object Search -->
+                        <div class="modal-section">
+                            <label class="field-label">Search Comet, Asteroid, or Object Designation:</label>
+                            <div class="search-input-row">
+                                <input type="text" v-model="ephemerisSearchQuery" placeholder="e.g., C/2023 A3, Ceres, Halley, 99942..." class="modal-input" @keyup.enter="searchEphemerisObjects" />
+                                <button type="button" class="search-submit-btn" @click="searchEphemerisObjects" :disabled="ephemerisSearching">
+                                    {{ ephemerisSearching ? 'Searching...' : 'Search' }}
+                                </button>
+                            </div>
+                            <div v-if="ephemerisSearchResults.length > 0" class="search-results-dropdown">
+                                <div v-for="res in ephemerisSearchResults" :key="res.command" class="search-result-row" :class="{ selected: ephemerisForm.command === res.command }" @click="selectEphemerisSearchResult(res)">
+                                    <span class="res-title">{{ res.name }}</span>
+                                    <span class="res-badge">ID: {{ res.command }} ({{ res.type }})</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Download Options Form -->
+                        <div class="modal-section form-grid" v-if="ephemerisForm.command">
+                            <div class="grid-col full">
+                                <label class="field-label">Selected Target:</label>
+                                <input type="text" v-model="ephemerisForm.object_name" readonly class="modal-input readonly" />
+                            </div>
+                            <div class="grid-col">
+                                <label class="field-label">Start Date:</label>
+                                <input type="date" v-model="ephemerisForm.start_time" class="modal-input" />
+                            </div>
+                            <div class="grid-col">
+                                <label class="field-label">Stop Date:</label>
+                                <input type="date" v-model="ephemerisForm.stop_time" class="modal-input" />
+                            </div>
+                            <div class="grid-col">
+                                <label class="field-label">Step Interval:</label>
+                                <select v-model.number="ephemerisForm.step_hours" class="modal-select">
+                                    <option :value="6">6 hours</option>
+                                    <option :value="12">12 hours (Default)</option>
+                                    <option :value="24">24 hours (1 day)</option>
+                                    <option :value="48">48 hours (2 days)</option>
+                                </select>
+                            </div>
+                            <div class="grid-col">
+                                <label class="field-label">Trajectory Color:</label>
+                                <div class="color-picker-row">
+                                    <input type="color" v-model="ephemerisForm.color" class="color-picker" />
+                                    <span class="color-value">{{ ephemerisForm.color }}</span>
+                                </div>
+                            </div>
+                            <div class="grid-col full">
+                                <button type="button" class="download-action-btn" @click="downloadEphemeris" :disabled="downloadingEphemeris">
+                                    <span v-if="downloadingEphemeris">⌛ Querying JPL Horizons...</span>
+                                    <span v-else>⬇ Download Ephemeris Trajectory</span>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Saved Ephemerides List -->
+                        <div class="modal-section saved-section">
+                            <h4 class="section-heading">Downloaded Ephemerides ({{ ephemeridesList.length }})</h4>
+                            <div v-if="ephemeridesList.length === 0" class="empty-notice">
+                                No downloaded ephemerides saved yet. Search and download above!
+                            </div>
+                            <div v-else class="saved-cards-list">
+                                <div v-for="eph in ephemeridesList" :key="eph.id" class="saved-card">
+                                    <div class="card-left">
+                                        <span class="color-dot" :style="{ backgroundColor: eph.color || '#2ed573' }"></span>
+                                        <div class="card-details">
+                                            <span class="card-name">{{ eph.object_name || eph.name }}</span>
+                                            <span class="card-sub">{{ eph.start_time }} to {{ eph.stop_time }} ({{ eph.points?.length || 0 }} pts)</span>
+                                        </div>
+                                    </div>
+                                    <div class="card-right">
+                                        <label class="card-checkbox">
+                                            <input type="checkbox" :checked="eph.visible !== false" @change="toggleEphemerisVisibility(eph)" />
+                                            <span>Visible</span>
+                                        </label>
+                                        <button type="button" class="card-delete-btn" @click="deleteEphemeris(eph.id)" title="Delete ephemeris">🗑</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </transition>
     </div>
 </template>
 
@@ -5185,5 +5880,480 @@ onUnmounted(() => {
         bottom: 52px;
         min-width: 0;
     }
+}
+
+/* --- SKY VIEW OPTIONS DRAWER PANEL --- */
+.sky-options-drawer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 320px;
+    max-width: 90vw;
+    background: rgba(10, 15, 26, 0.96);
+    border-left: 1px solid rgba(148, 163, 184, 0.2);
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.6);
+    display: flex;
+    flex-direction: column;
+    z-index: 100;
+    user-select: none;
+    font-family: system-ui, -apple-system, sans-serif;
+}
+
+.drawer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    background: rgba(15, 23, 42, 0.9);
+    border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.header-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.header-icon {
+    font-size: 1.1rem;
+    color: #38bdf8;
+}
+
+.drawer-header h3 {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #f1f5f9;
+}
+
+.drawer-close-btn {
+    background: transparent;
+    border: none;
+    color: #94a3b8;
+    font-size: 1.1rem;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: color 0.12s ease, background-color 0.12s ease;
+}
+
+.drawer-close-btn:hover {
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.drawer-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+}
+
+.drawer-group {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid rgba(148, 163, 184, 0.12);
+    border-radius: 8px;
+}
+
+.group-title {
+    font-size: 0.78rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #38bdf8;
+    margin-bottom: 2px;
+}
+
+.drawer-toggle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    font-size: 0.84rem;
+    color: #e2e8f0;
+}
+
+.drawer-toggle input[type='checkbox'] {
+    width: 16px;
+    height: 16px;
+    accent-color: #38bdf8;
+    cursor: pointer;
+}
+
+.drawer-action-btn {
+    margin-top: 4px;
+    padding: 8px 12px;
+    background: rgba(14, 165, 233, 0.18);
+    border: 1px solid rgba(56, 189, 248, 0.4);
+    border-radius: 6px;
+    color: #38bdf8;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease;
+    text-align: center;
+}
+
+.drawer-action-btn:hover {
+    background: rgba(14, 165, 233, 0.3);
+    border-color: #38bdf8;
+    color: #ffffff;
+}
+
+.drawer-frame-selector {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 4px;
+}
+
+.frame-label {
+    font-size: 0.76rem;
+    color: #94a3b8;
+}
+
+.frame-mode-btns {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.drawer-mode-btn {
+    padding: 6px 10px;
+    background: rgba(30, 41, 59, 0.6);
+    border: 1px solid rgba(148, 163, 184, 0.15);
+    border-radius: 5px;
+    color: #cbd5e1;
+    font-size: 0.78rem;
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.12s ease;
+}
+
+.drawer-mode-btn.active {
+    background: rgba(14, 165, 233, 0.25);
+    border-color: #38bdf8;
+    color: #38bdf8;
+    font-weight: 600;
+}
+
+/* Transitions */
+.sky-drawer-enter-active,
+.sky-drawer-leave-active {
+    transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.sky-drawer-enter-from,
+.sky-drawer-leave-to {
+    transform: translateX(100%);
+}
+
+/* --- EPHEMERIS MODAL --- */
+.sky-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(4, 8, 16, 0.75);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+    padding: 16px;
+}
+
+.sky-modal-container {
+    background: #0f172a;
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    border-radius: 12px;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.75);
+    width: 100%;
+    max-width: 580px;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    color: #f1f5f9;
+    font-family: system-ui, -apple-system, sans-serif;
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    background: #1e293b;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.15);
+}
+
+.modal-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.modal-icon {
+    font-size: 1.2rem;
+    color: #2ed573;
+}
+
+.modal-header h3 {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+}
+
+.modal-close-btn {
+    background: transparent;
+    border: none;
+    color: #94a3b8;
+    font-size: 1.2rem;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+.modal-close-btn:hover {
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.modal-body {
+    padding: 20px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.modal-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.field-label {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: #94a3b8;
+}
+
+.search-input-row {
+    display: flex;
+    gap: 8px;
+}
+
+.modal-input,
+.modal-select {
+    flex: 1;
+    background: #090d16;
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: #f8fafc;
+    font-size: 0.85rem;
+}
+
+.modal-input.readonly {
+    background: #1e293b;
+    color: #38bdf8;
+    font-weight: 600;
+}
+
+.search-submit-btn,
+.download-action-btn {
+    background: #0284c7;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 16px;
+    color: #ffffff;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.12s ease;
+}
+
+.search-submit-btn:hover,
+.download-action-btn:hover {
+    background: #0369a1;
+}
+
+.search-submit-btn:disabled,
+.download-action-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.search-results-dropdown {
+    max-height: 160px;
+    overflow-y: auto;
+    background: #090d16;
+    border: 1px solid rgba(56, 189, 248, 0.3);
+    border-radius: 6px;
+    margin-top: 4px;
+}
+
+.search-result-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.search-result-row:hover,
+.search-result-row.selected {
+    background: rgba(14, 165, 233, 0.2);
+}
+
+.res-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #f1f5f9;
+}
+
+.res-badge {
+    font-size: 0.72rem;
+    color: #94a3b8;
+}
+
+.form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.grid-col.full {
+    grid-column: span 2;
+}
+
+.color-picker-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.color-picker {
+    width: 36px;
+    height: 32px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    cursor: pointer;
+}
+
+.color-value {
+    font-size: 0.8rem;
+    font-family: monospace;
+    color: #cbd5e1;
+}
+
+.saved-section {
+    border-top: 1px solid rgba(148, 163, 184, 0.15);
+    padding-top: 16px;
+}
+
+.section-heading {
+    margin: 0 0 10px 0;
+    font-size: 0.88rem;
+    color: #cbd5e1;
+}
+
+.empty-notice {
+    font-size: 0.8rem;
+    color: #64748b;
+    font-style: italic;
+}
+
+.saved-cards-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 180px;
+    overflow-y: auto;
+}
+
+.saved-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px;
+    background: #1e293b;
+    border: 1px solid rgba(148, 163, 184, 0.15);
+    border-radius: 6px;
+}
+
+.card-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.color-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.card-details {
+    display: flex;
+    flex-direction: column;
+}
+
+.card-name {
+    font-size: 0.84rem;
+    font-weight: 600;
+    color: #f1f5f9;
+}
+
+.card-sub {
+    font-size: 0.72rem;
+    color: #94a3b8;
+}
+
+.card-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.card-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.78rem;
+    color: #cbd5e1;
+    cursor: pointer;
+}
+
+.card-delete-btn {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-size: 0.9rem;
+    opacity: 0.7;
+    transition: opacity 0.12s ease;
+}
+
+.card-delete-btn:hover {
+    opacity: 1;
+}
+
+.sky-modal-enter-active,
+.sky-modal-leave-active {
+    transition: opacity 0.2s ease;
+}
+
+.sky-modal-enter-from,
+.sky-modal-leave-to {
+    opacity: 0;
 }
 </style>

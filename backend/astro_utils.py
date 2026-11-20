@@ -1,11 +1,13 @@
 import io
 import math
 import re
+import uuid
 import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 import astropy.units as u
+import httpx
 import numpy as np
 from astroplan import Observer
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord, get_body, get_sun
@@ -720,6 +722,287 @@ class AstroCalculator:
                     if sun_alt > -18
                     else {"night": [now.isot + "Z", end_time.isot + "Z"]}
                 )
+
+    def get_solar_system_positions(
+        self,
+        lat: float,
+        lon: float,
+        elevation: float = 0.0,
+        time_str: Optional[str] = None,
+    ) -> List[dict]:
+        """Calculates topocentric positions for Moon, Sun, and planets."""
+        location = EarthLocation(
+            lat=lat * u.deg, lon=lon * u.deg, height=elevation * u.m
+        )
+        t = Time(time_str) if time_str else Time.now()
+        altaz_frame = AltAz(obstime=t, location=location)
+
+        sun_gcrs = get_sun(t)
+        sun_altaz = sun_gcrs.transform_to(altaz_frame)
+
+        moon_gcrs = get_body("moon", t, location=location)
+        moon_altaz = moon_gcrs.transform_to(altaz_frame)
+        sep_deg = float(sun_gcrs.separation(moon_gcrs).deg)
+        ill_frac = float(0.5 * (1.0 - np.cos(np.radians(sep_deg))))
+
+        if sep_deg < 15:
+            phase_name = "New Moon"
+        elif sep_deg < 75:
+            phase_name = "Waxing Crescent"
+        elif sep_deg < 105:
+            phase_name = "First Quarter"
+        elif sep_deg < 165:
+            phase_name = "Waxing Gibbous"
+        elif sep_deg < 195:
+            phase_name = "Full Moon"
+        elif sep_deg < 255:
+            phase_name = "Waning Gibbous"
+        elif sep_deg < 285:
+            phase_name = "Third Quarter"
+        else:
+            phase_name = "Waning Crescent"
+
+        moon_mag = -12.7 + 2.5 * np.log10(max(0.01, 1.0 - ill_frac * 0.9))
+
+        bodies_config = [
+            ("sun", "Sun", "☀️", "#FFD700", -26.74, sun_gcrs, sun_altaz),
+            ("moon", "Moon", "🌙", "#E2E8F0", moon_mag, moon_gcrs, moon_altaz),
+        ]
+
+        results = []
+        for b_id, name, sym, color, mag, gcrs, altaz in bodies_config:
+            item = {
+                "id": b_id,
+                "name": name,
+                "symbol": sym,
+                "color": color,
+                "ra": round(float(gcrs.ra.deg), 5),
+                "dec": round(float(gcrs.dec.deg), 5),
+                "alt": round(float(altaz.alt.deg), 2),
+                "az": round(float(altaz.az.deg), 2),
+                "mag": round(float(mag), 1),
+                "distance_au": (
+                    round(float(gcrs.distance.au), 6)
+                    if hasattr(gcrs.distance, "au")
+                    else None
+                ),
+            }
+            if b_id == "moon":
+                item["phase_percent"] = round(ill_frac * 100, 1)
+                item["phase_name"] = phase_name
+                item["elongation_deg"] = round(sep_deg, 1)
+            results.append(item)
+
+        planet_meta = [
+            ("mercury", "Mercury", "⚪", "#A1A1AA", -0.4),
+            ("venus", "Venus", "🌟", "#FDE047", -4.4),
+            ("mars", "Mars", "🔴", "#EF4444", 0.5),
+            ("jupiter", "Jupiter", "🪐", "#F59E0B", -2.2),
+            ("saturn", "Saturn", "🪐", "#FCD34D", 0.5),
+            ("uranus", "Uranus", "🔵", "#38BDF8", 5.7),
+            ("neptune", "Neptune", "🔵", "#6366F1", 7.8),
+        ]
+
+        for b_id, name, sym, color, default_mag in planet_meta:
+            try:
+                p_gcrs = get_body(b_id, t, location=location)
+                p_altaz = p_gcrs.transform_to(altaz_frame)
+                results.append({
+                    "id": b_id,
+                    "name": name,
+                    "symbol": sym,
+                    "color": color,
+                    "ra": round(float(p_gcrs.ra.deg), 5),
+                    "dec": round(float(p_gcrs.dec.deg), 5),
+                    "alt": round(float(p_altaz.alt.deg), 2),
+                    "az": round(float(p_altaz.az.deg), 2),
+                    "mag": round(float(default_mag), 1),
+                    "distance_au": round(float(p_gcrs.distance.au), 4),
+                })
+            except Exception as e:
+                print(f"Error calculating planet {b_id}: {e}")
+
+        # Pluto GCRS approximation / fallback if astropy get_body doesn't have Pluto ephem
+        try:
+            p_gcrs = get_body("pluto", t, location=location)
+            p_altaz = p_gcrs.transform_to(altaz_frame)
+            results.append({
+                "id": "pluto",
+                "name": "Pluto",
+                "symbol": "⚪",
+                "color": "#CBD5E1",
+                "ra": round(float(p_gcrs.ra.deg), 5),
+                "dec": round(float(p_gcrs.dec.deg), 5),
+                "alt": round(float(p_altaz.alt.deg), 2),
+                "az": round(float(p_altaz.az.deg), 2),
+                "mag": 14.4,
+                "distance_au": round(float(p_gcrs.distance.au), 4),
+            })
+        except Exception:
+            # Fallback approximate topocentric position for Pluto around 2026
+            pluto_target = SkyCoord(
+                ra=306.337 * u.deg, dec=-23.633 * u.deg, distance=35.1 * u.au
+            )
+            p_altaz = pluto_target.transform_to(altaz_frame)
+            results.append({
+                "id": "pluto",
+                "name": "Pluto",
+                "symbol": "⚪",
+                "color": "#CBD5E1",
+                "ra": 306.337,
+                "dec": -23.633,
+                "alt": round(float(p_altaz.alt.deg), 2),
+                "az": round(float(p_altaz.az.deg), 2),
+                "mag": 14.4,
+                "distance_au": 35.1,
+            })
+
+        return results
+
+    def fetch_horizons_ephemeris(
+        self,
+        command: str,
+        object_name: str,
+        start_time_str: str,
+        stop_time_str: str,
+        step_hours: int,
+        lat: float,
+        lon: float,
+        elevation: float = 0.0,
+    ) -> dict:
+        """Queries JPL Horizons API for ephemeris trajectories."""
+        location = EarthLocation(
+            lat=lat * u.deg, lon=lon * u.deg, height=elevation * u.m
+        )
+        url = "https://ssd.jpl.nasa.gov/api/horizons.api"
+
+        def format_jpl_time(t_input: str) -> str:
+            try:
+                if "T" in t_input:
+                    dt = datetime.fromisoformat(t_input.replace("Z", "+00:00"))
+                else:
+                    dt = datetime.strptime(t_input.strip(), "%Y-%m-%d %H:%M")
+                return dt.strftime("%Y-%b-%d %H:%M")
+            except Exception:
+                return t_input.strip()
+
+        start_jpl = format_jpl_time(start_time_str)
+        stop_jpl = format_jpl_time(stop_time_str)
+
+        cmd = command.strip() if command.strip() else object_name.strip()
+
+        params = {
+            "format": "json",
+            "COMMAND": f"'{cmd}'",
+            "OBJ_DATA": "NO",
+            "MAKE_EPHEM": "YES",
+            "EPHEM_TYPE": "OBSERVER",
+            "CENTER": "coord@399",
+            "COORD_TYPE": "GEODETIC",
+            "SITE_COORD": f"'{lon},{lat},{elevation / 1000.0}'",
+            "START_TIME": f"'{start_jpl}'",
+            "STOP_TIME": f"'{stop_jpl}'",
+            "STEP_SIZE": f"'{step_hours}h'",
+            "QUANTITIES": "'1,9,20'",
+        }
+
+        resp = httpx.get(url, params=params, timeout=20.0)
+        if resp.status_code != 200:
+            raise ValueError(f"JPL Horizons returned status {resp.status_code}")
+
+        res_json = resp.json()
+        raw_text = res_json.get("result", "")
+
+        soe_idx = raw_text.find("$$SOE")
+        eoe_idx = raw_text.find("$$EOE")
+
+        if soe_idx == -1 or eoe_idx == -1:
+            first_lines = raw_text[:600]
+            raise ValueError(
+                f"No trajectory generated by JPL Horizons for '{cmd}'. Response snippet:\n{first_lines}"
+            )
+
+        ephem_segment = raw_text[soe_idx + 5 : eoe_idx].strip()
+        line_pattern = re.compile(
+            r"(\d{4}-[A-Za-z]{3}-\d{2}\s+\d{2}:\d{2})\s+[\*A-Za-z\s]{1,4}\s*(\d{2}\s+\d{2}\s+\d{2}\.\d+)\s+([+-]?\d{2}\s+\d{2}\s+\d{2}\.\d+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)"
+        )
+
+        def parse_hms(hms_str: str) -> float:
+            parts = hms_str.strip().split()
+            return (
+                float(parts[0]) + float(parts[1]) / 60.0 + float(parts[2]) / 3600.0
+            ) * 15.0
+
+        def parse_dms(dms_str: str) -> float:
+            dms_str = dms_str.strip()
+            sign = -1.0 if dms_str.startswith("-") else 1.0
+            clean = dms_str.lstrip("+-")
+            parts = clean.split()
+            return sign * (
+                float(parts[0]) + float(parts[1]) / 60.0 + float(parts[2]) / 3600.0
+            )
+
+        points = []
+        times_astropy = []
+        coords_astropy = []
+
+        for line in ephem_segment.split("\n"):
+            m = line_pattern.search(line)
+            if not m:
+                continue
+            t_str, ra_str, dec_str, mag_str, _sbrt_str, dist_str = m.groups()
+            try:
+                dt = datetime.strptime(t_str, "%Y-%b-%d %H:%M").replace(
+                    tzinfo=timezone.utc
+                )
+                iso_time = dt.isoformat()
+                ra_deg = round(parse_hms(ra_str), 5)
+                dec_deg = round(parse_dms(dec_str), 5)
+                mag = float(mag_str) if mag_str != "n.a." else None
+                dist = float(dist_str) if dist_str != "n.a." else None
+
+                times_astropy.append(Time(dt))
+                coords_astropy.append(
+                    SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
+                )
+
+                points.append({
+                    "time": iso_time,
+                    "display_time": dt.strftime("%b %d %H:%M UT"),
+                    "ra": ra_deg,
+                    "dec": dec_deg,
+                    "mag": mag,
+                    "distance_au": dist,
+                })
+            except Exception:
+                continue
+
+        if not points:
+            raise ValueError("Failed to parse trajectory points from JPL Horizons.")
+
+        altaz_frame = AltAz(obstime=times_astropy, location=location)
+        sky_coords = SkyCoord(coords_astropy)
+        target_altaz = sky_coords.transform_to(altaz_frame)
+        alts = target_altaz.alt.deg
+        azs = target_altaz.az.deg
+
+        for i in range(len(points)):
+            points[i]["alt"] = round(float(alts[i]), 2)
+            points[i]["az"] = round(float(azs[i]), 2)
+
+        ephem_id = str(uuid.uuid4())[:8]
+        display_name = object_name.strip() if object_name.strip() else cmd
+
+        return {
+            "id": ephem_id,
+            "name": display_name,
+            "command": cmd,
+            "start_time": points[0]["time"],
+            "stop_time": points[-1]["time"],
+            "step_hours": step_hours,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "points": points,
+        }
 
 
 def auto_stretch_image(image_bytes: bytes) -> bytes:

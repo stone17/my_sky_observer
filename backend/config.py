@@ -13,6 +13,7 @@ SETTINGS_JSON_LEGACY = "settings.json"
 COMPONENTS_FILE = "components.yaml"
 USER_DATA_DIR = os.path.join(os.path.expanduser("~"), ".my_sky_observer")
 FAVORITES_USER_FILE = os.path.join(USER_DATA_DIR, "favorites.yaml")
+EPHEMERIDES_USER_FILE = os.path.join(USER_DATA_DIR, "ephemerides.json")
 
 _HOSTNAME_RE = re.compile(
     r"^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?"
@@ -150,6 +151,29 @@ def save_favorites(
         _settings_cache["favorites_mtime"] = _get_file_mtime(favorites_file)
 
     return payload
+
+
+def load_ephemerides() -> list:
+    if os.path.exists(EPHEMERIDES_USER_FILE):
+        try:
+            with open(EPHEMERIDES_USER_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+    return []
+
+
+def save_ephemerides(ephemerides: list) -> list:
+    parent_dir = os.path.dirname(os.path.abspath(EPHEMERIDES_USER_FILE))
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+    tmp_file = f"{EPHEMERIDES_USER_FILE}.tmp"
+    with open(tmp_file, "w", encoding="utf-8") as f:
+        json.dump(ephemerides, f, indent=2)
+    os.replace(tmp_file, EPHEMERIDES_USER_FILE)
+    return ephemerides
 
 
 _NON_PROFILE_KEYS = (
