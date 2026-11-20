@@ -20,14 +20,18 @@ Fast, dark-mode astrophotography target planner, FOV framing assistant, and inte
 
 ## Quick Start
 
-### Docker (Recommended)
+### Windows Binary (Recommended)
+
+Download and run the latest standalone Windows release from **[GitHub Releases](https://github.com/stone17/my_sky_observer/releases)** — no Python, Node.js, or Docker required.
+
+### Docker
 
 ```bash
 docker-compose up -d --build
 ```
 Open `http://localhost:8000`.
 
-### Local (Python 3.10+ & Node.js)
+### From Source (Python 3.10+ & Node.js)
 
 **Windows:**
 ```bat
