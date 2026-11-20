@@ -7,9 +7,15 @@ import {
     formatMagnitude
 } from '../utils/catalogMeta.js';
 import {
-    resolveEffectiveTimeWindow,
-    isTimestampInTimeWindow
+    resolveEffectiveTimeWindow
 } from '../utils/timeWindow.js';
+import {
+    parseObserverLocation,
+    computeCatalogVisibilityHours,
+    buildSessionSparklineBasis,
+    computeObjectSparklinePath,
+    doesGraphMatchEvening
+} from '../utils/observingTime.js';
 import { computeDefaultImageFov, normalizeImageFov } from '../utils/fov.js';
 import {
     skyAtlasReady,
@@ -20,6 +26,8 @@ import {
 
 const props = defineProps([
     'objects',
+    'catalogTrigTable',
+    'observingEvening',
     'selectedId',
     'activeFov',
     'pinnedId',
@@ -201,17 +209,62 @@ const suggestionList = computed(() => {
     return matches.slice(0, 8);
 });
 
-const filteredAndSortedObjects = computed(() => {
+const observerLocation = computed(() => parseObserverLocation(props.settings));
+
+const catalogIndexByName = computed(() => {
+    const list = props.objects || [];
+    const map = new Map();
+    for (let i = 0; i < list.length; i++) {
+        const name = list[i]?.name;
+        if (name) map.set(name, i);
+    }
+    return map;
+});
+
+const effectiveTimeWindow = computed(() =>
+    resolveEffectiveTimeWindow(localClientSettings.value, props.nightTimes)
+);
+
+const visibilityHoursArr = computed(() => {
+    const minAlt = localSettings.value.min_altitude || 30;
+    const minHoursAlt = localClientSettings.value.min_hours_altitude ?? minAlt;
+    return computeCatalogVisibilityHours({
+        trigTable: props.catalogTrigTable,
+        evening: props.observingEvening,
+        observerLocation: observerLocation.value,
+        minAltitudeDeg: minHoursAlt,
+        timeWindow: effectiveTimeWindow.value
+    });
+});
+
+const getItemHours = (item) => {
+    if (!item) return 0;
+    const arr = visibilityHoursArr.value;
+    if (arr) {
+        const idx = catalogIndexByName.value.get(item.name);
+        if (idx !== undefined && idx < arr.length) {
+            const v = arr[idx];
+            if (v >= 0) return Math.round(v * 10) / 10;
+            return 0;
+        }
+    }
+    return item.hours_visible ? Math.round(item.hours_visible * 10) / 10 : 0;
+};
+
+const filteredState = computed(() => {
+    const list = props.objects || [];
+    const len = list.length;
+    if (len === 0) {
+        return { list: [], searchMatches: new Set() };
+    }
+
     const minAlt = localSettings.value.min_altitude || 30;
     const activeAlt = localClientSettings.value.filter_active_alt !== false;
     const naAlt = localClientSettings.value.filter_na_alt !== false;
 
     const minHrs = localClientSettings.value.min_hours || 0;
-    const minHoursAlt = localClientSettings.value.min_hours_altitude ?? minAlt;
     const activeHrs = localClientSettings.value.filter_active_hours !== false;
     const naHrs = localClientSettings.value.filter_na_hours !== false;
-
-    const tw = resolveEffectiveTimeWindow(localClientSettings.value, props.nightTimes);
 
     const maxMag = localClientSettings.value.max_magnitude ?? 12;
     const activeMag = localClientSettings.value.filter_active_mag !== false;
@@ -220,6 +273,11 @@ const filteredAndSortedObjects = computed(() => {
     const minSize = localClientSettings.value.min_size || 0;
     const activeSize = localClientSettings.value.filter_active_size !== false;
     const naSize = localClientSettings.value.filter_na_size !== false;
+
+    const selectedTypes = localClientSettings.value.selected_types || [];
+    const rejectAllTypes = selectedTypes.includes('__NONE__');
+    const selectedTypeSet =
+        !rejectAllTypes && selectedTypes.length > 0 ? new Set(selectedTypes) : null;
 
     const sortKey = localSettings.value.sort_key || 'time';
 
@@ -230,47 +288,47 @@ const filteredAndSortedObjects = computed(() => {
     const favSet = favoritesSet.value;
     const pinnedName = props.pinnedId || '';
 
-    let result = [];
+    const visHours = visibilityHoursArr.value;
+    const searchMatches = new Set();
+    const result = [];
+    const resultHours = sortKey === 'hours_above' ? new Map() : null;
 
-    for (const o of props.objects) {
+    for (let i = 0; i < len; i++) {
+        const o = list[i];
         const isPinned = Boolean(pinnedName && o.name === pinnedName);
         if (!isPinned && onlyFavs && !favSet.has(o.name)) continue;
 
-        if (o._normId === undefined) o._normId = (o.name || '').toLowerCase().replace(/\s+/g, '');
-        if (o._normCommon === undefined) o._normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
-        if (o._normOther === undefined) o._normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
-        if (o._normAliases === undefined) o._normAliases = (o.aliases || '').toLowerCase().replace(/\s+/g, '');
-
         let isMatch = false;
         if (normQ) {
-            if (o._normId.includes(normQ) || o._normCommon.includes(normQ) || o._normOther.includes(normQ) || o._normAliases.includes(normQ)) {
+            if (o._normId === undefined) o._normId = (o.name || '').toLowerCase().replace(/\s+/g, '');
+            if (o._normCommon === undefined) o._normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
+            if (o._normOther === undefined) o._normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
+            if (o._normAliases === undefined) o._normAliases = (o.aliases || '').toLowerCase().replace(/\s+/g, '');
+            if (
+                o._normId.includes(normQ) ||
+                o._normCommon.includes(normQ) ||
+                o._normOther.includes(normQ) ||
+                o._normAliases.includes(normQ)
+            ) {
                 isMatch = true;
+                searchMatches.add(o.name);
             }
         }
 
-        let effectiveHrs = o.hours_visible;
-        if (tw.active && o.altitude_graph && o.altitude_graph.length > 1) {
-            const t0 = new Date(o.altitude_graph[0].time).getTime();
-            const t1 = new Date(o.altitude_graph[o.altitude_graph.length - 1].time).getTime();
-            const spanHours = t1 > t0 ? (t1 - t0) / 3600000 : 24.0;
-            const stepHours = spanHours / (o.altitude_graph.length - 1);
-            let validCount = 0;
-            for (const p of o.altitude_graph) {
-                if (p.altitude >= minHoursAlt && isTimestampInTimeWindow(p.time, tw.startMin, tw.endMin)) {
-                    validCount++;
-                }
-            }
-            effectiveHrs = Math.round(validCount * stepHours * 10) / 10;
-        }
+        const rawHrs = visHours && i < visHours.length ? visHours[i] : o.hours_visible;
+        const isNaHrs = rawHrs === undefined || rawHrs === null || rawHrs < 0;
+        const effectiveHrs = isNaHrs ? 0 : rawHrs;
 
         // If it's not a search match or Sky-Map-pinned target, apply normal filters.
         if (!isMatch && !isPinned) {
+            if (rejectAllTypes) continue;
+            if (selectedTypeSet && !selectedTypeSet.has(o.type)) continue;
+
             if (activeHrs) {
-                const isNaHrs = effectiveHrs === undefined || effectiveHrs === null;
                 if (isNaHrs) {
                     if (!naHrs) continue;
-                } else {
-                    if (minHrs > 0 && effectiveHrs < minHrs) continue;
+                } else if (minHrs > 0 && effectiveHrs < minHrs) {
+                    continue;
                 }
             }
 
@@ -278,8 +336,8 @@ const filteredAndSortedObjects = computed(() => {
                 const isNaAlt = o.max_altitude === undefined || o.max_altitude === null;
                 if (isNaAlt) {
                     if (!naAlt) continue;
-                } else {
-                    if (minAlt > 0 && o.max_altitude < minAlt) continue;
+                } else if (minAlt > 0 && o.max_altitude < minAlt) {
+                    continue;
                 }
             }
 
@@ -287,8 +345,8 @@ const filteredAndSortedObjects = computed(() => {
                 const isNaMag = o.mag === undefined || o.mag === null || o.mag >= 99;
                 if (isNaMag) {
                     if (!naMag) continue;
-                } else {
-                    if (maxMag !== undefined && o.mag > maxMag) continue;
+                } else if (maxMag !== undefined && o.mag > maxMag) {
+                    continue;
                 }
             }
 
@@ -296,33 +354,33 @@ const filteredAndSortedObjects = computed(() => {
                 const isNaSize = o.maj_ax === undefined || o.maj_ax === null || o.maj_ax === 0;
                 if (isNaSize) {
                     if (!naSize) continue;
-                } else {
-                    if (minSize > 0 && o.maj_ax < minSize) continue;
+                } else if (minSize > 0 && o.maj_ax < minSize) {
+                    continue;
                 }
             }
-
-            const selectedTypes = localClientSettings.value.selected_types || [];
-            if (selectedTypes.includes('__NONE__')) continue;
-            if (selectedTypes.length > 0 && !selectedTypes.includes(o.type)) continue;
         }
 
-        o._dynamicHours = effectiveHrs || 0;
-        o._isSearchMatch = isMatch;
-        o._isPinned = isPinned;
+        if (resultHours) {
+            resultHours.set(o.name, effectiveHrs);
+        }
         result.push(o);
     }
 
     result.sort((a, b) => {
-        if (a._isPinned && !b._isPinned) return -1;
-        if (!a._isPinned && b._isPinned) return 1;
+        const aPinned = Boolean(pinnedName && a.name === pinnedName);
+        const bPinned = Boolean(pinnedName && b.name === pinnedName);
+        if (aPinned && !bPinned) return -1;
+        if (!aPinned && bPinned) return 1;
 
         if (normQ) {
-            if (a._isSearchMatch && !b._isSearchMatch) return -1;
-            if (!a._isSearchMatch && b._isSearchMatch) return 1;
+            const aMatch = searchMatches.has(a.name);
+            const bMatch = searchMatches.has(b.name);
+            if (aMatch && !bMatch) return -1;
+            if (!aMatch && bMatch) return 1;
 
-            if (a._isSearchMatch && b._isSearchMatch) {
-                const normA = a._normId;
-                const normB = b._normId;
+            if (aMatch && bMatch) {
+                const normA = a._normId || '';
+                const normB = b._normId || '';
 
                 const exactA = normA === normQ || (a._normAliasTokens && a._normAliasTokens.includes(normQ));
                 const exactB = normB === normQ || (b._normAliasTokens && b._normAliasTokens.includes(normQ));
@@ -345,8 +403,8 @@ const filteredAndSortedObjects = computed(() => {
             valA = a.max_altitude || 0;
             valB = b.max_altitude || 0;
         } else if (sortKey === 'hours_above') {
-            valA = a._dynamicHours || 0;
-            valB = b._dynamicHours || 0;
+            valA = resultHours ? (resultHours.get(a.name) || 0) : 0;
+            valB = resultHours ? (resultHours.get(b.name) || 0) : 0;
         } else if (sortKey === 'brightness') {
             valA = a.mag || 99;
             valB = b.mag || 99;
@@ -360,8 +418,11 @@ const filteredAndSortedObjects = computed(() => {
         return 0;
     });
 
-    return result;
+    return { list: result, searchMatches };
 });
+
+const filteredAndSortedObjects = computed(() => filteredState.value.list);
+const isItemSearchMatch = (item) => Boolean(item && filteredState.value.searchMatches.has(item.name));
 
 const displayedObjects = computed(() => {
     return filteredAndSortedObjects.value.slice(0, renderedLimit.value);
@@ -713,6 +774,10 @@ const miniThresholdY = computed(() => {
     return Math.round((40 - (alt / 90) * 40) * 10) / 10;
 });
 
+const sparklineBasis = computed(() =>
+    buildSessionSparklineBasis(props.observingEvening, observerLocation.value, 24)
+);
+
 const getAltitudePath = (altitudeGraph) => {
     if (!altitudeGraph || altitudeGraph.length < 2) return "";
     const width = 100;
@@ -727,6 +792,21 @@ const getAltitudePath = (altitudeGraph) => {
     });
     d += ` L ${width} ${height} Z`;
     return d;
+};
+
+const getMiniSparklinePath = (item) => {
+    if (!item) return "";
+    if (sparklineBasis.value && Number.isFinite(item.ra) && Number.isFinite(item.dec)) {
+        return computeObjectSparklinePath(item, sparklineBasis.value, 100, 40);
+    }
+    if (
+        item.altitude_graph &&
+        item.altitude_graph.length > 1 &&
+        (!props.observingEvening?.key || doesGraphMatchEvening(item.altitude_graph, props.observingEvening.key))
+    ) {
+        return getAltitudePath(item.altitude_graph);
+    }
+    return "";
 };
 
 const handleKeydown = (e) => {
@@ -887,7 +967,7 @@ onUnmounted(() => {
                     :ref="(el) => setCardRef(el, item.name)"
                     :data-obj-name="item.name"
                     class="object-card"
-                    :class="{ active: selectedId === item.name, 'search-match': item._isSearchMatch }"
+                    :class="{ active: selectedId === item.name, 'search-match': isItemSearchMatch(item) }"
                     @click="handleObjectClick(item)"
                 >
                     <div class="card-content">
@@ -964,15 +1044,15 @@ onUnmounted(() => {
                             <div class="metrics-row">
                                 <span>Mag: <strong>{{ formatMagnitude(item.mag) }}</strong></span>
                                 <span>Size: <strong>{{ item.size }}</strong></span>
-                                <span class="vis-time">Vis: {{ item._dynamicHours || 0 }}h</span>
+                                <span class="vis-time">Vis: {{ getItemHours(item) }}h</span>
                             </div>
                         </div>
 
                         <div class="graph-col">
-                            <div class="altitude-chart" v-if="item.altitude_graph && item.altitude_graph.length">
+                            <div class="altitude-chart" v-if="getMiniSparklinePath(item)">
                                 <svg viewBox="0 0 100 40" preserveAspectRatio="none" width="100%" height="40">
                                     <line x1="0" :y1="miniThresholdY" x2="100" :y2="miniThresholdY" stroke="#374151" stroke-width="1" stroke-dasharray="2" />
-                                    <path :d="getAltitudePath(item.altitude_graph)" fill="rgba(16, 185, 129, 0.25)" stroke="#10b981" stroke-width="1.2" />
+                                    <path :d="getMiniSparklinePath(item)" fill="rgba(16, 185, 129, 0.25)" stroke="#10b981" stroke-width="1.2" />
                                 </svg>
                             </div>
                             <div class="coord-label">

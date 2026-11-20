@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, watch, computed } from 'vue';
+import { ref, shallowRef, triggerRef, onMounted, onUnmounted, watch, computed } from 'vue';
 import LeftPanel from './components/LeftPanel.vue';
 import ObjectList from './components/ObjectList.vue';
 import Framing from './components/Framing.vue';
@@ -8,14 +8,18 @@ import EphemerisModal from './components/EphemerisModal.vue';
 import { computeDefaultImageFov, computeSensorFov, normalizeImageFov } from './utils/fov.js';
 import {
     getAstroNightDefaults,
-    resolveEffectiveTimeWindow,
-    isTimestampInTimeWindow
+    resolveEffectiveTimeWindow
 } from './utils/timeWindow.js';
 import {
+    parseObserverLocation,
     resolveObservingEvening,
     resolveLiveTonightEveningKey,
+    computeNightEphemerisForEvening,
+    buildNightTimesFromEphemeris,
     doesGraphMatchEvening,
-    doesNightTimesMatchEvening
+    doesNightTimesMatchEvening,
+    prepareCatalogTrigTable,
+    computeCatalogVisibilityHours
 } from './utils/observingTime.js';
 
 const LOCAL_STORAGE_BACKUP_KEY = 'my_sky_observer_settings_backup';
@@ -46,16 +50,40 @@ const clientSettings = ref({
     search_query: '',
     object_settings: {}
 });
-const objects = ref([]);
+const objects = shallowRef([]);
+const catalogTrigTable = shallowRef(null);
 const selectedObject = ref(null);
 const customFramingCoords = ref(null);
+
+let objectsTriggerRafId = null;
+const notifyObjectsMutated = (targetName = '') => {
+    triggerRef(objects);
+    if (targetName && selectedObject.value && selectedObject.value.name === targetName) {
+        triggerRef(selectedObject);
+    }
+};
+const scheduleObjectsTrigger = (targetName = '') => {
+    if (targetName && selectedObject.value && selectedObject.value.name === targetName) {
+        triggerRef(selectedObject);
+    }
+    if (objectsTriggerRafId !== null) return;
+    if (typeof requestAnimationFrame === 'function') {
+        objectsTriggerRafId = requestAnimationFrame(() => {
+            objectsTriggerRafId = null;
+            triggerRef(objects);
+        });
+    } else {
+        triggerRef(objects);
+    }
+};
 
 // --- SHARED OBSERVING DATE & TIME STATE (Sky View + On-Target Framing + Altitude Graph) ---
 const isLiveObsTime = ref(true);
 const liveNowMs = ref(Date.now());
 const scrubObsTimeMs = ref(Date.now());
 let liveObsClockTimer = null;
-let obsDateRefreshTimer = null;
+
+const observerLocation = computed(() => parseObserverLocation(settings.value));
 
 const effectiveObsTimeMs = computed(() =>
     isLiveObsTime.value ? liveNowMs.value : scrubObsTimeMs.value
@@ -179,6 +207,7 @@ const downloadImage = async (obj, explicitFov = null, explicitResolution = null)
 
     obj.status = 'downloading';
     obj.downloading_resolution = requestedRes || defaultRes;
+    notifyObjectsMutated(targetName);
 
     try {
         const reqBody = {
@@ -220,7 +249,7 @@ const downloadImage = async (obj, explicitFov = null, explicitResolution = null)
             };
 
             applyResult(obj);
-            const liveObj = objects.value.find(o => o.name === targetName);
+            const liveObj = objectMap.get(targetName) || objects.value.find(o => o.name === targetName);
             if (liveObj && liveObj !== obj) {
                 applyResult(liveObj);
             }
@@ -232,6 +261,7 @@ const downloadImage = async (obj, explicitFov = null, explicitResolution = null)
             ) {
                 applyResult(selectedObject.value);
             }
+            notifyObjectsMutated(targetName);
             if (
                 (isManualFov.value || effectiveRes > defaultRes) &&
                 selectedObject.value?.name === targetName
@@ -246,11 +276,13 @@ const downloadImage = async (obj, explicitFov = null, explicitResolution = null)
         } else {
             obj.status = 'error';
             delete obj.downloading_resolution;
+            notifyObjectsMutated(targetName);
         }
     } catch (e) {
         console.error(e);
         obj.status = 'error';
         delete obj.downloading_resolution;
+        notifyObjectsMutated(targetName);
     }
 };
 
@@ -265,6 +297,7 @@ const fetchCustomFramedImageForObject = async (obj, centerRa, centerDec, fov, ex
             : defaultRes;
     obj.status = 'downloading';
     obj.downloading_resolution = requestedRes;
+    notifyObjectsMutated(targetName);
     try {
         const res = await fetch('/api/fetch-custom-image', {
             method: 'POST',
@@ -294,11 +327,12 @@ const fetchCustomFramedImageForObject = async (obj, centerRa, centerDec, fov, ex
                 targetObj.status = 'cached';
             };
             applyCustom(obj);
-            const liveObj = objects.value.find(o => o.name === targetName);
+            const liveObj = objectMap.get(targetName) || objects.value.find(o => o.name === targetName);
             if (liveObj && liveObj !== obj) applyCustom(liveObj);
             if (selectedObject.value?.name === targetName && selectedObject.value !== obj) {
                 applyCustom(selectedObject.value);
             }
+            notifyObjectsMutated(targetName);
             if (!obj.is_custom) {
                 updateObjectSettingsEntry(targetName, {
                     fov: effectiveFov,
@@ -313,11 +347,13 @@ const fetchCustomFramedImageForObject = async (obj, centerRa, centerDec, fov, ex
         } else {
             obj.status = 'error';
             delete obj.downloading_resolution;
+            notifyObjectsMutated(targetName);
         }
     } catch (e) {
         console.error(e);
         obj.status = 'error';
         delete obj.downloading_resolution;
+        notifyObjectsMutated(targetName);
     }
 };
 
@@ -341,7 +377,7 @@ watch(equipmentSignature, (newSig, oldSig) => {
 // --- ON-DEMAND OBJECT DETAILS (Altitude / Moon / Sun Graphs) ---
 const pendingDetailRequests = new Set();
 
-const mergeObjectDetailsPayload = (d, insertIfMissing = false) => {
+const mergeObjectDetailsPayload = (d, insertIfMissing = false, shouldTrigger = true) => {
     if (!d || !d.name) return null;
 
     const currentEveningKey = observingEvening.value?.key;
@@ -370,8 +406,11 @@ const mergeObjectDetailsPayload = (d, insertIfMissing = false) => {
 
     if (!o && insertIfMissing) {
         applySavedStateToObject(cleanDetails);
-        objects.value.push(cleanDetails);
-        o = objects.value[objects.value.length - 1];
+        const nextList = objects.value.slice();
+        nextList.push(cleanDetails);
+        catalogTrigTable.value = prepareCatalogTrigTable(nextList);
+        objects.value = nextList;
+        o = cleanDetails;
         objectMap.set(o.name, o);
     }
 
@@ -416,8 +455,29 @@ const mergeObjectDetailsPayload = (d, insertIfMissing = false) => {
         } else if (!o) {
             Object.assign(selectedObject.value, cleanDetails);
         }
+        triggerRef(selectedObject);
+    }
+    if (shouldTrigger) {
+        scheduleObjectsTrigger(cleanDetails.name);
     }
     return o || selectedObject.value;
+};
+
+const mergeObjectDetailsBatch = (batchPayload) => {
+    if (!batchPayload) return;
+    const items = Array.isArray(batchPayload) ? batchPayload : batchPayload.items;
+    if (!Array.isArray(items) || items.length === 0) return;
+    const sharedMoon = batchPayload.moon_graph;
+    const sharedSun = batchPayload.sun_graph;
+
+    for (let i = 0; i < items.length; i++) {
+        const d = items[i];
+        if (!d || !d.name) continue;
+        if (sharedMoon && !d.moon_graph) d.moon_graph = sharedMoon;
+        if (sharedSun && !d.sun_graph) d.sun_graph = sharedSun;
+        mergeObjectDetailsPayload(d, false, false);
+    }
+    scheduleObjectsTrigger(selectedObject.value?.name || '');
 };
 
 const isValidSingleSessionGraph = (
@@ -471,7 +531,14 @@ const ensureObjectDetails = async (targetObj) => {
     if (canonical && isValidSingleSessionGraph(canonical.altitude_graph, nightTimes.value, currentEveningKey)) {
         if (targetObj !== canonical) {
             Object.assign(targetObj, canonical);
+            triggerRef(selectedObject);
         }
+        return;
+    }
+
+    // When exploring non-tonight dates and catalog metadata is already loaded,
+    // AltitudeGraph synthesizes target/Moon/Sun curves in <0.1ms client-side.
+    if (canonical && activeObsDateParam.value && observerLocation.value) {
         return;
     }
 
@@ -499,7 +566,7 @@ const ensureObjectDetails = async (targetObj) => {
         const res = await fetch(url);
         if (res.ok) {
             const details = await res.json();
-            mergeObjectDetailsPayload(details, true);
+            mergeObjectDetailsPayload(details, true, true);
         }
     } catch (err) {
         console.error('Failed to fetch object details on demand:', err);
@@ -869,6 +936,7 @@ const handleFrameCustomPosition = (payload) => {
         pinnedTopObjectId.value = canonical.name;
         pinnedTopSeq.value += 1;
         selectedObject.value = canonical;
+        notifyObjectsMutated(canonical.name);
         ensureObjectDetails(canonical);
         return;
     }
@@ -1009,6 +1077,7 @@ const handleFovUpdate = (payload) => {
                     offset_y_pct: 0
                 });
             }
+            notifyObjectsMutated(objName);
             if (!skipDownload) {
                 downloadImage(selectedObject.value, systemFov.value, explicitResolution);
             }
@@ -1399,6 +1468,7 @@ const applyDownloadObjectUpdate = (s) => {
             if (s.url) o.image_url = s.url;
             if (s.image_fov) o.image_fov = s.image_fov;
         }
+        scheduleObjectsTrigger(o.name);
     }
 };
 
@@ -1531,8 +1601,11 @@ const startStream = (mode = 'selected') => {
             const nt = JSON.parse(e.data);
             if (doesNightTimesMatchEvening(nt, observingEvening.value.key)) {
                 nightTimes.value = nt;
+            } else if (observerLocation.value) {
+                const eph = computeNightEphemerisForEvening(observingEvening.value, observerLocation.value);
+                if (eph) nightTimes.value = buildNightTimesFromEphemeris(eph);
             }
-            const defaults = getAstroNightDefaults(nt);
+            const defaults = getAstroNightDefaults(nightTimes.value || nt);
             if (!clientSettings.value.time_window_start) {
                 clientSettings.value.time_window_start = defaults.start;
             }
@@ -1590,12 +1663,13 @@ const startStream = (mode = 'selected') => {
                 }
             }
 
-            objects.value = newObjects;
-            const reactiveMap = new Map();
-            for (const reactiveItem of objects.value) {
-                reactiveMap.set(reactiveItem.name, reactiveItem);
+            catalogTrigTable.value = prepareCatalogTrigTable(newObjects);
+            const fastMap = new Map();
+            for (let i = 0; i < newObjects.length; i++) {
+                fastMap.set(newObjects[i].name, newObjects[i]);
             }
-            objectMap = reactiveMap;
+            objectMap = fastMap;
+            objects.value = newObjects;
 
             if (currentId) {
                 const found = objectMap.get(currentId);
@@ -1622,10 +1696,17 @@ const startStream = (mode = 'selected') => {
         } catch (err) { }
     });
 
+    eventSource.addEventListener('object_details_batch', (e) => {
+        try {
+            const batch = JSON.parse(e.data);
+            mergeObjectDetailsBatch(batch);
+        } catch (err) { }
+    });
+
     eventSource.addEventListener('object_details', (e) => {
         try {
             const d = JSON.parse(e.data);
-            mergeObjectDetailsPayload(d, false);
+            mergeObjectDetailsPayload(d, false, true);
         } catch (err) { }
     });
 
@@ -1657,7 +1738,13 @@ const stopStream = () => {
     }
 };
 
-const handlePurge = () => { objectMap.clear(); objects.value = []; selectedObject.value = null; startStream('selected'); };
+const handlePurge = () => {
+    objectMap.clear();
+    catalogTrigTable.value = null;
+    objects.value = [];
+    selectedObject.value = null;
+    startStream('selected');
+};
 
 const availableTypes = computed(() => {
     const types = new Set();
@@ -1691,6 +1778,10 @@ const currentSetupHash = computed(() => {
 });
 
 const filteredObjectsList = computed(() => {
+    const list = objects.value;
+    const len = list.length;
+    if (len === 0) return [];
+
     const minAlt = settings.value?.min_altitude || 30;
     const activeAlt = clientSettings.value?.filter_active_alt !== false;
     const naAlt = clientSettings.value?.filter_na_alt !== false;
@@ -1717,31 +1808,28 @@ const filteredObjectsList = computed(() => {
     const onlyFavs = Boolean(clientSettings.value?.filter_favorites_only);
     const favSet = onlyFavs ? new Set(clientSettings.value?.favorites || []) : null;
 
+    const visHoursArr = activeHrs
+        ? computeCatalogVisibilityHours({
+              trigTable: catalogTrigTable.value,
+              evening: observingEvening.value,
+              observerLocation: observerLocation.value,
+              minAltitudeDeg: minHoursAlt,
+              timeWindow: tw
+          })
+        : null;
+
     const result = [];
-    for (const o of objects.value) {
+    for (let i = 0; i < len; i++) {
+        const o = list[i];
         if (favSet && !favSet.has(o.name)) continue;
         if (activeSet && !activeSet.has(o.type)) continue;
 
-        let effectiveHrs = o.hours_visible;
-        if (tw.active && o.altitude_graph && o.altitude_graph.length > 1) {
-            const t0 = new Date(o.altitude_graph[0].time).getTime();
-            const t1 = new Date(o.altitude_graph[o.altitude_graph.length - 1].time).getTime();
-            const spanHours = t1 > t0 ? (t1 - t0) / 3600000 : 24.0;
-            const stepHours = spanHours / (o.altitude_graph.length - 1);
-            let validCount = 0;
-            for (const p of o.altitude_graph) {
-                if (p.altitude >= minHoursAlt && isTimestampInTimeWindow(p.time, tw.startMin, tw.endMin)) {
-                    validCount++;
-                }
-            }
-            effectiveHrs = Math.round(validCount * stepHours * 10) / 10;
-        }
-
         if (activeHrs) {
-            const isNaHrs = effectiveHrs === undefined || effectiveHrs === null;
+            const rawHrs = visHoursArr && i < visHoursArr.length ? visHoursArr[i] : o.hours_visible;
+            const isNaHrs = rawHrs === undefined || rawHrs === null || rawHrs < 0;
             if (isNaHrs) {
                 if (!naHrs) continue;
-            } else if (minHrs > 0 && effectiveHrs < minHrs) {
+            } else if (minHrs > 0 && rawHrs < minHrs) {
                 continue;
             }
         }
@@ -1794,28 +1882,12 @@ const uncachedAllCount = computed(() => {
     return count;
 });
 
+// Only physical setup / observer location changes require a backend SSE stream restart.
+// All date changes, time-window changes, filters, and sort order run in <1ms client-side.
 const streamParams = computed(() => ({
     loc: settings.value.location,
     tel: settings.value.telescope,
     cam: settings.value.camera,
-    min_alt: settings.value.min_altitude,
-    min_hrs: clientSettings.value.min_hours,
-    min_hrs_alt: clientSettings.value.min_hours_altitude,
-    sort: settings.value.sort_key,
-    max_mag: clientSettings.value.max_magnitude,
-    min_sz: clientSettings.value.min_size,
-    fa_alt: clientSettings.value.filter_active_alt,
-    fn_alt: clientSettings.value.filter_na_alt,
-    fa_hrs: clientSettings.value.filter_active_hours,
-    fn_hrs: clientSettings.value.filter_na_hours,
-    fa_mag: clientSettings.value.filter_active_mag,
-    fn_mag: clientSettings.value.filter_na_mag,
-    fa_sz: clientSettings.value.filter_active_size,
-    fn_sz: clientSettings.value.filter_na_size,
-    fa_tw: clientSettings.value.filter_active_time_window,
-    tw_s: clientSettings.value.filter_active_time_window ? clientSettings.value.time_window_start : '',
-    tw_e: clientSettings.value.filter_active_time_window ? clientSettings.value.time_window_end : '',
-    types: (clientSettings.value.selected_types || []).join(','),
     pad: settings.value.image_padding,
     img_srv: settings.value.image_server,
 }));
@@ -1828,25 +1900,23 @@ watch(streamParams, (newVal, oldVal) => {
     }
     if (changes.length > 0) {
         if (restartTimer) clearTimeout(restartTimer);
-        restartTimer = setTimeout(() => { startStream('selected'); }, 1000);
+        restartTimer = setTimeout(() => { startStream('selected'); }, 600);
     }
 }, { deep: true });
 
+// Zero-network, sub-millisecond observing evening transition (Stellarium-style):
+// Synchronously updates nightTimes for the new date so AltitudeGraph, ObjectList,
+// SkyContextMap, and time-window defaults respond on the very next animation frame.
 watch(
-    () => observingEvening.value.key,
-    (newKey, oldKey) => {
-        if (isInitializing || !newKey || newKey === oldKey) return;
-        if (obsDateRefreshTimer) {
-            clearTimeout(obsDateRefreshTimer);
-            obsDateRefreshTimer = null;
-        }
-        obsDateRefreshTimer = setTimeout(() => {
-            obsDateRefreshTimer = null;
-            if (selectedObject.value) {
-                ensureObjectDetails(selectedObject.value);
+    () => [observingEvening.value.key, observerLocation.value?.lat, observerLocation.value?.lon],
+    ([newKey]) => {
+        if (!newKey || !observerLocation.value) return;
+        if (!doesNightTimesMatchEvening(nightTimes.value, newKey)) {
+            const eph = computeNightEphemerisForEvening(observingEvening.value, observerLocation.value);
+            if (eph) {
+                nightTimes.value = buildNightTimesFromEphemeris(eph);
             }
-            startStream('selected');
-        }, 350);
+        }
     }
 );
 
@@ -1861,6 +1931,10 @@ onMounted(async () => {
     }
     isInitializing = true;
     await fetchSettings();
+    if (observerLocation.value) {
+        const eph = computeNightEphemerisForEvening(observingEvening.value, observerLocation.value);
+        if (eph) nightTimes.value = buildNightTimesFromEphemeris(eph);
+    }
     startStream('selected');
     await pollDownloadStatus();
     isInitializing = false;
@@ -1873,9 +1947,9 @@ onUnmounted(() => {
         clearInterval(liveObsClockTimer);
         liveObsClockTimer = null;
     }
-    if (obsDateRefreshTimer) {
-        clearTimeout(obsDateRefreshTimer);
-        obsDateRefreshTimer = null;
+    if (objectsTriggerRafId !== null && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(objectsTriggerRafId);
+        objectsTriggerRafId = null;
     }
     flushPendingSave();
     stopDownloadPolling();
@@ -2005,6 +2079,8 @@ watch(clientSettings, () => {
                 <div class="list-panel">
                     <ObjectList
                         :objects="objects"
+                        :catalogTrigTable="catalogTrigTable"
+                        :observingEvening="observingEvening"
                         :selectedId="selectedObject?.name"
                         :activeFov="activeFov"
                         :pinnedId="pinnedTopObjectId"

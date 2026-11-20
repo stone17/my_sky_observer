@@ -952,29 +952,38 @@ class StreamSession:
         self.all_objects = []
         self.top_objects = []
         self.download_list = []
+        self.session_start = None
+        self.session_end = None
+        self.twilight = {}
 
+    def _init_session_ephemeris_sync(self):
         observer = Observer(
             location=EarthLocation(
                 lat=self.location.latitude * u.deg, lon=self.location.longitude * u.deg
             )
         )
-        self.session_start, self.session_end = calculator.get_observing_session_for_date(
+        session_start, session_end = calculator.get_observing_session_for_date(
             observer, self.settings.get("obs_date")
         )
-        session_mid = self.session_start + 0.5 * (
-            self.session_end - self.session_start
-        )
-        self.twilight = calculator.get_twilight_periods(self.location, session_mid)
+        session_mid = session_start + 0.5 * (session_end - session_start)
+        twilight = calculator.get_twilight_periods(self.location, session_mid)
+        return session_start, session_end, twilight
 
     async def generate_stream(self):
         try:
-            self.all_objects = await asyncio.to_thread(
-                get_sorted_objects,
-                self.settings,
-                self.location,
-                self.telescope,
-                self.camera,
+            (session_start, session_end, twilight), self.all_objects = await asyncio.gather(
+                asyncio.to_thread(self._init_session_ephemeris_sync),
+                asyncio.to_thread(
+                    get_sorted_objects,
+                    self.settings,
+                    self.location,
+                    self.telescope,
+                    self.camera,
+                ),
             )
+            self.session_start = session_start
+            self.session_end = session_end
+            self.twilight = twilight
 
             if not self.all_objects:
                 yield "event: close\ndata: No objects found\n\n"
@@ -1090,9 +1099,9 @@ class StreamSession:
             mode, self.all_objects, filtered_candidates, fav_names, filter_favs_only
         )
 
-    def _build_batch_details_sync(self, download_ids: set, min_alt: float) -> List[dict]:
+    def _build_batch_details_sync(self, download_ids: set, min_alt: float) -> Optional[dict]:
         if not self.top_objects:
-            return []
+            return None
 
         tw_cfg = _extract_time_window_settings(self.settings)
         ephemeris = calculator.prepare_session_ephemeris(
@@ -1145,8 +1154,6 @@ class StreamSession:
                     "name": obj_id,
                     "image_url": url if is_cached else "",
                     "altitude_graph": alt_graph,
-                    "moon_graph": moon_dicts,
-                    "sun_graph": sun_dicts,
                     "fov_rectangle": fov_rect_dict,
                     "sensor_fov": sensor_fov,
                     "image_fov": image_fov,
@@ -1155,7 +1162,11 @@ class StreamSession:
                     "status": status,
                 }
             )
-        return results
+        return {
+            "moon_graph": moon_dicts,
+            "sun_graph": sun_dicts,
+            "items": results,
+        }
 
     async def stream_details(self):
         if not self.top_objects:
@@ -1166,14 +1177,13 @@ class StreamSession:
             download_ids = download_ids | set(background_download_manager.queued_ids)
         min_hours_alt = _extract_min_hours_altitude(self.settings)
 
-        details_batch = await asyncio.to_thread(
+        batch_payload = await asyncio.to_thread(
             self._build_batch_details_sync, download_ids, min_hours_alt
         )
+        if not batch_payload or await self.request.is_disconnected():
+            return
 
-        for idx, detail in enumerate(details_batch):
-            if idx % 25 == 0 and await self.request.is_disconnected():
-                return
-            yield f"event: object_details\ndata: {json.dumps(detail)}\n\n"
+        yield f"event: object_details_batch\ndata: {json.dumps(batch_payload)}\n\n"
 
     async def stream_downloads(self):
         sub_queue = background_download_manager.subscribe()

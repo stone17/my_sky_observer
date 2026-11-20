@@ -453,9 +453,18 @@ def test_stream_objects_preloads_altitude_graphs_even_when_saved_types_none():
                 continue
             if line.startswith("event:"):
                 current_event = line.split("event:", 1)[1].strip()
-            elif line.startswith("data:") and current_event == "object_details":
+            elif line.startswith("data:") and current_event in ("object_details", "object_details_batch"):
                 data_str = line.split("data:", 1)[1].strip()
-                details_events.append(json.loads(data_str))
+                parsed = json.loads(data_str)
+                if current_event == "object_details_batch":
+                    shared_moon = parsed.get("moon_graph", [])
+                    shared_sun = parsed.get("sun_graph", [])
+                    for item in parsed.get("items", []):
+                        item.setdefault("moon_graph", shared_moon)
+                        item.setdefault("sun_graph", shared_sun)
+                        details_events.append(item)
+                else:
+                    details_events.append(parsed)
                 if len(details_events) >= 3:
                     break
 

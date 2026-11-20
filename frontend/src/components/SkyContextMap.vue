@@ -768,7 +768,10 @@ const openSkyOptionsPanel = () => {
     window.dispatchEvent(new CustomEvent('open-left-tab', { detail: 'sky' }));
 };
 
+const EMPTY_NAME_SET = new Set();
+
 const filteredNameSet = computed(() => {
+    if (!applyTargetFilters.value) return EMPTY_NAME_SET;
     const list = Array.isArray(props.filteredObjects) ? props.filteredObjects : props.objects;
     const set = new Set();
     if (Array.isArray(list)) {
@@ -780,7 +783,20 @@ const filteredNameSet = computed(() => {
     return set;
 });
 
-const filteredTargetCount = computed(() => filteredNameSet.value.size);
+const filteredTargetCount = computed(() => {
+    const list = Array.isArray(props.filteredObjects) ? props.filteredObjects : props.objects;
+    return Array.isArray(list) ? list.length : 0;
+});
+
+const hasActiveEphemerides = computed(() => {
+    if (!showEphemeris.value) return false;
+    void ephemeridesVersion.value;
+    const list = savedEphemerides.value;
+    return (
+        Array.isArray(list) &&
+        list.some((e) => e && e.visible !== false && Array.isArray(e.points) && e.points.length > 0)
+    );
+});
 
 const toggleApplyTargetFilters = () => {
     const next = !applyTargetFilters.value;
@@ -2947,7 +2963,7 @@ const drawSkyCanvas = () => {
             showHorizon.value ||
             showMeridian.value ||
             showSolarSystem.value ||
-            showEphemeris.value)
+            hasActiveEphemerides.value)
             ? makeHorizontalBasis(loc.lat, loc.lon, effectiveTimeMs.value)
             : null;
 
@@ -3936,7 +3952,7 @@ const drawSkyCanvas = () => {
     }
 
     // 8.6 Ephemeris Trajectory Trails
-    if (showEphemeris.value) {
+    if (hasActiveEphemerides.value) {
         drawEphemerisTrails(ctx, cam, w, h, fov, minPointCos, overlapsPlaced, horizBasis, buildHitItems);
     }
 
@@ -4877,12 +4893,10 @@ watch(
 
 const hasTimeDependentLayers = computed(
     () =>
-        Boolean(observerLocation.value) &&
-        (showHorizon.value ||
-            isHorizonFixed.value ||
-            showMeridian.value ||
-            showSolarSystem.value ||
-            showEphemeris.value)
+        (Boolean(observerLocation.value) &&
+            (showHorizon.value || isHorizonFixed.value || showMeridian.value)) ||
+        showSolarSystem.value ||
+        hasActiveEphemerides.value
 );
 
 watch(skyFrameMode, (nextMode) => {
@@ -4918,7 +4932,7 @@ watch(
         showEphemeris.value,
         ephemeridesVersion.value,
         applyTargetFilters.value,
-        filteredNameSet.value,
+        applyTargetFilters.value ? filteredNameSet.value : null,
         showHorizon.value,
         observerLocation.value?.lat,
         observerLocation.value?.lon,
@@ -4982,7 +4996,7 @@ watch(
         }
         if (changed) {
             refreshReadoutAfterTimeChange();
-            if (hasTimeDependentLayers.value || showSolarSystem.value || showEphemeris.value) {
+            if (hasTimeDependentLayers.value) {
                 scheduleDraw();
             }
         }
@@ -5008,7 +5022,7 @@ onMounted(async () => {
             if (isLiveTime.value) {
                 liveNowMs.value = Date.now();
                 refreshReadoutAfterTimeChange();
-                if (hasTimeDependentLayers.value || showSolarSystem.value || showEphemeris.value) {
+                if (hasTimeDependentLayers.value) {
                     scheduleDraw();
                 }
             }
