@@ -1,144 +1,50 @@
 # My Sky Observer
 
-**My Sky Observer** is a comprehensive, web-based tool designed for astrophotographers and visual observers. It simplifies the process of selecting targets, framing them with your specific equipment, and integrating with your capture software.
+Fast, dark-mode astrophotography target planner, FOV framing assistant, and interactive sky atlas.
 
-![My Sky Observer Screenshot](docs/screenshot.png)
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/mxpwr)
 
-## ✨ Key Features
+![Target View](docs/targetview.png)
+![Sky View](docs/skyview.png)
 
-*   **Advanced Target Planning**:
-    *   Filter objects by **Altitude**, **Visibility Duration** (during astronomical night), **Magnitude**, **Size**, and **Object Type**.
-    *   Sort targets to find the best objects for your specific night and location.
-    *   **Intelligent Infinite Scroll**: Effortlessly browse through thousands of targets with lazy-loading and smart caching, keeping your browser extremely fast and responsive.
-    *   **Cross-Catalog Deduplication**: Seamlessly merges major catalogs (Messier, NGC, IC, etc.) while automatically removing redundant or overlapping entries based on coordinates.
+> **Core Workflow:** Set your location, equipment, and filters, then click **⬇️ Download Filtered** to pre-cache high-res cutouts for all matching targets — enabling instant, zero-lag browsing (online or in the field).
 
-*   **Interactive Framing & Wide-Field Sky Context Map**:
-    *   Visualize your camera and telescope's **Field of View (FOV)** projected onto Deep Sky Survey (DSS) images, alongside multi-profile equipment comparisons.
-    *   **Zoom Out to Wide-Field Sky Map**: Scroll out past `1.0×` (or click **🌌 Sky Map**) to explore constellations, bright stars, nearby deep-sky objects, your local horizon (`Alt = 0°`), minimum-altitude ring, and multi-day / time-of-night sky rotation at 60 FPS.
-    *   **Pre-Baked Sky Sprite Atlas & Instant Previews**: Pack downloaded catalog cutouts into compact `4096×4096` WebP sprite sheets (`sky_atlas_*.webp` + `sky_atlas.json`) for instant 60 FPS wide-field rendering and zero-latency low-res Framing previews while high-resolution (`1024×1024`) cutouts load in the background.
-    *   **Center & Fetch**: Drag the FOV box and click "Update/Center Image" to download a fresh high-resolution slice of the sky perfectly centered on your custom framing.
+## Features
 
-*   **Seamless Integration**:
-    *   **N.I.N.A. Support**: Send target coordinates and rotation directly to N.I.N.A. via its local API for automated slewing and centering. (Works natively and via Docker!).
+- **Target Planning:** Filter thousands of deduplicated catalog DSOs, planets, and comets by altitude, night visibility hours, magnitude, size, type, and favorites.
+- **Night & Ephemeris Console:** Inspect altitude curves, moon illumination/separation, twilight bounds, and custom observing dates or time windows.
+- **Sensor Framing:** Project primary and comparison telescope/camera FOVs with rotation onto cached high-resolution DSS/SDSS cutouts.
+- **60 FPS Sky Map:** Zoom seamlessly from target framing out to an interactive wide-field sky atlas with constellations, horizon rings, and bundled multi-LOD WebP survey tiles.
+- **N.I.N.A. Sync:** Push target coordinates and framing rotation directly to N.I.N.A. (native or via Docker).
+- **Offline Ready:** Bundled sky atlas plus persistent local cache for pre-downloaded cutouts, settings, and favorites.
 
-*   **Offline Capability**:
-    *   Automatically caches downloaded survey images for offline use in the field.
-    *   Persistent settings for location and equipment.
+## Quick Start
 
-*   **User-Friendly Interface**:
-    *   Clean, responsive UI built with **Vue 3** and **PicoCSS**.
-    *   **Dark Mode** optimized for preserving night vision.
-    *   Keyboard navigation support for object lists.
-
-## 🚀 Getting Started
-
-### 🐳 Running with Docker (Recommended)
-
-The easiest and cleanest way to run **My Sky Observer** is using Docker. This ensures you don't need to install Python, Node.js, or any other system-level dependencies.
+### Docker (Recommended)
 
 ```bash
-# Build and start the container in the background
 docker-compose up -d --build
 ```
+Open `http://localhost:8000`.
 
-Access the interface at `http://localhost:8000`.
+### Local (Python 3.10+ & Node.js)
 
-*Note on N.I.N.A. Integration:* The included `docker-compose.yml` automatically sets up the network so the Docker container can talk to N.I.N.A. running on your host Windows machine via `host.docker.internal`.
-
-### 💻 Manual Installation (Local)
-
-**Prerequisites:**
-*   **Python 3.10+**
-*   **Node.js & npm** (for building the frontend)
-
-**Quick Install (Linux / macOS):**
-```bash
-# Installs dependencies and builds the frontend
-./install.sh
-
-# Run the application
-uvicorn backend.main:app --reload
-```
-
-**Quick Install (Windows):**
+**Windows:**
 ```bat
-REM Installs dependencies, builds frontend, and starts the app
 install.bat
 ```
 
-**Step-by-step Local Install:**
-1.  **Backend Setup**:
-    ```bash
-    python -m venv venv
-    source venv/bin/activate  # or venv\Scripts\activate on Windows
-    pip install -r requirements.txt
-    ```
-2.  **Frontend Setup**:
-    ```bash
-    cd frontend
-    npm install
-    npm run build
-    cd ..
-    ```
-
-## 🖥️ Running the Application Locally
-
-If you are not using Docker, you have two options for running the application:
-
-1.  **Browser / Server Mode (Recommended):**
-    ```bash
-    uvicorn backend.main:app --reload
-    ```
-    Access the interface at `http://127.0.0.1:8000`.
-
-2.  **Desktop App Mode:**
-    ```bash
-    python run.py
-    ```
-    This launches the application in a standalone window using `pywebview`.
-
-## 🛠️ Configuration
-
-Settings are automatically stored in `settings_user.yaml`. You can configure:
-*   **Location**: Latitude, Longitude, Elevation (or search by City).
-*   **Equipment**: Focal length, Camera sensor size, Padding preferences.
-*   **Image Servers**: DSS2, SDSS, timeouts, and resolutions.
-
-*Note: All settings should be adjusted directly within the application's UI.*
-
-## 🌌 Pre-Baked Sky Survey Sector Map (Developer CLI)
-
-To generate or refresh the bundled multi-LOD celestial RA/Dec sky survey map (`frontend/public/sky_atlas/`) from downloaded cutouts in `image_cache/` so users get zero-latency 60 FPS zoomed-out sky rendering and instant Framing previews out of the box:
-
+**Linux / macOS:**
 ```bash
-python scripts/build_sky_atlas.py
+./install.sh
+uvicorn backend.main:app --reload
 ```
 
-Because catalog DSOs leave empty voids across ~40% of the celestial sphere, you can fill every remaining uncovered patch (automatically matching your existing tiles' FOV, resolution, and survey source) and rebuild a 100% seamless full-sky atlas in one step:
+- **Web UI:** `uvicorn backend.main:app --reload` (`http://127.0.0.1:8000`)
+- **Desktop Window:** `python run.py`
+- **Dev & Tests:** `cd frontend && npm run dev` · `pytest`
 
-```bash
-# Preview missing patch count first
-python scripts/fill_sky_gaps.py --cache-dir ./image_cache --dry-run
+## License
 
-# Download all missing patches (Ctrl+C resumable) and rebuild sky_atlas
-python scripts/fill_sky_gaps.py --cache-dir ./image_cache
-```
-
-This composites overlapping cutouts onto a seamless 3-tier multi-LOD spherical sector pyramid (`LOD 0` `~12.85°` wide-sky, `LOD 1` `6°` mid-field, and `LOD 2` `3°` close-up WebP sheets `sky_atlas_lod*.webp` + `sky_atlas.json` and `LICENSE-ASSETS.md`) inside `frontend/public/sky_atlas/`.
-
-## 🤝 Contributing
-
-We welcome contributions!
-
-1.  **Development Mode**:
-    *   Run the backend: `uvicorn backend.main:app --reload`
-    *   Run the frontend (hot-reload): `cd frontend && npm run dev`
-
-2.  **Testing**:
-    *   Backend tests are located in `test/`. Run them using `pytest`.
-    *   Ensure all tests pass before submitting a pull request.
-
-## 📄 License & Sky Survey Attribution
-
-*   **Source Code ([MIT License](LICENSE)):** All application source code in this repository is licensed under the MIT License.
-*   **Sky Survey Image Assets ([CC BY-NC-SA 4.0](LICENSE-ASSETS.md)):** Any pre-baked Digitized Sky Survey (DSS / DSS2) sprite sheets under `frontend/public/sky_atlas/` are courtesy of STScI / Caltech (POSS-II) / UKST / AAO / NASA HEASARC *SkyView* and are licensed for non-commercial open-source, educational, and scientific use under **CC BY-NC-SA 4.0** — see [LICENSE-ASSETS.md](LICENSE-ASSETS.md) for full terms and required attribution. Commercial distributions should either obtain permission from STScI or omit `frontend/public/sky_atlas/`.
+- **Code:** [MIT License](LICENSE)
+- **Bundled Sky Atlas (`frontend/public/sky_atlas/`):** [CC BY-NC-SA 4.0](LICENSE-ASSETS.md) — Digitized Sky Survey (STScI / Caltech / UKST / AAO / NASA HEASARC *SkyView*).
