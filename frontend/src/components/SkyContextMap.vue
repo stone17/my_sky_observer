@@ -1753,6 +1753,9 @@ const handleConsoleTimeUpdate = (payload) => {
         return;
     }
     refreshReadoutAfterTimeChange();
+    if (showSolarSystem.value) {
+        triggerDebouncedSolarSystemFetch();
+    }
     scheduleDraw();
 };
 
@@ -4936,6 +4939,12 @@ watch(
         }
     }
 );
+
+watch(effectiveTimeMs, (newTime, oldTime) => {
+    if (showSolarSystem.value && Math.abs((newTime || 0) - (oldTime || 0)) >= 1000) {
+        triggerDebouncedSolarSystemFetch();
+    }
+});
 
 watch(skyAtlasVersion, () => {
     scheduleDraw();
