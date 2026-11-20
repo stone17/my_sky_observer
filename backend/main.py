@@ -244,61 +244,19 @@ def get_solar_system_positions_endpoint(
 
 @app.get("/api/ephemeris/search")
 async def search_ephemeris_objects(q: str):
-    query = q.strip()
-    if not query or len(query) < 2:
-        return JSONResponse(content=[])
-
-    presets = [
-        {
-            "id": "c2023a3",
-            "name": "C/2023 A3 (Tsuchinshan-ATLAS)",
-            "type": "Comet",
-            "command": "DES = C/2023 A3",
-        },
-        {
-            "id": "12p",
-            "name": "12P/Pons-Brooks",
-            "type": "Comet",
-            "command": "12P",
-        },
-        {"id": "1p", "name": "1P/Halley", "type": "Comet", "command": "1P"},
-        {"id": "1ceres", "name": "1 Ceres", "type": "Asteroid", "command": "1;"},
-        {"id": "4vesta", "name": "4 Vesta", "type": "Asteroid", "command": "4;"},
-        {"id": "433eros", "name": "433 Eros", "type": "Asteroid", "command": "433;"},
-        {
-            "id": "999pluto",
-            "name": "999 Pluto",
-            "type": "Dwarf Planet",
-            "command": "999",
-        },
-    ]
-
-    matches = [
-        p
-        for p in presets
-        if query.lower() in p["name"].lower()
-        or query.lower() in p["command"].lower()
-    ]
-
-    if not matches:
-        matches.append({
-            "id": f"custom_{query}",
-            "name": f"JPL Search: '{query}'",
-            "type": "Solar System Body / Small Body",
-            "command": query,
-        })
-
+    matches = await calculator.search_horizons_objects(q)
     return JSONResponse(content=matches)
 
 
 @app.post("/api/ephemeris/download")
 async def download_ephemeris_endpoint(request: Request):
     data = await request.json()
-    object_name = data.get("object_name", "").strip()
-    command = data.get("command", "").strip()
-    start_time = data.get("start_time", "").strip()
-    stop_time = data.get("stop_time", "").strip()
-    step_hours = int(data.get("step_hours", 6))
+    object_name = str(data.get("object_name", "")).strip()
+    command = str(data.get("command", "")).strip()
+    start_time = str(data.get("start_time", "")).strip()
+    stop_time = str(data.get("stop_time", "")).strip()
+    step_hours = int(data.get("step_hours", 12))
+    color = str(data.get("color", "#10B981")).strip() or "#10B981"
 
     if not command and not object_name:
         raise HTTPException(
@@ -312,7 +270,7 @@ async def download_ephemeris_endpoint(request: Request):
     elevation = float(data.get("elevation", loc.get("elevation", 0.0)))
 
     try:
-        ephem_data = calculator.fetch_horizons_ephemeris(
+        ephem_data = await calculator.fetch_horizons_ephemeris(
             command=command,
             object_name=object_name,
             start_time_str=start_time,
@@ -321,10 +279,16 @@ async def download_ephemeris_endpoint(request: Request):
             lat=lat,
             lon=lon,
             elevation=elevation,
+            color=color,
         )
 
         ephems = load_ephemerides()
-        ephems = [e for e in ephems if e.get("id") != ephem_data["id"]]
+        ephems = [
+            e
+            for e in ephems
+            if e.get("id") != ephem_data["id"]
+            and e.get("command") != ephem_data["command"]
+        ]
         ephems.append(ephem_data)
         save_ephemerides(ephems)
 
@@ -341,6 +305,27 @@ async def download_ephemeris_endpoint(request: Request):
 def list_ephemerides_endpoint():
     ephems = load_ephemerides()
     return JSONResponse(content=ephems)
+
+
+@app.patch("/api/ephemeris/{ephem_id}")
+async def update_ephemeris_endpoint(ephem_id: str, request: Request):
+    patch = await request.json()
+    ephems = load_ephemerides()
+    target = None
+    for item in ephems:
+        if item.get("id") == ephem_id:
+            if "visible" in patch:
+                item["visible"] = bool(patch["visible"])
+            if "color" in patch and isinstance(patch["color"], str) and patch["color"].strip():
+                item["color"] = patch["color"].strip()
+            if "name" in patch and isinstance(patch["name"], str) and patch["name"].strip():
+                item["name"] = patch["name"].strip()
+            target = item
+            break
+    if target is None:
+        raise HTTPException(status_code=404, detail="Ephemeris not found")
+    save_ephemerides(ephems)
+    return JSONResponse(content=target)
 
 
 @app.delete("/api/ephemeris/{ephem_id}")

@@ -1,3 +1,4 @@
+import csv
 import io
 import math
 import re
@@ -19,6 +20,9 @@ from .models import AltitudePoint, Camera, Location, Telescope
 
 class AstroCalculator:
     """Performs astronomical calculations."""
+
+    def __init__(self):
+        self._solar_system_cache = {}
 
     def calculate_fov(
         self, telescope: Telescope, camera: Camera
@@ -731,10 +735,16 @@ class AstroCalculator:
         time_str: Optional[str] = None,
     ) -> List[dict]:
         """Calculates topocentric positions for Moon, Sun, and planets."""
+        t = Time(time_str) if time_str else Time.now()
+        time_bucket = int(t.unix // 10) * 10
+        cache_key = (round(float(lat), 3), round(float(lon), 3), round(float(elevation), 1), time_bucket)
+
+        if hasattr(self, "_solar_system_cache") and cache_key in self._solar_system_cache:
+            return self._solar_system_cache[cache_key]
+
         location = EarthLocation(
             lat=lat * u.deg, lon=lon * u.deg, height=elevation * u.m
         )
-        t = Time(time_str) if time_str else Time.now()
         altaz_frame = AltAz(obstime=t, location=location)
 
         sun_gcrs = get_sun(t)
@@ -743,26 +753,42 @@ class AstroCalculator:
         moon_gcrs = get_body("moon", t, location=location)
         moon_altaz = moon_gcrs.transform_to(altaz_frame)
         sep_deg = float(sun_gcrs.separation(moon_gcrs).deg)
+        phase_angle_deg = max(0.0, 180.0 - sep_deg)
         ill_frac = float(0.5 * (1.0 - np.cos(np.radians(sep_deg))))
 
-        if sep_deg < 15:
+        # Determine waxing vs waning from geocentric ecliptic longitude difference (0..360 deg)
+        eps_rad = np.radians(23.439291)
+        cos_eps, sin_eps = np.cos(eps_rad), np.sin(eps_rad)
+
+        def _eq_to_ecl_lon_deg(sc) -> float:
+            ra_r = np.radians(float(sc.ra.deg))
+            dec_r = np.radians(float(sc.dec.deg))
+            x = np.cos(dec_r) * np.cos(ra_r)
+            y = cos_eps * np.cos(dec_r) * np.sin(ra_r) + sin_eps * np.sin(dec_r)
+            return float(np.degrees(np.arctan2(y, x)) % 360.0)
+
+        dlon_synodic = (_eq_to_ecl_lon_deg(moon_gcrs) - _eq_to_ecl_lon_deg(sun_gcrs)) % 360.0
+        if dlon_synodic < 12.0 or dlon_synodic >= 348.0:
             phase_name = "New Moon"
-        elif sep_deg < 75:
+        elif dlon_synodic < 78.0:
             phase_name = "Waxing Crescent"
-        elif sep_deg < 105:
+        elif dlon_synodic < 102.0:
             phase_name = "First Quarter"
-        elif sep_deg < 165:
+        elif dlon_synodic < 168.0:
             phase_name = "Waxing Gibbous"
-        elif sep_deg < 195:
+        elif dlon_synodic < 192.0:
             phase_name = "Full Moon"
-        elif sep_deg < 255:
+        elif dlon_synodic < 258.0:
             phase_name = "Waning Gibbous"
-        elif sep_deg < 285:
+        elif dlon_synodic < 282.0:
             phase_name = "Third Quarter"
         else:
             phase_name = "Waning Crescent"
 
-        moon_mag = -12.7 + 2.5 * np.log10(max(0.01, 1.0 - ill_frac * 0.9))
+        moon_mag = min(
+            -2.5,
+            -12.73 + 0.026 * phase_angle_deg + 4e-9 * (phase_angle_deg ** 4),
+        )
 
         bodies_config = [
             ("sun", "Sun", "☀️", "#FFD700", -26.74, sun_gcrs, sun_altaz),
@@ -822,15 +848,15 @@ class AstroCalculator:
             except Exception as e:
                 print(f"Error calculating planet {b_id}: {e}")
 
-        # Pluto GCRS approximation / fallback if astropy get_body doesn't have Pluto ephem
+        # Pluto GCRS calculation with Standish (1800-2050) Keplerian fallback
         try:
             p_gcrs = get_body("pluto", t, location=location)
             p_altaz = p_gcrs.transform_to(altaz_frame)
             results.append({
                 "id": "pluto",
                 "name": "Pluto",
-                "symbol": "⚪",
-                "color": "#CBD5E1",
+                "symbol": "♇",
+                "color": "#94A3B8",
                 "ra": round(float(p_gcrs.ra.deg), 5),
                 "dec": round(float(p_gcrs.dec.deg), 5),
                 "alt": round(float(p_altaz.alt.deg), 2),
@@ -839,27 +865,188 @@ class AstroCalculator:
                 "distance_au": round(float(p_gcrs.distance.au), 4),
             })
         except Exception:
-            # Fallback approximate topocentric position for Pluto around 2026
+            t_cent = (float(t.jd) - 2451545.0) / 36525.0
+            a_p = 39.48211675 - 0.00031596 * t_cent
+            e_p = 0.24882730 + 0.00005170 * t_cent
+            i_p = math.radians(17.14001206 + 0.00004818 * t_cent)
+            l_p = 238.92903833 + 145.20780515 * t_cent
+            wbar_p = 224.06891629 - 0.04062942 * t_cent
+            node_p = math.radians(110.30393684 - 0.01183482 * t_cent)
+            arg_peri_p = math.radians((wbar_p - math.degrees(node_p)) % 360.0)
+            m_rad = math.radians((l_p - wbar_p) % 360.0)
+            ecc_anom = m_rad + e_p * math.sin(m_rad)
+            for _ in range(4):
+                ecc_anom -= (ecc_anom - e_p * math.sin(ecc_anom) - m_rad) / (
+                    1.0 - e_p * math.cos(ecc_anom)
+                )
+            xv = a_p * (math.cos(ecc_anom) - e_p)
+            yv = a_p * math.sqrt(1.0 - e_p * e_p) * math.sin(ecc_anom)
+            r_helio = math.hypot(xv, yv)
+            vw = math.atan2(yv, xv) + arg_peri_p
+            xh = r_helio * (
+                math.cos(node_p) * math.cos(vw)
+                - math.sin(node_p) * math.sin(vw) * math.cos(i_p)
+            )
+            yh = r_helio * (
+                math.sin(node_p) * math.cos(vw)
+                + math.cos(node_p) * math.sin(vw) * math.cos(i_p)
+            )
+            zh = r_helio * (math.sin(vw) * math.sin(i_p))
+            sun_cart = sun_gcrs.cartesian
+            xe = xh + float(sun_cart.x.to_value(u.au))
+            ye = yh * cos_eps - zh * sin_eps + float(sun_cart.y.to_value(u.au))
+            ze = yh * sin_eps + zh * cos_eps + float(sun_cart.z.to_value(u.au))
+            dist_au = math.sqrt(xe * xe + ye * ye + ze * ze)
+            ra_p = math.degrees(math.atan2(ye, xe)) % 360.0
+            dec_p = math.degrees(math.asin(max(-1.0, min(1.0, ze / dist_au))))
             pluto_target = SkyCoord(
-                ra=306.337 * u.deg, dec=-23.633 * u.deg, distance=35.1 * u.au
+                ra=ra_p * u.deg, dec=dec_p * u.deg, distance=dist_au * u.au
             )
             p_altaz = pluto_target.transform_to(altaz_frame)
             results.append({
                 "id": "pluto",
                 "name": "Pluto",
-                "symbol": "⚪",
-                "color": "#CBD5E1",
-                "ra": 306.337,
-                "dec": -23.633,
+                "symbol": "♇",
+                "color": "#94A3B8",
+                "ra": round(ra_p, 5),
+                "dec": round(dec_p, 5),
                 "alt": round(float(p_altaz.alt.deg), 2),
                 "az": round(float(p_altaz.az.deg), 2),
-                "mag": 14.4,
-                "distance_au": 35.1,
+                "mag": round(-1.0 + 5.0 * math.log10(max(1.0, r_helio * dist_au)), 1),
+                "distance_au": round(dist_au, 4),
+            })
+
+        if not hasattr(self, "_solar_system_cache"):
+            self._solar_system_cache = {}
+
+        if len(self._solar_system_cache) > 500:
+            keys = list(self._solar_system_cache.keys())
+            for k in keys[:250]:
+                del self._solar_system_cache[k]
+
+        self._solar_system_cache[cache_key] = results
+        return results
+
+    async def search_horizons_objects(self, query: str) -> List[dict]:
+        """Searches NASA JPL Horizons Lookup API for comets, asteroids, planets, and spacecraft."""
+        q = query.strip()
+        if len(q) < 2:
+            return []
+
+        presets = [
+            {
+                "id": "c2023a3",
+                "name": "C/2023 A3 (Tsuchinshan-ATLAS)",
+                "type": "Comet",
+                "command": "DES=C/2023 A3;CAP",
+            },
+            {
+                "id": "12p",
+                "name": "12P/Pons-Brooks",
+                "type": "Comet",
+                "command": "12P;CAP",
+            },
+            {
+                "id": "1p",
+                "name": "1P/Halley",
+                "type": "Comet",
+                "command": "1P;CAP",
+            },
+            {
+                "id": "1ceres",
+                "name": "1 Ceres",
+                "type": "Dwarf Planet / Asteroid",
+                "command": "1;",
+            },
+            {
+                "id": "4vesta",
+                "name": "4 Vesta",
+                "type": "Asteroid",
+                "command": "4;",
+            },
+            {
+                "id": "433eros",
+                "name": "433 Eros",
+                "type": "NEO Asteroid",
+                "command": "433;",
+            },
+            {
+                "id": "99942apophis",
+                "name": "99942 Apophis",
+                "type": "NEO Asteroid",
+                "command": "99942;",
+            },
+            {
+                "id": "jwst",
+                "name": "James Webb Space Telescope (JWST)",
+                "type": "Spacecraft",
+                "command": "-170",
+            },
+        ]
+
+        results: List[dict] = []
+        seen_commands = set()
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    "https://ssd.jpl.nasa.gov/api/horizons_lookup.api",
+                    params={"sstr": q, "format": "json"},
+                )
+            if resp.status_code == 200:
+                payload = resp.json()
+                raw_items = payload.get("result") or []
+                for item in raw_items[:20]:
+                    name = str(item.get("name") or "").strip()
+                    obj_type = str(item.get("type") or "Small Body").strip().title()
+                    spkid = str(item.get("spkid") or "").strip()
+                    pdes = str(item.get("pdes") or "").strip()
+                    type_lower = obj_type.lower()
+
+                    if "comet" in type_lower:
+                        cmd = f"DES={spkid};CAP" if spkid else f"DES={pdes};CAP"
+                    elif "asteroid" in type_lower:
+                        if pdes and pdes.isdigit():
+                            cmd = f"{pdes};"
+                        elif spkid:
+                            cmd = f"DES={spkid};"
+                        else:
+                            cmd = f"DES={pdes};"
+                    else:
+                        cmd = spkid or pdes or name
+
+                    if not cmd or cmd in seen_commands:
+                        continue
+                    seen_commands.add(cmd)
+                    results.append({
+                        "id": spkid or cmd,
+                        "name": name or cmd,
+                        "type": obj_type,
+                        "command": cmd,
+                    })
+        except Exception as exc:
+            print(f"JPL Horizons lookup warning for '{q}': {exc}")
+
+        q_lower = q.lower()
+        for preset in presets:
+            if (
+                q_lower in preset["name"].lower()
+                or q_lower in preset["command"].lower()
+            ) and preset["command"] not in seen_commands:
+                seen_commands.add(preset["command"])
+                results.append(preset)
+
+        if not results:
+            results.append({
+                "id": f"custom_{q}",
+                "name": q,
+                "type": "Direct JPL Command",
+                "command": q,
             })
 
         return results
 
-    def fetch_horizons_ephemeris(
+    async def fetch_horizons_ephemeris(
         self,
         command: str,
         object_name: str,
@@ -869,137 +1056,177 @@ class AstroCalculator:
         lat: float,
         lon: float,
         elevation: float = 0.0,
+        color: str = "#10B981",
     ) -> dict:
-        """Queries JPL Horizons API for ephemeris trajectories."""
-        location = EarthLocation(
-            lat=lat * u.deg, lon=lon * u.deg, height=elevation * u.m
-        )
+        """Queries JPL Horizons API asynchronously using CSV + decimal-degree format."""
         url = "https://ssd.jpl.nasa.gov/api/horizons.api"
 
         def format_jpl_time(t_input: str) -> str:
+            raw = t_input.strip()
             try:
-                if "T" in t_input:
-                    dt = datetime.fromisoformat(t_input.replace("Z", "+00:00"))
+                if "T" in raw:
+                    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                elif len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
+                    dt = datetime.strptime(raw, "%Y-%m-%d")
                 else:
-                    dt = datetime.strptime(t_input.strip(), "%Y-%m-%d %H:%M")
+                    dt = datetime.strptime(raw, "%Y-%m-%d %H:%M")
                 return dt.strftime("%Y-%b-%d %H:%M")
             except Exception:
-                return t_input.strip()
+                return raw
 
         start_jpl = format_jpl_time(start_time_str)
         stop_jpl = format_jpl_time(stop_time_str)
+        if start_jpl == stop_jpl:
+            # Ensure non-zero interval when user picks same start/stop calendar date
+            try:
+                dt0 = datetime.strptime(start_jpl, "%Y-%b-%d %H:%M")
+                stop_jpl = (dt0 + timedelta(days=1)).strftime("%Y-%b-%d %H:%M")
+            except Exception:
+                pass
 
-        cmd = command.strip() if command.strip() else object_name.strip()
+        base_cmd = command.strip() if command.strip() else object_name.strip()
+        step_h = max(1, int(step_hours))
 
-        params = {
-            "format": "json",
-            "COMMAND": f"'{cmd}'",
-            "OBJ_DATA": "NO",
-            "MAKE_EPHEM": "YES",
-            "EPHEM_TYPE": "OBSERVER",
-            "CENTER": "coord@399",
-            "COORD_TYPE": "GEODETIC",
-            "SITE_COORD": f"'{lon},{lat},{elevation / 1000.0}'",
-            "START_TIME": f"'{start_jpl}'",
-            "STOP_TIME": f"'{stop_jpl}'",
-            "STEP_SIZE": f"'{step_hours}h'",
-            "QUANTITIES": "'1,9,20'",
-        }
+        async def _query_horizons(cmd_str: str) -> str:
+            params = {
+                "format": "json",
+                "COMMAND": f"'{cmd_str}'",
+                "OBJ_DATA": "NO",
+                "MAKE_EPHEM": "YES",
+                "EPHEM_TYPE": "OBSERVER",
+                "CENTER": "coord@399",
+                "COORD_TYPE": "GEODETIC",
+                "SITE_COORD": f"'{lon},{lat},{elevation / 1000.0}'",
+                "START_TIME": f"'{start_jpl}'",
+                "STOP_TIME": f"'{stop_jpl}'",
+                "STEP_SIZE": f"'{step_h}h'",
+                "QUANTITIES": "'1,9,20'",
+                "CSV_FORMAT": "YES",
+                "ANG_FORMAT": "DEG",
+            }
+            async with httpx.AsyncClient(timeout=25.0) as client:
+                resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                raise ValueError(f"JPL Horizons returned HTTP {resp.status_code}")
+            return resp.json().get("result", "")
 
-        resp = httpx.get(url, params=params, timeout=20.0)
-        if resp.status_code != 200:
-            raise ValueError(f"JPL Horizons returned status {resp.status_code}")
+        raw_text = await _query_horizons(base_cmd)
+        used_cmd = base_cmd
 
-        res_json = resp.json()
-        raw_text = res_json.get("result", "")
+        # Auto-retry with ;CAP if a comet designation returned a multi-apparition table
+        if "$$SOE" not in raw_text and not base_cmd.upper().endswith("CAP"):
+            if "Multiple major-bodies" not in raw_text and (
+                "record #" in raw_text.lower() or "comet" in raw_text.lower() or "/" in base_cmd
+            ):
+                sep = "" if base_cmd.endswith(";") else ";"
+                retry_cmd = f"{base_cmd}{sep}CAP"
+                retry_text = await _query_horizons(retry_cmd)
+                if "$$SOE" in retry_text:
+                    raw_text = retry_text
+                    used_cmd = retry_cmd
 
         soe_idx = raw_text.find("$$SOE")
         eoe_idx = raw_text.find("$$EOE")
 
         if soe_idx == -1 or eoe_idx == -1:
-            first_lines = raw_text[:600]
+            lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
+            summary = "\n".join(lines[:14])
             raise ValueError(
-                f"No trajectory generated by JPL Horizons for '{cmd}'. Response snippet:\n{first_lines}"
+                f"Ambiguous or unrecognized JPL Horizons target '{base_cmd}'. "
+                f"Please pick a specific match from Search.\n{summary}"
             )
+
+        # Locate CSV column header immediately preceding $$SOE
+        pre_lines = [
+            ln.strip()
+            for ln in raw_text[:soe_idx].splitlines()
+            if ln.strip() and not ln.strip().startswith("*")
+        ]
+        header_cols = []
+        if pre_lines:
+            header_cols = [c.strip().lower() for c in next(csv.reader([pre_lines[-1]]))]
+
+        def _find_col(prefixes: Tuple[str, ...], default_idx: int) -> int:
+            for idx, col_name in enumerate(header_cols):
+                if any(col_name.startswith(p) for p in prefixes):
+                    return idx
+            return default_idx
+
+        ra_idx = _find_col(("r.a.", "ra"), 3)
+        dec_idx = _find_col(("dec",), 4)
+        mag_idx = _find_col(("apmag", "t-mag", "v-mag"), 5)
+        delta_idx = _find_col(("delta",), 7)
+
+        # Extract target full name from Horizons header if user didn't supply a custom one
+        resolved_title = object_name.strip()
+        m_title = re.search(r"Target body name:\s*([^\r\n{]+)", raw_text)
+        if m_title and (not resolved_title or resolved_title == base_cmd):
+            resolved_title = m_title.group(1).strip()
 
         ephem_segment = raw_text[soe_idx + 5 : eoe_idx].strip()
-        line_pattern = re.compile(
-            r"(\d{4}-[A-Za-z]{3}-\d{2}\s+\d{2}:\d{2})\s+[\*A-Za-z\s]{1,4}\s*(\d{2}\s+\d{2}\s+\d{2}\.\d+)\s+([+-]?\d{2}\s+\d{2}\s+\d{2}\.\d+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)"
-        )
-
-        def parse_hms(hms_str: str) -> float:
-            parts = hms_str.strip().split()
-            return (
-                float(parts[0]) + float(parts[1]) / 60.0 + float(parts[2]) / 3600.0
-            ) * 15.0
-
-        def parse_dms(dms_str: str) -> float:
-            dms_str = dms_str.strip()
-            sign = -1.0 if dms_str.startswith("-") else 1.0
-            clean = dms_str.lstrip("+-")
-            parts = clean.split()
-            return sign * (
-                float(parts[0]) + float(parts[1]) / 60.0 + float(parts[2]) / 3600.0
-            )
-
         points = []
-        times_astropy = []
-        coords_astropy = []
 
-        for line in ephem_segment.split("\n"):
-            m = line_pattern.search(line)
-            if not m:
+        for row in csv.reader(ephem_segment.splitlines()):
+            if not row or len(row) <= max(ra_idx, dec_idx):
                 continue
-            t_str, ra_str, dec_str, mag_str, _sbrt_str, dist_str = m.groups()
+            t_str = row[0].strip()
+            ra_str = row[ra_idx].strip()
+            dec_str = row[dec_idx].strip()
+            if not t_str or not ra_str or not dec_str:
+                continue
+
             try:
                 dt = datetime.strptime(t_str, "%Y-%b-%d %H:%M").replace(
                     tzinfo=timezone.utc
                 )
-                iso_time = dt.isoformat()
-                ra_deg = round(parse_hms(ra_str), 5)
-                dec_deg = round(parse_dms(dec_str), 5)
-                mag = float(mag_str) if mag_str != "n.a." else None
-                dist = float(dist_str) if dist_str != "n.a." else None
+                ra_deg = round(float(ra_str) % 360.0, 5)
+                dec_deg = round(float(dec_str), 5)
 
-                times_astropy.append(Time(dt))
-                coords_astropy.append(
-                    SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg)
-                )
+                mag_val = None
+                if mag_idx < len(row):
+                    m_raw = row[mag_idx].strip()
+                    if m_raw and m_raw.lower() != "n.a.":
+                        try:
+                            mag_val = round(float(m_raw), 2)
+                        except ValueError:
+                            mag_val = None
+
+                dist_val = None
+                if delta_idx < len(row):
+                    d_raw = row[delta_idx].strip()
+                    if d_raw and d_raw.lower() != "n.a.":
+                        try:
+                            dist_val = round(float(d_raw), 5)
+                        except ValueError:
+                            dist_val = None
 
                 points.append({
-                    "time": iso_time,
+                    "time": dt.isoformat(),
                     "display_time": dt.strftime("%b %d %H:%M UT"),
                     "ra": ra_deg,
                     "dec": dec_deg,
-                    "mag": mag,
-                    "distance_au": dist,
+                    "mag": mag_val,
+                    "distance_au": dist_val,
                 })
             except Exception:
                 continue
 
         if not points:
-            raise ValueError("Failed to parse trajectory points from JPL Horizons.")
+            raise ValueError("Failed to parse ephemeris points from JPL Horizons response.")
 
-        altaz_frame = AltAz(obstime=times_astropy, location=location)
-        sky_coords = SkyCoord(coords_astropy)
-        target_altaz = sky_coords.transform_to(altaz_frame)
-        alts = target_altaz.alt.deg
-        azs = target_altaz.az.deg
-
-        for i in range(len(points)):
-            points[i]["alt"] = round(float(alts[i]), 2)
-            points[i]["az"] = round(float(azs[i]), 2)
-
+        clean_color = color.strip() if isinstance(color, str) and color.strip() else "#10B981"
         ephem_id = str(uuid.uuid4())[:8]
-        display_name = object_name.strip() if object_name.strip() else cmd
+        display_name = resolved_title or used_cmd
 
         return {
             "id": ephem_id,
             "name": display_name,
-            "command": cmd,
+            "command": used_cmd,
+            "color": clean_color,
+            "visible": True,
             "start_time": points[0]["time"],
             "stop_time": points[-1]["time"],
-            "step_hours": step_hours,
+            "step_hours": step_h,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "points": points,
         }

@@ -7,6 +7,24 @@ import {
     getObjectTypeIcon,
     getObjectTypeDescription
 } from '../utils/catalogMeta.js';
+import {
+    skyFrameMode,
+    showHorizon,
+    showMeridian,
+    showSolarSystem,
+    showEphemeris,
+    showCachedPhotos,
+    showConstellations,
+    showDsos,
+    applyTargetFilters,
+    showGrid,
+    openEphemerisModal,
+    savedEphemerides,
+    ensureEphemeridesLoaded,
+    interpolateEphemerisAtTime,
+    locateInSkyView,
+    updateEphemerisItem
+} from '../utils/skyViewOptions.js';
 
 const props = defineProps({
     settings: Object,
@@ -56,6 +74,10 @@ const props = defineProps({
     showMobileList: {
         type: Boolean,
         default: false
+    },
+    effectiveObsTimeMs: {
+        type: Number,
+        default: 0
     }
 });
 
@@ -76,67 +98,28 @@ const activeTab = ref(props.activeTab); // 'filters' | 'equipment' | 'location' 
 
 watch(() => props.activeTab, (newVal) => {
     activeTab.value = newVal;
+    if (newVal === 'sky') {
+        ensureEphemeridesLoaded();
+    }
 });
 
-// Sky View Storage Keys & Options State
-const SKY_SHOW_SOLAR_SYSTEM_STORAGE_KEY = 'sky_observer_show_solar_system_v1';
-const SKY_SHOW_EPHEMERIS_STORAGE_KEY = 'sky_observer_show_ephemeris_v1';
-const SKY_SHOW_MERIDIAN_STORAGE_KEY = 'sky_observer_show_meridian_v1';
-const SKY_SHOW_GRID_STORAGE_KEY = 'sky_observer_show_grid_v1';
-const SKY_SHOW_CONSTELLATIONS_STORAGE_KEY = 'sky_observer_show_constellations_v1';
-const SKY_SHOW_DSOS_STORAGE_KEY = 'sky_observer_show_dsos_v1';
-const SKY_SHOW_PHOTOS_STORAGE_KEY = 'sky_observer_show_photos_v1';
-const SKY_SHOW_HORIZON_STORAGE_KEY = 'sky_observer_show_horizon_v1';
-const SKY_FRAME_MODE_STORAGE_KEY = 'sky_observer_sky_frame_mode_v1';
-
-const readSavedBool = (key, defaultVal = true) => {
-    try {
-        const val = window.localStorage?.getItem(key);
-        if (val === '0') return false;
-        if (val === '1') return true;
-    } catch {}
-    return defaultVal;
-};
-
-const persistBool = (key, val) => {
-    try {
-        window.localStorage?.setItem(key, val ? '1' : '0');
-        window.dispatchEvent(new CustomEvent('sky-options-updated'));
-    } catch {}
-};
-
-const skyShowSolarSystem = ref(readSavedBool(SKY_SHOW_SOLAR_SYSTEM_STORAGE_KEY, true));
-const skyShowEphemeris = ref(readSavedBool(SKY_SHOW_EPHEMERIS_STORAGE_KEY, true));
-const skyShowMeridian = ref(readSavedBool(SKY_SHOW_MERIDIAN_STORAGE_KEY, false));
-const skyShowGrid = ref(readSavedBool(SKY_SHOW_GRID_STORAGE_KEY, true));
-const skyShowConstellations = ref(readSavedBool(SKY_SHOW_CONSTELLATIONS_STORAGE_KEY, true));
-const skyShowDsos = ref(readSavedBool(SKY_SHOW_DSOS_STORAGE_KEY, true));
-const skyShowPhotos = ref(readSavedBool(SKY_SHOW_PHOTOS_STORAGE_KEY, true));
-const skyShowHorizon = ref(readSavedBool(SKY_SHOW_HORIZON_STORAGE_KEY, true));
-const skyFrameMode = ref(window.localStorage?.getItem(SKY_FRAME_MODE_STORAGE_KEY) || 'sky');
-
-const syncSkyOptionsFromStorage = () => {
-    skyShowSolarSystem.value = readSavedBool(SKY_SHOW_SOLAR_SYSTEM_STORAGE_KEY, true);
-    skyShowEphemeris.value = readSavedBool(SKY_SHOW_EPHEMERIS_STORAGE_KEY, true);
-    skyShowMeridian.value = readSavedBool(SKY_SHOW_MERIDIAN_STORAGE_KEY, false);
-    skyShowGrid.value = readSavedBool(SKY_SHOW_GRID_STORAGE_KEY, true);
-    skyShowConstellations.value = readSavedBool(SKY_SHOW_CONSTELLATIONS_STORAGE_KEY, true);
-    skyShowDsos.value = readSavedBool(SKY_SHOW_DSOS_STORAGE_KEY, true);
-    skyShowPhotos.value = readSavedBool(SKY_SHOW_PHOTOS_STORAGE_KEY, true);
-    skyShowHorizon.value = readSavedBool(SKY_SHOW_HORIZON_STORAGE_KEY, true);
-    skyFrameMode.value = window.localStorage?.getItem(SKY_FRAME_MODE_STORAGE_KEY) || 'sky';
-};
-
 const setSkyFrameMode = (mode) => {
-    skyFrameMode.value = mode;
-    try {
-        window.localStorage?.setItem(SKY_FRAME_MODE_STORAGE_KEY, mode);
-        window.dispatchEvent(new CustomEvent('sky-options-updated'));
-    } catch {}
+    skyFrameMode.value = mode === 'horizon' ? 'horizon' : 'sky';
 };
 
-const openEphemerisModal = () => {
-    window.dispatchEvent(new CustomEvent('open-ephemeris-modal'));
+const handleQuickLocateEphemeris = (ephem) => {
+    if (!ephem) return;
+    if (ephem.visible === false) {
+        updateEphemerisItem(ephem.id, { visible: true });
+    }
+    showEphemeris.value = true;
+    const tMs = Number.isFinite(props.effectiveObsTimeMs) && props.effectiveObsTimeMs > 0
+        ? props.effectiveObsTimeMs
+        : Date.now();
+    const pos = interpolateEphemerisAtTime(ephem, tMs);
+    if (pos) {
+        locateInSkyView(pos.ra, pos.dec, ephem.name, 25.0);
+    }
 };
 
 const onOpenLeftTab = (e) => {
@@ -270,17 +253,16 @@ onMounted(() => {
     fetchProfiles();
     fetchPresets();
     fetchCacheStatus();
+    ensureEphemeridesLoaded();
     // Collapse by default on narrow screens
     if (window.innerWidth <= 1024) {
         activeTab.value = null;
     }
     const interval = setInterval(fetchCacheStatus, 10000);
     window.addEventListener('open-left-tab', onOpenLeftTab);
-    window.addEventListener('sky-options-updated', syncSkyOptionsFromStorage);
     onUnmounted(() => {
         clearInterval(interval);
         window.removeEventListener('open-left-tab', onOpenLeftTab);
-        window.removeEventListener('sky-options-updated', syncSkyOptionsFromStorage);
     });
 });
 
@@ -1097,36 +1079,62 @@ const activeFiltersCount = computed(() => {
                     <!-- Solar System & Ephemerides -->
                     <div class="section-card">
                         <div class="section-title-row">
-                            <h4>☀️ Solar System & Objects</h4>
+                            <h4>☀️ Solar System &amp; Objects</h4>
                         </div>
                         <div class="threshold-item">
                             <label class="toggle-label">
-                                <input
-                                    type="checkbox"
-                                    v-model="skyShowSolarSystem"
-                                    @change="persistBool(SKY_SHOW_SOLAR_SYSTEM_STORAGE_KEY, skyShowSolarSystem)"
-                                />
-                                <span>Sun, Moon & Planets</span>
+                                <input type="checkbox" v-model="showSolarSystem" />
+                                <span>Sun, Moon &amp; Planets</span>
                             </label>
                         </div>
                         <div class="threshold-item">
                             <label class="toggle-label">
-                                <input
-                                    type="checkbox"
-                                    v-model="skyShowEphemeris"
-                                    @change="persistBool(SKY_SHOW_EPHEMERIS_STORAGE_KEY, skyShowEphemeris)"
-                                />
+                                <input type="checkbox" v-model="showEphemeris" />
                                 <span>Ephemeris Trajectories</span>
                             </label>
                         </div>
-                        <div style="margin-top: 10px;">
+
+                        <div v-if="savedEphemerides.length > 0" class="sky-ephem-mini-list">
+                            <div
+                                v-for="ephem in savedEphemerides"
+                                :key="ephem.id"
+                                class="sky-ephem-mini-item"
+                                :class="{ muted: ephem.visible === false || !showEphemeris }"
+                            >
+                                <span
+                                    class="sky-ephem-dot"
+                                    :style="{ backgroundColor: ephem.color || '#38bdf8' }"
+                                ></span>
+                                <span class="sky-ephem-name" :title="ephem.name">{{ ephem.name }}</span>
+                                <button
+                                    type="button"
+                                    class="sky-ephem-mini-btn"
+                                    @click="handleQuickLocateEphemeris(ephem)"
+                                    title="Open Sky Map &amp; center on object at observing time"
+                                >
+                                    ⌖
+                                </button>
+                                <button
+                                    type="button"
+                                    class="sky-ephem-mini-btn"
+                                    @click="updateEphemerisItem(ephem.id, { visible: ephem.visible === false })"
+                                    :title="ephem.visible === false ? 'Show trajectory' : 'Hide trajectory'"
+                                >
+                                    {{ ephem.visible === false ? '🚫' : '👁' }}
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="sky-action-wrap">
                             <button
                                 type="button"
-                                class="btn-primary"
+                                class="btn-primary sky-ephem-manage-btn"
                                 @click="openEphemerisModal"
-                                style="width: 100%; justify-content: center; font-size: 0.8rem;"
                             >
                                 <span>☄ Manage / Download Ephemerides</span>
+                                <span v-if="savedEphemerides.length > 0" class="sky-ephem-count-badge">
+                                    {{ savedEphemerides.length }}
+                                </span>
                             </button>
                         </div>
                     </div>
@@ -1134,36 +1142,24 @@ const activeFiltersCount = computed(() => {
                     <!-- Grids & Reference Lines -->
                     <div class="section-card">
                         <div class="section-title-row">
-                            <h4>🌐 Grids & Reference Lines</h4>
+                            <h4>🌐 Grids &amp; Reference Lines</h4>
                         </div>
                         <div class="threshold-item">
                             <label class="toggle-label">
-                                <input
-                                    type="checkbox"
-                                    v-model="skyShowGrid"
-                                    @change="persistBool(SKY_SHOW_GRID_STORAGE_KEY, skyShowGrid)"
-                                />
+                                <input type="checkbox" v-model="showGrid" />
                                 <span>Celestial RA/Dec Grid</span>
                             </label>
                         </div>
                         <div class="threshold-item" v-if="settings.location">
                             <label class="toggle-label">
-                                <input
-                                    type="checkbox"
-                                    v-model="skyShowMeridian"
-                                    @change="persistBool(SKY_SHOW_MERIDIAN_STORAGE_KEY, skyShowMeridian)"
-                                />
+                                <input type="checkbox" v-model="showMeridian" />
                                 <span>Local Meridian Line</span>
                             </label>
                         </div>
                         <div class="threshold-item">
                             <label class="toggle-label">
-                                <input
-                                    type="checkbox"
-                                    v-model="skyShowConstellations"
-                                    @change="persistBool(SKY_SHOW_CONSTELLATIONS_STORAGE_KEY, skyShowConstellations)"
-                                />
-                                <span>Constellation Lines & Labels</span>
+                                <input type="checkbox" v-model="showConstellations" />
+                                <span>Constellation Lines &amp; Labels</span>
                             </label>
                         </div>
                     </div>
@@ -1171,25 +1167,27 @@ const activeFiltersCount = computed(() => {
                     <!-- Deep Sky Objects & Catalogs -->
                     <div class="section-card">
                         <div class="section-title-row">
-                            <h4>✨ Deep-Sky Objects & Survey</h4>
+                            <h4>✨ Deep-Sky Objects &amp; Survey</h4>
                         </div>
                         <div class="threshold-item">
                             <label class="toggle-label">
+                                <input type="checkbox" v-model="showDsos" />
+                                <span>Deep-Sky Object Markers</span>
+                            </label>
+                        </div>
+                        <div class="threshold-item" :class="{ 'sky-subtoggle-disabled': !showDsos }">
+                            <label class="toggle-label">
                                 <input
                                     type="checkbox"
-                                    v-model="skyShowDsos"
-                                    @change="persistBool(SKY_SHOW_DSOS_STORAGE_KEY, skyShowDsos)"
+                                    v-model="applyTargetFilters"
+                                    :disabled="!showDsos"
                                 />
-                                <span>Deep-Sky Object Markers</span>
+                                <span>Apply Target List Filters to DSOs</span>
                             </label>
                         </div>
                         <div class="threshold-item">
                             <label class="toggle-label">
-                                <input
-                                    type="checkbox"
-                                    v-model="skyShowPhotos"
-                                    @change="persistBool(SKY_SHOW_PHOTOS_STORAGE_KEY, skyShowPhotos)"
-                                />
+                                <input type="checkbox" v-model="showCachedPhotos" />
                                 <span>Pre-composited Sky Survey Map</span>
                             </label>
                         </div>
@@ -1198,36 +1196,30 @@ const activeFiltersCount = computed(() => {
                     <!-- Horizon & Observation Mode -->
                     <div class="section-card" v-if="settings.location">
                         <div class="section-title-row">
-                            <h4>⛰ Observation & Horizon</h4>
+                            <h4>⛰ Observation &amp; Horizon</h4>
                         </div>
                         <div class="threshold-item">
                             <label class="toggle-label">
-                                <input
-                                    type="checkbox"
-                                    v-model="skyShowHorizon"
-                                    @change="persistBool(SKY_SHOW_HORIZON_STORAGE_KEY, skyShowHorizon)"
-                                />
-                                <span>Local Horizon & Min-Altitude Ring</span>
+                                <input type="checkbox" v-model="showHorizon" />
+                                <span>Local Horizon &amp; Min-Altitude Ring</span>
                             </label>
                         </div>
-                        <div style="margin-top: 10px;">
-                            <div style="font-size: 0.78rem; color: #94a3b8; margin-bottom: 6px;">Sky Reference Frame:</div>
-                            <div style="display: flex; gap: 6px;">
+                        <div class="sky-frame-block">
+                            <div class="sky-frame-label">Sky Reference Frame:</div>
+                            <div class="sky-frame-row">
                                 <button
                                     type="button"
-                                    class="preset-btn"
+                                    class="preset-btn sky-frame-btn"
                                     :class="{ active: skyFrameMode !== 'horizon' }"
                                     @click="setSkyFrameMode('sky')"
-                                    style="flex: 1; padding: 6px 8px; font-size: 0.76rem;"
                                 >
                                     ✦ Equatorial
                                 </button>
                                 <button
                                     type="button"
-                                    class="preset-btn"
+                                    class="preset-btn sky-frame-btn"
                                     :class="{ active: skyFrameMode === 'horizon' }"
                                     @click="setSkyFrameMode('horizon')"
-                                    style="flex: 1; padding: 6px 8px; font-size: 0.76rem;"
                                 >
                                     🧭 Horizon Fixed
                                 </button>
@@ -2157,6 +2149,112 @@ const activeFiltersCount = computed(() => {
 
 .mobile-targets-rail-btn {
     display: none;
+}
+
+/* Sky View Tab Controls */
+.sky-action-wrap {
+    margin-top: 10px;
+}
+
+.sky-ephem-manage-btn {
+    width: 100%;
+    justify-content: center;
+    gap: 8px;
+    font-size: 0.8rem;
+}
+
+.sky-ephem-count-badge {
+    background: rgba(15, 23, 42, 0.55);
+    color: #e0f2fe;
+    border: 1px solid rgba(186, 230, 253, 0.35);
+    border-radius: 999px;
+    padding: 1px 7px;
+    font-size: 0.7rem;
+    font-weight: 700;
+}
+
+.sky-ephem-mini-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 8px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(51, 65, 85, 0.45);
+}
+
+.sky-ephem-mini-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px;
+    border-radius: 6px;
+    background: rgba(15, 23, 42, 0.55);
+    border: 1px solid rgba(51, 65, 85, 0.55);
+    transition: opacity 0.15s ease;
+}
+
+.sky-ephem-mini-item.muted {
+    opacity: 0.48;
+}
+
+.sky-ephem-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.sky-ephem-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.75rem;
+    color: #e2e8f0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.sky-ephem-mini-btn {
+    background: rgba(30, 41, 59, 0.75);
+    border: 1px solid rgba(71, 85, 105, 0.6);
+    border-radius: 4px;
+    color: #cbd5e1;
+    font-size: 0.72rem;
+    line-height: 1;
+    padding: 3px 5px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.sky-ephem-mini-btn:hover {
+    background: rgba(56, 189, 248, 0.2);
+    border-color: rgba(56, 189, 248, 0.55);
+    color: #f8fafc;
+}
+
+.sky-subtoggle-disabled {
+    opacity: 0.45;
+}
+
+.sky-frame-block {
+    margin-top: 10px;
+}
+
+.sky-frame-label {
+    font-size: 0.78rem;
+    color: #94a3b8;
+    margin-bottom: 6px;
+}
+
+.sky-frame-row {
+    display: flex;
+    gap: 6px;
+}
+
+.sky-frame-btn {
+    flex: 1;
+    padding: 6px 8px;
+    font-size: 0.76rem;
 }
 
 @media (max-width: 1024px) {

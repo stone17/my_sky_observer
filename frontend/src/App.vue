@@ -4,6 +4,7 @@ import LeftPanel from './components/LeftPanel.vue';
 import ObjectList from './components/ObjectList.vue';
 import Framing from './components/Framing.vue';
 import AltitudeGraph from './components/AltitudeGraph.vue';
+import EphemerisModal from './components/EphemerisModal.vue';
 import { computeDefaultImageFov, computeSensorFov, normalizeImageFov } from './utils/fov.js';
 import {
     getAstroNightDefaults,
@@ -1909,6 +1910,7 @@ watch(clientSettings, () => {
                 :setup-hash="currentSetupHash"
                 :active-tab="activeLeftTab"
                 :show-mobile-list="showMobileList"
+                :effective-obs-time-ms="effectiveObsTimeMs"
                 @update-active-tab="handleTabChange"
                 @toggle-mobile-list="toggleMobileList"
                 @update-settings="saveSettings"
@@ -2024,6 +2026,9 @@ watch(clientSettings, () => {
                 </div>
             </aside>
         </div>
+
+        <!-- Global Ephemeris Manager & JPL Horizons Downloader -->
+        <EphemerisModal :effective-obs-time-ms="effectiveObsTimeMs" />
     </div>
 </template>
 
