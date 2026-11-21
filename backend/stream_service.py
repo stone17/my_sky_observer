@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import re
+import time
 import traceback
 from typing import Dict, List, Optional, Tuple
 
@@ -17,6 +19,7 @@ from .data_manager import CatalogManager
 from .image_service import (
     download_image,
     get_cache_info,
+    get_inflight_telemetry,
     get_setup_hash,
     validate_image_source,
 )
@@ -660,6 +663,30 @@ def _filter_objects_by_settings(all_objects: List[dict], settings: dict):
     return filtered_candidates, fav_names, filter_favs_only
 
 
+def _normalize_fav_token(val: object) -> str:
+    return re.sub(r"\s+", "", str(val or "").strip()).lower()
+
+
+def _build_fav_lookup(fav_names: set) -> Tuple[set, set]:
+    exact = {str(f).strip() for f in fav_names if str(f).strip()}
+    compact = {_normalize_fav_token(f) for f in exact if _normalize_fav_token(f)}
+    return exact, compact
+
+
+def _is_favorite_object(obj: dict, fav_exact: set, fav_compact: set) -> bool:
+    if not fav_exact:
+        return False
+    obj_id = str(obj.get("id") or "").strip()
+    obj_name = str(obj.get("name") or "").strip()
+    if obj_id in fav_exact or obj_name in fav_exact:
+        return True
+    if obj_id and _normalize_fav_token(obj_id) in fav_compact:
+        return True
+    if obj_name and obj_name != "N/A" and _normalize_fav_token(obj_name) in fav_compact:
+        return True
+    return False
+
+
 def _select_download_list(
     mode: str,
     all_objects: List[dict],
@@ -671,7 +698,12 @@ def _select_download_list(
         return list(all_objects)
     elif mode == "filtered":
         if filter_favs_only:
-            return [o for o in filtered_candidates if o.get("name") in fav_names]
+            fav_exact, fav_compact = _build_fav_lookup(fav_names)
+            return [
+                o
+                for o in filtered_candidates
+                if _is_favorite_object(o, fav_exact, fav_compact)
+            ]
         return list(filtered_candidates)
     return []
 
@@ -684,10 +716,19 @@ class BackgroundDownloadManager:
         self.mode: str = "selected"
         self.current: int = 0
         self.total: int = 0
+        self.succeeded: int = 0
+        self.failed: int = 0
         self.already_cached: int = 0
         self.total_candidates: int = 0
         self.setup_hash: str = ""
         self.image_fov: float = 1.0
+        self.image_source: str = "dss2r"
+        self.image_resolution: int = 1024
+        self.started_monotonic: Optional[float] = None
+        self.active_workers: Dict[str, float] = {}
+        self.last_error: str = ""
+        self.last_error_target: str = ""
+        self.last_summary: str = ""
         self.queued_ids: set = set()
         self.object_updates: Dict[str, dict] = {}
         self._subscribers: List[asyncio.Queue] = []
@@ -712,16 +753,57 @@ class BackgroundDownloadManager:
             except Exception:
                 pass
 
+    def _snapshot_active_targets(self) -> List[dict]:
+        now_mono = time.monotonic()
+        active_list = []
+        for obj_id, started_mono in list(self.active_workers.items()):
+            elapsed = round(max(0.0, now_mono - started_mono), 1)
+            telem = get_inflight_telemetry(obj_id, self.setup_hash)
+            active_list.append(
+                {
+                    "name": obj_id,
+                    "elapsed_s": (
+                        telem["elapsed_s"]
+                        if telem and "elapsed_s" in telem
+                        else elapsed
+                    ),
+                    "stage": telem.get("stage", "fetching") if telem else "fetching",
+                    "survey": (
+                        telem.get("survey", self.image_source)
+                        if telem
+                        else self.image_source
+                    ),
+                    "attempt": telem.get("attempt", 1) if telem else 1,
+                    "max_attempts": telem.get("max_attempts", 4) if telem else 4,
+                    "detail": telem.get("detail", "") if telem else "",
+                }
+            )
+        return active_list
+
     def get_status(self) -> dict:
+        elapsed_s = (
+            round(max(0.0, time.monotonic() - self.started_monotonic), 1)
+            if self.active and self.started_monotonic is not None
+            else 0.0
+        )
         return {
             "active": self.active,
             "mode": self.mode,
             "current": self.current,
             "total": self.total,
+            "succeeded": self.succeeded,
+            "failed": self.failed,
             "already_cached": self.already_cached,
             "total_candidates": self.total_candidates,
             "setup_hash": self.setup_hash,
             "image_fov": self.image_fov,
+            "image_source": self.image_source,
+            "image_resolution": self.image_resolution,
+            "elapsed_s": elapsed_s,
+            "active_targets": self._snapshot_active_targets() if self.active else [],
+            "last_error": self.last_error,
+            "last_error_target": self.last_error_target,
+            "last_summary": self.last_summary,
             "object_updates": list(self.object_updates.values()),
         }
 
@@ -731,6 +813,7 @@ class BackgroundDownloadManager:
             return self.get_status()
 
     async def _stop_unlocked(self):
+        was_active = self.active
         self._stop_event.set()
         for t in list(self._worker_tasks):
             if not t.done():
@@ -743,14 +826,18 @@ class BackgroundDownloadManager:
                 pass
         self._worker_tasks = []
         self._runner_task = None
+        self.active_workers.clear()
         for obj_id, info in list(self.object_updates.items()):
             if info.get("status") in ("queued", "downloading"):
                 updated = {"name": obj_id, "status": "pending"}
                 self.object_updates[obj_id] = updated
                 self._broadcast(updated)
         self.queued_ids.clear()
-        if self.active:
+        if was_active:
             self.active = False
+            self.last_summary = (
+                f"Download stopped ({self.succeeded} of {self.total} saved)."
+            )
             self._broadcast(None)
 
     async def start_from_settings(self, settings: dict) -> dict:
@@ -804,19 +891,38 @@ class BackgroundDownloadManager:
             self.mode = mode
             self.current = 0
             self.total = total
+            self.succeeded = 0
+            self.failed = 0
             self.already_cached = already_cached
             self.total_candidates = total_candidates
             self.setup_hash = setup_hash
             self.image_fov = download_fov
+            self.image_source = img_source
+            self.image_resolution = img_res
+            self.active_workers = {}
+            self.last_error = ""
+            self.last_error_target = ""
+            self.last_summary = ""
             self.object_updates = {}
             self.queued_ids = set()
 
             if total == 0:
                 self.active = False
+                self.started_monotonic = None
+                if total_candidates == 0:
+                    self.last_summary = (
+                        "No targets matched the current filters for download."
+                    )
+                else:
+                    self.last_summary = (
+                        f"All {already_cached} matching targets are already cached "
+                        f"for this setup ({download_fov:.2f}° FOV)."
+                    )
                 return self.get_status()
 
             self._stop_event = asyncio.Event()
             self.active = True
+            self.started_monotonic = time.monotonic()
             for obj in to_download:
                 obj_id = obj["id"]
                 self.queued_ids.add(obj_id)
@@ -862,9 +968,26 @@ class BackgroundDownloadManager:
             async with semaphore:
                 if stop_event.is_set():
                     return
+                self.active_workers[obj_id] = time.monotonic()
                 downloading_msg = {"name": obj_id, "status": "downloading"}
                 self.object_updates[obj_id] = downloading_msg
                 self._broadcast(downloading_msg)
+                self._broadcast(
+                    {
+                        "progress": True,
+                        "current": self.current,
+                        "total": total,
+                        "succeeded": self.succeeded,
+                        "failed": self.failed,
+                        "already_cached": already_cached,
+                        "total_candidates": total_candidates,
+                        "active_targets": self._snapshot_active_targets(),
+                        "last_error": self.last_error,
+                        "last_error_target": self.last_error_target,
+                        "image_fov": download_fov,
+                        "image_source": img_source,
+                    }
+                )
 
                 try:
                     url = await download_image(
@@ -877,6 +1000,7 @@ class BackgroundDownloadManager:
                         img_source,
                         img_timeout,
                     )
+                    self.succeeded += 1
                     cached_msg = {
                         "name": obj_id,
                         "status": "cached",
@@ -894,12 +1018,21 @@ class BackgroundDownloadManager:
                         self._broadcast(pending_msg)
                     self.queued_ids.discard(obj_id)
                     raise
-                except Exception:
-                    err_msg = {"name": obj_id, "status": "error"}
+                except Exception as exc:
+                    err_detail = str(exc).strip() or exc.__class__.__name__
+                    self.failed += 1
+                    self.last_error = err_detail
+                    self.last_error_target = obj_id
+                    err_msg = {
+                        "name": obj_id,
+                        "status": "error",
+                        "error": err_detail,
+                    }
                     self.object_updates[obj_id] = err_msg
                     self.queued_ids.discard(obj_id)
                     self._broadcast(err_msg)
                 finally:
+                    self.active_workers.pop(obj_id, None)
                     if not stop_event.is_set():
                         completed += 1
                         self.current = completed
@@ -908,8 +1041,15 @@ class BackgroundDownloadManager:
                                 "progress": True,
                                 "current": completed,
                                 "total": total,
+                                "succeeded": self.succeeded,
+                                "failed": self.failed,
                                 "already_cached": already_cached,
                                 "total_candidates": total_candidates,
+                                "active_targets": self._snapshot_active_targets(),
+                                "last_error": self.last_error,
+                                "last_error_target": self.last_error_target,
+                                "image_fov": download_fov,
+                                "image_source": img_source,
                             }
                         )
 
@@ -918,9 +1058,25 @@ class BackgroundDownloadManager:
             if self._worker_tasks:
                 await asyncio.gather(*self._worker_tasks, return_exceptions=True)
         finally:
+            self.active_workers.clear()
             if not stop_event.is_set():
                 self.active = False
                 self.queued_ids.clear()
+                if self.failed == 0:
+                    self.last_summary = (
+                        f"Downloaded {self.succeeded} of {total} images "
+                        f"({download_fov:.2f}° FOV)."
+                    )
+                elif self.succeeded > 0:
+                    self.last_summary = (
+                        f"Finished: {self.succeeded} saved, {self.failed} failed "
+                        f"({self.last_error_target}: {self.last_error})"
+                    )
+                else:
+                    self.last_summary = (
+                        f"Failed ({self.failed}/{total}): "
+                        f"{self.last_error_target}: {self.last_error}"
+                    )
                 self._broadcast(None)
 
 
@@ -1089,8 +1245,16 @@ class StreamSession:
 
         # Ensure any bookmarked objects are included in top_objects so their altitude graphs are precomputed
         if fav_names:
-            fav_objs = [o for o in filtered_candidates if o.get("name") in fav_names]
-            non_fav_objs = [o for o in filtered_candidates if o.get("name") not in fav_names]
+            fav_exact, fav_compact = _build_fav_lookup(fav_names)
+            fav_objs = [
+                o
+                for o in filtered_candidates
+                if _is_favorite_object(o, fav_exact, fav_compact)
+            ]
+            fav_ids = {o.get("id") for o in fav_objs}
+            non_fav_objs = [
+                o for o in filtered_candidates if o.get("id") not in fav_ids
+            ]
             self.top_objects = (fav_objs + non_fav_objs)[:500]
         else:
             self.top_objects = filtered_candidates[:500]
@@ -1199,7 +1363,7 @@ class StreamSession:
                     return
                 yield (
                     f"event: download_progress\ndata: "
-                    f"{json.dumps({'current': 0, 'total': status['total'], 'already_cached': status['already_cached'], 'total_candidates': status['total_candidates']})}\n\n"
+                    f"{json.dumps({'current': 0, 'total': status['total'], 'succeeded': status.get('succeeded', 0), 'failed': status.get('failed', 0), 'already_cached': status['already_cached'], 'total_candidates': status['total_candidates'], 'active_targets': status.get('active_targets', []), 'image_fov': status.get('image_fov'), 'image_source': status.get('image_source')})}\n\n"
                 )
             else:
                 if not background_download_manager.active:
@@ -1207,7 +1371,7 @@ class StreamSession:
                 status = background_download_manager.get_status()
                 yield (
                     f"event: download_progress\ndata: "
-                    f"{json.dumps({'current': status['current'], 'total': status['total'], 'already_cached': status['already_cached'], 'total_candidates': status['total_candidates']})}\n\n"
+                    f"{json.dumps({'current': status['current'], 'total': status['total'], 'succeeded': status.get('succeeded', 0), 'failed': status.get('failed', 0), 'already_cached': status['already_cached'], 'total_candidates': status['total_candidates'], 'active_targets': status.get('active_targets', []), 'last_error': status.get('last_error', ''), 'last_error_target': status.get('last_error_target', ''), 'image_fov': status.get('image_fov'), 'image_source': status.get('image_source')})}\n\n"
                 )
 
             while True:

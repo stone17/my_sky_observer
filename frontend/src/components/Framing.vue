@@ -175,6 +175,56 @@ const effectiveDisplayFov = computed(() => {
     return Number.isFinite(raw) && raw > 0.001 ? raw : 1.0;
 });
 
+const fetchClockNowMs = ref(Date.now());
+const fallbackFetchStartMs = ref(0);
+let fetchElapsedTimer = null;
+
+const stopFetchElapsedTimer = () => {
+    if (fetchElapsedTimer) {
+        clearInterval(fetchElapsedTimer);
+        fetchElapsedTimer = null;
+    }
+};
+
+watch(
+    isFetchingSurvey,
+    (active) => {
+        if (active) {
+            const now = Date.now();
+            fallbackFetchStartMs.value = Number(props.object?.download_started_ms) || now;
+            fetchClockNowMs.value = now;
+            if (!fetchElapsedTimer) {
+                fetchElapsedTimer = setInterval(() => {
+                    fetchClockNowMs.value = Date.now();
+                }, 1000);
+            }
+        } else {
+            stopFetchElapsedTimer();
+            fallbackFetchStartMs.value = 0;
+        }
+    },
+    { immediate: true }
+);
+
+const fetchElapsedSeconds = computed(() => {
+    if (!isFetchingSurvey.value) return 0;
+    const startMs = Number(props.object?.download_started_ms) || fallbackFetchStartMs.value;
+    if (!startMs) return 0;
+    return Math.max(0, Math.floor((fetchClockNowMs.value - startMs) / 1000));
+});
+
+const activeSurveySource = computed(() => {
+    return props.settings?.image_server?.source || 'dss2r';
+});
+
+const isWideFovDss2Fetch = computed(() => {
+    const src = activeSurveySource.value;
+    return (
+        effectiveDisplayFov.value >= 5.0 &&
+        (src === 'dss2r' || src === 'dss2b' || src === 'dss2ir')
+    );
+});
+
 const renderAtlasPreviewCanvas = () => {
     const canvas = atlasPreviewCanvasRef.value;
     const spec = previewFrameSpec.value;
@@ -1078,6 +1128,8 @@ const updateImage = async (explicitRes = null) => {
 
     props.object.status = 'downloading';
     props.object.downloading_resolution = effectiveReqRes;
+    props.object.download_started_ms = Date.now();
+    delete props.object.error_message;
     emit('update-fov', { fov: targetFov, skipDownload: true });
 
     try {
@@ -1106,6 +1158,8 @@ const updateImage = async (explicitRes = null) => {
             props.object.image_fov = data.image_fov || targetFov;
             props.object.image_resolution = savedRes;
             delete props.object.downloading_resolution;
+            delete props.object.download_started_ms;
+            delete props.object.error_message;
             props.object.status = 'cached';
 
             skyMapSensorOverride.value = null;
@@ -1126,12 +1180,25 @@ const updateImage = async (explicitRes = null) => {
                 rotation: rotation.value
             });
         } else {
+            let errDetail = `Server returned HTTP ${res.status}`;
+            try {
+                const errPayload = await res.json();
+                if (typeof errPayload?.detail === 'string' && errPayload.detail.trim()) {
+                    errDetail = errPayload.detail.trim();
+                }
+            } catch (_) {
+                // Ignore JSON parse error
+            }
             delete props.object.downloading_resolution;
+            delete props.object.download_started_ms;
+            props.object.error_message = errDetail;
             props.object.status = 'error';
         }
     } catch (e) {
         console.error(e);
         delete props.object.downloading_resolution;
+        delete props.object.download_started_ms;
+        props.object.error_message = e?.message || 'Network error while requesting sky survey image.';
         props.object.status = 'error';
     }
 };
@@ -1186,6 +1253,7 @@ onMounted(() => {
     document.addEventListener('click', handleDocumentClick);
 });
 onUnmounted(() => {
+    stopFetchElapsedTimer();
     if (resizeObserver) resizeObserver.disconnect();
     document.removeEventListener('click', handleDocumentClick);
     stopRotate();
@@ -1334,11 +1402,14 @@ onUnmounted(() => {
                         <span class="status-banner-title">
                             {{
                                 isFetchingHighRes
-                                    ? `Fetching High-Res Survey (${activeFetchingResolution}px)…`
-                                    : `Fetching Full Sky Survey (${activeFetchingResolution}px)…`
+                                    ? `Fetching High-Res Survey (${activeFetchingResolution}px${fetchElapsedSeconds > 0 ? ` · ${fetchElapsedSeconds}s` : ''})…`
+                                    : `Fetching Full Sky Survey (${activeFetchingResolution}px · ${activeSurveySource}${fetchElapsedSeconds > 0 ? ` · ${fetchElapsedSeconds}s` : ''})…`
                             }}
                         </span>
-                        <span v-if="hasAtlasPreview" class="status-banner-sub">
+                        <span v-if="isWideFovDss2Fetch && fetchElapsedSeconds >= 4" class="status-banner-sub">
+                            Wide {{ effectiveDisplayFov.toFixed(2) }}° field: NASA SkyView stitches DSS2 plates (~20–45s){{ hasAtlasPreview ? ' · Showing Atlas preview' : '' }}
+                        </span>
+                        <span v-else-if="hasAtlasPreview" class="status-banner-sub">
                             Showing Sky Atlas crop ({{ effectiveDisplayFov.toFixed(2) }}°) · Full image replaces preview automatically
                         </span>
                         <span v-else class="status-banner-sub">
@@ -1351,7 +1422,10 @@ onUnmounted(() => {
                     <span class="status-banner-badge error">!</span>
                     <div class="status-banner-copy">
                         <span class="status-banner-title">Survey download failed</span>
-                        <span v-if="hasAtlasPreview" class="status-banner-sub">
+                        <span v-if="object.error_message" class="status-banner-sub error-detail" :title="object.error_message">
+                            {{ object.error_message }}
+                        </span>
+                        <span v-else-if="hasAtlasPreview" class="status-banner-sub">
                             Showing Sky Atlas preview ({{ effectiveDisplayFov.toFixed(2) }}°)
                         </span>
                     </div>
@@ -2184,6 +2258,15 @@ onUnmounted(() => {
     font-size: 0.71rem;
     font-weight: 500;
     line-height: 1.25;
+}
+
+.status-banner-sub.error-detail {
+    color: #fca5a5;
+    max-width: 440px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
 }
 
 .status-banner-action {

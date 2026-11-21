@@ -861,6 +861,216 @@ def test_filter_and_object_settings_persistence():
     save_settings(TEST_SETTINGS)
 
 
+def test_favorites_only_batch_download_matches_catalog_ids():
+    """Regression test: filter_favorites_only must match obj['id'] catalog designations (e.g. NGC 7023, M 45)."""
+    from backend.stream_service import (
+        _filter_objects_by_settings,
+        _select_download_list,
+    )
+
+    catalog_objects = [
+        {"id": "NGC 7023", "name": "Iris Nebula", "ra": 315.4, "dec": 68.16, "type": "RfN", "magnitude": 6.8, "maj_ax": 18.0},
+        {"id": "IC 1985", "name": "N/A", "ra": 56.1, "dec": 31.9, "type": "HII", "magnitude": 99, "maj_ax": 5.0},
+        {"id": "Sh2-170", "name": "Little Rosette", "ra": 0.4, "dec": 64.6, "type": "HII", "magnitude": 99, "maj_ax": 20.0},
+        {"id": "M 45", "name": "Pleiades", "ra": 56.75, "dec": 24.11, "type": "OCl", "magnitude": 1.6, "maj_ax": 110.0},
+        {"id": "NGC 9999", "name": "Unbookmarked", "ra": 120.0, "dec": 40.0, "type": "G", "magnitude": 10.0, "maj_ax": 12.0},
+    ]
+
+    settings_dict = {
+        "filter_favorites_only": True,
+        "favorites": ["NGC 7023", "IC 1985", "Sh2-170", "M45"],
+        "filter_active_alt": False,
+        "filter_na_alt": True,
+        "filter_active_hours": False,
+        "filter_na_hours": True,
+        "filter_active_mag": False,
+        "filter_na_mag": True,
+        "filter_active_size": True,
+        "filter_na_size": True,
+        "min_size": 4.0,
+    }
+    filtered_candidates, fav_names, filter_favs_only = _filter_objects_by_settings(
+        catalog_objects, settings_dict
+    )
+    selected = _select_download_list(
+        mode="filtered",
+        all_objects=catalog_objects,
+        filtered_candidates=filtered_candidates,
+        fav_names=fav_names,
+        filter_favs_only=filter_favs_only,
+    )
+
+    selected_ids = [o["id"] for o in selected]
+    assert selected_ids == ["NGC 7023", "IC 1985", "Sh2-170", "M 45"]
+
+
+def test_wide_field_surveys_and_setup_hash_parsing():
+    """Verify 'dss' and 'mellinger-r' survey sources generate valid hashes and parse back cleanly."""
+    from backend.image_service import get_setup_hash, parse_setup_hash_details
+    from backend.models import FetchImageRequest
+
+    dss_hash = get_setup_hash(4.79, 4.79, 1.5, 1024, "dss")
+    assert dss_hash.endswith("_r1024_dss")
+    fov_dss, res_dss, src_dss = parse_setup_hash_details(dss_hash)
+    assert src_dss == "dss"
+    assert res_dss == 1024
+    assert fov_dss is not None and abs(fov_dss - 7.19) < 0.05
+
+    mel_hash = get_setup_hash(4.79, 4.79, 1.5, 1024, "mellinger-r")
+    assert mel_hash.endswith("_r1024_mellinger-r")
+    fov_mel, res_mel, src_mel = parse_setup_hash_details(mel_hash)
+    assert src_mel == "mellinger-r"
+    assert res_mel == 1024
+
+    fov_custom, res_custom, src_custom = parse_setup_hash_details(
+        "fov_custom_12.50_r1024_mellinger-r"
+    )
+    assert src_custom == "mellinger-r"
+    assert res_custom == 1024
+    assert fov_custom == 12.5
+
+    req = FetchImageRequest(
+        ra="05h 35m 17s", dec="-05d 23m 28s", fov=12.5, resolution=1024, source="mellinger-r"
+    )
+    assert req.source == "mellinger-r"
+
+
+def test_skyview_read_timeout_fast_fail_and_wide_fov_fallback(tmp_path):
+    """Verify ReadTimeout fails fast at moderate FOV and automatically falls back at wide FOV (>=10 deg)."""
+    import asyncio
+    from io import BytesIO
+    from unittest.mock import AsyncMock, Mock, patch
+
+    import httpx
+    import pytest
+    from PIL import Image
+
+    from backend import image_service
+
+    buf = BytesIO()
+    Image.new("RGB", (64, 64), color=(20, 30, 50)).save(buf, format="JPEG")
+    valid_jpeg_bytes = buf.getvalue()
+
+    async def run_moderate_fov_timeout():
+        calls = []
+
+        async def fake_get(url, params=None, **kwargs):
+            calls.append(params["Survey"])
+            raise httpx.ReadTimeout("SkyView timed out")
+
+        with patch("httpx.AsyncClient.get", new_callable=AsyncMock, side_effect=fake_get):
+            setup_dir = str(tmp_path / "setup_mod")
+            out = str(tmp_path / "setup_mod" / "mod_timeout.jpg")
+            with pytest.raises(RuntimeError) as exc_info:
+                await image_service._perform_skyview_download(
+                    ra=10.0,
+                    dec=20.0,
+                    fov=7.19,
+                    object_id="NGC 7023",
+                    url="/cache/setup_mod/mod_timeout.jpg",
+                    filepath=out,
+                    setup_dir=setup_dir,
+                    resolution=1024,
+                    source="dss2r",
+                    timeout=30,
+                )
+            # Must NOT retry 4 times on ReadTimeout at 7.19 deg
+            assert calls == ["dss2r"]
+            assert "timed out" in str(exc_info.value).lower()
+
+    async def run_wide_fov_fallback():
+        calls = []
+
+        async def fake_get(url, params=None, **kwargs):
+            survey = params["Survey"]
+            calls.append(survey)
+            if survey == "dss2r":
+                raise httpx.ReadTimeout("DSS2 mosaic timed out")
+            resp = Mock()
+            resp.status_code = 200
+            resp.headers = {"Content-Type": "image/jpeg"}
+            resp.content = valid_jpeg_bytes
+            resp.raise_for_status = Mock()
+            return resp
+
+        with patch("httpx.AsyncClient.get", new_callable=AsyncMock, side_effect=fake_get):
+            setup_dir = str(tmp_path / "setup_wide")
+            out = str(tmp_path / "setup_wide" / "wide_fallback.jpg")
+            url = await image_service._perform_skyview_download(
+                ra=56.75,
+                dec=24.11,
+                fov=14.0,
+                object_id="M 45",
+                url="/cache/setup_wide/wide_fallback.jpg",
+                filepath=out,
+                setup_dir=setup_dir,
+                resolution=1024,
+                source="dss2r",
+                timeout=30,
+            )
+            assert calls == ["dss2r", "dss"]
+            assert url == "/cache/setup_wide/wide_fallback.jpg"
+
+    asyncio.run(run_moderate_fov_timeout())
+    asyncio.run(run_wide_fov_fallback())
+
+
+def test_background_download_manager_failure_telemetry():
+    """Verify BackgroundDownloadManager tracks succeeded/failed counts, last_error, and per-object error updates."""
+    import asyncio
+    from unittest.mock import patch
+
+    from backend.stream_service import background_download_manager
+
+    async def fake_download_mixed(
+        ra, dec, fov, name, setup_hash, resolution=1024, source="dss2r", timeout=120
+    ):
+        await asyncio.sleep(0.01)
+        if name == "IC 1985":
+            raise RuntimeError("SkyView timed out after 120s stitching dss2r mosaic")
+        return f"/api/cache/{setup_hash}/{name}.jpg"
+
+    async def run_scenario():
+        with patch(
+            "backend.stream_service.download_image", side_effect=fake_download_mixed
+        ), patch("backend.stream_service.os.path.exists", return_value=False):
+            fov_info = {
+                "setup_hash": "test_telemetry_hash",
+                "download_fov": 7.19,
+                "img_res": 1024,
+                "img_source": "dss2r",
+                "img_timeout": 120,
+            }
+            items = [
+                {"id": "NGC 7023", "ra": 315.4, "dec": 68.16},
+                {"id": "IC 1985", "ra": 56.1, "dec": 31.9},
+            ]
+            await background_download_manager.start_job(
+                download_list=items, fov_info=fov_info, mode="filtered"
+            )
+            for _ in range(50):
+                if not background_download_manager.active:
+                    break
+                await asyncio.sleep(0.02)
+
+            st = background_download_manager.get_status()
+            assert st["active"] is False
+            assert st["succeeded"] == 1
+            assert st["failed"] == 1
+            assert st["last_error_target"] == "IC 1985"
+            assert "timed out" in st["last_error"].lower()
+            assert "1 saved" in st["last_summary"]
+            assert "1 failed" in st["last_summary"]
+
+            updates_by_id = {u["name"]: u for u in st["object_updates"]}
+            assert updates_by_id["NGC 7023"]["status"] == "cached"
+            assert updates_by_id["IC 1985"]["status"] == "error"
+            assert "timed out" in updates_by_id["IC 1985"]["error"].lower()
+
+    asyncio.run(run_scenario())
+
+
+
 def test_download_object_resolution_override():
     """Verify per-request resolution override on compute_fov_and_setup and /api/download-object."""
     from backend.models import Camera, Telescope

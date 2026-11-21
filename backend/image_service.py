@@ -4,7 +4,8 @@ import json
 import os
 import re
 import shutil
-from typing import Dict, List, Optional, Tuple, Union
+import time
+from typing import Callable, Dict, List, Optional, Tuple, Union
 import httpx
 from astropy.coordinates import SkyCoord
 import astropy.units as u
@@ -12,12 +13,14 @@ import astropy.units as u
 from .astro_utils import auto_stretch_image
 from .config import CACHE_DIR
 
-ALLOWED_IMAGE_SOURCES = {"dss2r", "dss2b", "dss2ir"}
+ALLOWED_IMAGE_SOURCES = {"dss2r", "dss2b", "dss2ir", "dss", "mellinger-r"}
+DSS2_SURVEYS = {"dss2r", "dss2b", "dss2ir"}
 
 # Limit concurrent SkyView CGI queries to avoid triggering NASA's "Too Many Processes" limit
 _SKYVIEW_SEMAPHORE: Optional[asyncio.Semaphore] = None
 _SKYVIEW_SEMAPHORE_LOOP: Optional[asyncio.AbstractEventLoop] = None
 _INFLIGHT_DOWNLOADS: dict[str, asyncio.Future] = {}
+_INFLIGHT_TELEMETRY: dict[str, dict] = {}
 
 
 def _get_skyview_semaphore() -> asyncio.Semaphore:
@@ -27,7 +30,25 @@ def _get_skyview_semaphore() -> asyncio.Semaphore:
         _SKYVIEW_SEMAPHORE = asyncio.Semaphore(2)
         _SKYVIEW_SEMAPHORE_LOOP = loop
         _INFLIGHT_DOWNLOADS.clear()
+        _INFLIGHT_TELEMETRY.clear()
     return _SKYVIEW_SEMAPHORE
+
+
+def get_inflight_telemetry(
+    object_id: str, setup_hash: str, cache_dir: str = CACHE_DIR
+) -> Optional[dict]:
+    try:
+        _, filepath, _ = get_cache_info(object_id, setup_hash, cache_dir=cache_dir)
+    except ValueError:
+        return None
+    entry = _INFLIGHT_TELEMETRY.get(filepath)
+    if not entry:
+        return None
+    snap = dict(entry)
+    started = snap.pop("started_monotonic", None)
+    if started is not None:
+        snap["elapsed_s"] = round(max(0.0, time.monotonic() - started), 1)
+    return snap
 
 
 def validate_image_source(source: str) -> str:
@@ -132,6 +153,25 @@ def get_cache_info(
     return url, filepath, setup_dir
 
 
+def _build_survey_chain(source: str, download_fov: float) -> List[str]:
+    chain = [source]
+    if download_fov >= 10.0 and source in DSS2_SURVEYS:
+        if download_fov < 22.0:
+            chain.extend(["dss", "mellinger-r"])
+        else:
+            chain.append("mellinger-r")
+    elif download_fov >= 22.0 and source == "dss":
+        chain.append("mellinger-r")
+    # Preserve order while deduplicating
+    seen = set()
+    ordered = []
+    for s in chain:
+        if s not in seen:
+            seen.add(s)
+            ordered.append(s)
+    return ordered
+
+
 async def _perform_skyview_download(
     ra: float,
     dec: float,
@@ -143,90 +183,199 @@ async def _perform_skyview_download(
     resolution: int,
     source: str,
     timeout: int,
+    status_callback: Optional[Callable[[dict], None]] = None,
 ) -> str:
     if os.path.exists(filepath):
         return url
 
     coords = SkyCoord(ra, dec, unit=(u.deg, u.deg))
-    download_fov = max(fov, 0.25)
+    download_fov = max(float(fov), 0.25)
     base_url = "https://skyview.gsfc.nasa.gov/current/cgi/runquery.pl"
-    params = {
-        "Survey": source,
-        "Position": f"{coords.ra.deg:.5f},{coords.dec.deg:.5f}",
-        "Size": f"{download_fov:.4f}",
-        "Pixels": str(int(resolution)),
-        "Return": "JPG",
-    }
+    survey_chain = _build_survey_chain(source, download_fov)
 
     semaphore = _get_skyview_semaphore()
     max_attempts = 4
     base_delay = 1.5
+    started_monotonic = time.monotonic()
 
-    async with semaphore:
-        if os.path.exists(filepath):
-            return url
+    def _emit_telemetry(
+        stage: str,
+        survey: str,
+        attempt: int = 1,
+        detail: str = "",
+    ) -> None:
+        info = {
+            "name": object_id,
+            "stage": stage,
+            "survey": survey,
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "fov": round(download_fov, 2),
+            "started_monotonic": started_monotonic,
+            "detail": detail,
+        }
+        _INFLIGHT_TELEMETRY[filepath] = info
+        if status_callback is not None:
+            try:
+                snap = dict(info)
+                snap.pop("started_monotonic", None)
+                snap["elapsed_s"] = round(max(0.0, time.monotonic() - started_monotonic), 1)
+                status_callback(snap)
+            except Exception:
+                pass
 
-        if not os.path.exists(setup_dir):
-            os.makedirs(setup_dir, exist_ok=True)
+    _emit_telemetry("waiting_slot", source, 1, "Waiting for SkyView slot")
 
-        last_err: Optional[Exception] = None
-        async with httpx.AsyncClient(timeout=timeout, verify=True) as client:
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    if attempt == 1:
-                        print(f"    -> Downloading {object_id} from SkyView...")
-                    else:
-                        print(
-                            f"    -> Retrying {object_id} from SkyView (attempt {attempt}/{max_attempts})..."
-                        )
+    try:
+        async with semaphore:
+            if os.path.exists(filepath):
+                return url
 
-                    response = await client.get(base_url, params=params)
-                    if response.status_code in (429, 502, 503, 504):
-                        raise RuntimeError(
-                            f"SkyView HTTP {response.status_code} (transient server overload)"
-                        )
-                    response.raise_for_status()
+            if not os.path.exists(setup_dir):
+                os.makedirs(setup_dir, exist_ok=True)
 
-                    content_type = response.headers.get("Content-Type", "")
-                    if "text" in content_type:
-                        body_snippet = response.text[:150]
-                        if (
-                            "Too Many Processes" in body_snippet
-                            or "busy" in body_snippet.lower()
-                        ) and attempt < max_attempts:
-                            delay = base_delay * (2 ** (attempt - 1))
-                            print(
-                                f"    -> SkyView busy ('Too Many Processes') for {object_id}, waiting {delay:.1f}s..."
+            req_timeout = httpx.Timeout(
+                connect=min(15.0, float(timeout)),
+                read=float(timeout),
+                write=15.0,
+                pool=min(15.0, float(timeout)),
+            )
+            last_err: Optional[Exception] = None
+
+            async with httpx.AsyncClient(timeout=req_timeout, verify=True) as client:
+                for survey_idx, active_survey in enumerate(survey_chain):
+                    params = {
+                        "Survey": active_survey,
+                        "Position": f"{coords.ra.deg:.5f},{coords.dec.deg:.5f}",
+                        "Size": f"{download_fov:.4f}",
+                        "Pixels": str(int(resolution)),
+                        "Return": "JPG",
+                    }
+                    is_fallback = survey_idx > 0
+
+                    for attempt in range(1, max_attempts + 1):
+                        try:
+                            if is_fallback and attempt == 1:
+                                detail_msg = (
+                                    f"Wide-FOV fallback to {active_survey} ({download_fov:.2f}°)"
+                                )
+                                _emit_telemetry("fallback", active_survey, attempt, detail_msg)
+                                print(
+                                    f"    -> Falling back to wide-field survey '{active_survey}' for {object_id} ({download_fov:.2f}°)..."
+                                )
+                            elif attempt == 1:
+                                detail_msg = (
+                                    f"Stitching {download_fov:.2f}° {active_survey} mosaic on SkyView"
+                                    if download_fov >= 4.5 and active_survey in DSS2_SURVEYS
+                                    else f"Fetching {active_survey} ({download_fov:.2f}°)"
+                                )
+                                _emit_telemetry("fetching", active_survey, attempt, detail_msg)
+                                print(
+                                    f"    -> Downloading {object_id} ({download_fov:.2f}°, {active_survey}) from SkyView..."
+                                )
+                            else:
+                                detail_msg = (
+                                    f"Retrying {active_survey} (attempt {attempt}/{max_attempts})"
+                                )
+                                _emit_telemetry("retrying", active_survey, attempt, detail_msg)
+                                print(
+                                    f"    -> Retrying {object_id} from SkyView ({active_survey}, attempt {attempt}/{max_attempts})..."
+                                )
+
+                            response = await client.get(base_url, params=params)
+                            if response.status_code in (429, 502, 503, 504):
+                                raise RuntimeError(
+                                    f"SkyView HTTP {response.status_code} (server busy)"
+                                )
+                            response.raise_for_status()
+
+                            content_type = response.headers.get("Content-Type", "")
+                            if "text" in content_type:
+                                body_snippet = response.text[:200]
+                                if (
+                                    "Too Many Processes" in body_snippet
+                                    or "busy" in body_snippet.lower()
+                                ) and attempt < max_attempts:
+                                    delay = base_delay * (2 ** (attempt - 1))
+                                    _emit_telemetry(
+                                        "retrying",
+                                        active_survey,
+                                        attempt,
+                                        f"SkyView busy, waiting {delay:.1f}s",
+                                    )
+                                    print(
+                                        f"    -> SkyView busy ('Too Many Processes') for {object_id}, waiting {delay:.1f}s..."
+                                    )
+                                    await asyncio.sleep(delay)
+                                    continue
+                                snippet_clean = " ".join(body_snippet.split())[:120]
+                                raise ValueError(
+                                    f"SkyView returned {content_type} ({active_survey}): {snippet_clean}"
+                                )
+
+                            _emit_telemetry(
+                                "processing",
+                                active_survey,
+                                attempt,
+                                "Auto-stretching survey image",
                             )
-                            await asyncio.sleep(delay)
-                            continue
-                        raise ValueError(
-                            f"SkyView returned text/html: {response.text[:100]}"
-                        )
+                            stretched_bytes = await asyncio.to_thread(
+                                auto_stretch_image, response.content
+                            )
 
-                    stretched_bytes = await asyncio.to_thread(
-                        auto_stretch_image, response.content
-                    )
+                            with open(filepath, "wb") as f:
+                                f.write(stretched_bytes)
+                            return url
 
-                    with open(filepath, "wb") as f:
-                        f.write(stretched_bytes)
-                    return url
+                        except httpx.ReadTimeout:
+                            timeout_msg = (
+                                f"SkyView timed out after {timeout}s stitching {download_fov:.2f}° "
+                                f"{active_survey} mosaic for {object_id}."
+                            )
+                            if survey_idx + 1 < len(survey_chain):
+                                next_survey = survey_chain[survey_idx + 1]
+                                print(
+                                    f"    -> {timeout_msg} Trying wide-field fallback '{next_survey}'..."
+                                )
+                                last_err = RuntimeError(timeout_msg)
+                                break
+                            hint = (
+                                " For wide fields (>5°), switch Survey Source to DSS1 or Mellinger Wide-Field, or increase Timeout."
+                                if active_survey in DSS2_SURVEYS and download_fov >= 5.0
+                                else " Try increasing Timeout in Sky Survey Settings."
+                            )
+                            final_err = RuntimeError(timeout_msg + hint)
+                            print(f"    -> ERROR downloading {object_id}: {final_err}")
+                            raise final_err
 
-                except (httpx.TransportError, RuntimeError) as transient_err:
-                    last_err = transient_err
-                    if attempt < max_attempts:
-                        delay = base_delay * (2 ** (attempt - 1))
-                        await asyncio.sleep(delay)
-                        continue
-                    print(f"    -> ERROR downloading {object_id}: {transient_err}")
-                    raise transient_err
-                except Exception as e:
-                    print(f"    -> ERROR downloading {object_id}: {e}")
-                    raise e
+                        except (httpx.TransportError, RuntimeError) as transient_err:
+                            last_err = transient_err
+                            if attempt < max_attempts:
+                                delay = base_delay * (2 ** (attempt - 1))
+                                _emit_telemetry(
+                                    "retrying",
+                                    active_survey,
+                                    attempt,
+                                    f"Transient error, retrying in {delay:.1f}s",
+                                )
+                                await asyncio.sleep(delay)
+                                continue
+                            if survey_idx + 1 < len(survey_chain):
+                                break
+                            print(f"    -> ERROR downloading {object_id}: {transient_err}")
+                            raise transient_err
+                        except Exception as e:
+                            if survey_idx + 1 < len(survey_chain):
+                                last_err = e
+                                break
+                            print(f"    -> ERROR downloading {object_id}: {e}")
+                            raise e
 
-        if last_err:
-            raise last_err
-        raise RuntimeError(f"Failed to download {object_id} from SkyView")
+            if last_err:
+                raise last_err
+            raise RuntimeError(f"Failed to download {object_id} from SkyView")
+    finally:
+        _INFLIGHT_TELEMETRY.pop(filepath, None)
 
 
 async def download_image(
@@ -239,6 +388,7 @@ async def download_image(
     source: str = "dss2r",
     timeout: int = 120,
     cache_dir: str = CACHE_DIR,
+    status_callback: Optional[Callable[[dict], None]] = None,
 ) -> str:
     source = validate_image_source(source)
     url, filepath, setup_dir = get_cache_info(object_id, setup_hash, cache_dir=cache_dir)
@@ -262,6 +412,7 @@ async def download_image(
             resolution=resolution,
             source=source,
             timeout=timeout,
+            status_callback=status_callback,
         )
     )
     _INFLIGHT_DOWNLOADS[filepath] = task
@@ -341,10 +492,10 @@ def purge_image_cache(cache_dir: str = CACHE_DIR, include_atlas: bool = False) -
 
 
 _SETUP_FOV_RE = re.compile(
-    r"^fov_([0-9]+(?:\.[0-9]+)?)_([0-9]+(?:\.[0-9]+)?)_p([0-9]+(?:\.[0-9]+)?)_r(\d+)_([a-z0-9]+)$"
+    r"^fov_([0-9]+(?:\.[0-9]+)?)_([0-9]+(?:\.[0-9]+)?)_p([0-9]+(?:\.[0-9]+)?)_r(\d+)_([a-z0-9\-]+)$"
 )
 _CUSTOM_FOV_RE = re.compile(
-    r"^fov_custom_([0-9]+(?:\.[0-9]+)?)_r(\d+)_([a-z0-9]+)$"
+    r"^fov_custom_([0-9]+(?:\.[0-9]+)?)_r(\d+)_([a-z0-9\-]+)$"
 )
 _RADEC_PREFIX_RE = re.compile(
     r"^RADEC_(-?[0-9]+(?:\.[0-9]+)?)_(-?[0-9]+(?:\.[0-9]+)?)$"

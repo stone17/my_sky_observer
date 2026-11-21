@@ -451,10 +451,11 @@ const locationDisplay = computed(() => {
                     <label><strong>Source / Survey</strong></label>
                     <select v-model="localSettings.image_server.source" @change="updateImageSettings"
                         class="mini-select">
-                        <option value="dss2r">DSS2 Red (Default)</option>
-                        <option value="dss2b">DSS2 Blue</option>
-                        <option value="dss2ir">DSS2 IR</option>
-                        <option value="sdss">SDSS (Where available)</option>
+                        <option value="dss2r">DSS2 Red — High Detail (Default)</option>
+                        <option value="dss2b">DSS2 Blue — High Detail</option>
+                        <option value="dss2ir">DSS2 IR — High Detail</option>
+                        <option value="dss">DSS1 Optical — Faster Wide-Field (5°–20°)</option>
+                        <option value="mellinger-r">Mellinger Optical — Ultra-Wide (&gt;10°)</option>
                     </select>
                 </div>
             </div>

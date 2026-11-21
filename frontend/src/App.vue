@@ -133,6 +133,7 @@ const streamStatus = ref('Idle');
 const nightTimes = ref({});
 const isDownloading = ref(false);
 const downloadProgress = ref("");
+const downloadDetails = ref(null);
 const searchQuery = ref("");
 const isLoading = ref(false);
 
@@ -180,6 +181,34 @@ const equipmentSignature = computed(() => {
 });
 
 // --- CORE DOWNLOAD LOGIC ---
+const syncTargetInstances = (targetName, primaryObj, mutator) => {
+    const visited = new Set();
+    const visit = (candidate) => {
+        if (!candidate || visited.has(candidate)) return;
+        visited.add(candidate);
+        mutator(candidate);
+    };
+    visit(primaryObj);
+    const liveObj = objectMap.get(targetName) || objects.value.find(o => o.name === targetName);
+    if (liveObj) visit(liveObj);
+    if (selectedObject.value && selectedObject.value.name === targetName) {
+        visit(selectedObject.value);
+    }
+    notifyObjectsMutated(targetName);
+};
+
+const extractResponseErrorDetail = async (res, fallbackMsg) => {
+    try {
+        const body = await res.json();
+        if (body && typeof body.detail === 'string' && body.detail.trim()) {
+            return body.detail.trim();
+        }
+    } catch (_) {
+        // Ignore JSON parse errors on error responses
+    }
+    return `${fallbackMsg} (HTTP ${res.status})`;
+};
+
 const downloadImage = async (obj, explicitFov = null, explicitResolution = null) => {
     if (!obj) return;
 
@@ -206,9 +235,13 @@ const downloadImage = async (obj, explicitFov = null, explicitResolution = null)
             ? Number(explicitResolution)
             : null;
 
-    obj.status = 'downloading';
-    obj.downloading_resolution = requestedRes || defaultRes;
-    notifyObjectsMutated(targetName);
+    const startedAtMs = Date.now();
+    syncTargetInstances(targetName, obj, (targetObj) => {
+        targetObj.status = 'downloading';
+        targetObj.downloading_resolution = requestedRes || defaultRes;
+        targetObj.download_started_ms = startedAtMs;
+        delete targetObj.error_message;
+    });
 
     try {
         const reqBody = {
@@ -237,32 +270,18 @@ const downloadImage = async (obj, explicitFov = null, explicitResolution = null)
             const data = await res.json();
             const effectiveFov = data.image_fov || requestedFov;
             const effectiveRes = Number(data.resolution) || requestedRes || defaultRes;
-            const applyResult = (targetObj) => {
-                if (!targetObj) return;
+            syncTargetInstances(targetName, obj, (targetObj) => {
                 targetObj.image_url = data.url;
                 targetObj.status = data.status || 'cached';
                 targetObj.image_fov = effectiveFov;
                 targetObj.image_resolution = effectiveRes;
                 delete targetObj.downloading_resolution;
+                delete targetObj.download_started_ms;
+                delete targetObj.error_message;
                 if (data.sensor_fov) targetObj.sensor_fov = data.sensor_fov;
                 if (data.fov_rectangle) targetObj.fov_rectangle = data.fov_rectangle;
                 if (data.setup_hash) targetObj.setup_hash = data.setup_hash;
-            };
-
-            applyResult(obj);
-            const liveObj = objectMap.get(targetName) || objects.value.find(o => o.name === targetName);
-            if (liveObj && liveObj !== obj) {
-                applyResult(liveObj);
-            }
-            if (
-                selectedObject.value &&
-                selectedObject.value.name === targetName &&
-                selectedObject.value !== obj &&
-                selectedObject.value !== liveObj
-            ) {
-                applyResult(selectedObject.value);
-            }
-            notifyObjectsMutated(targetName);
+            });
             if (
                 (isManualFov.value || effectiveRes > defaultRes) &&
                 selectedObject.value?.name === targetName
@@ -275,15 +294,23 @@ const downloadImage = async (obj, explicitFov = null, explicitResolution = null)
                 });
             }
         } else {
-            obj.status = 'error';
-            delete obj.downloading_resolution;
-            notifyObjectsMutated(targetName);
+            const errDetail = await extractResponseErrorDetail(res, 'Sky survey request failed');
+            syncTargetInstances(targetName, obj, (targetObj) => {
+                targetObj.status = 'error';
+                targetObj.error_message = errDetail;
+                delete targetObj.downloading_resolution;
+                delete targetObj.download_started_ms;
+            });
         }
     } catch (e) {
         console.error(e);
-        obj.status = 'error';
-        delete obj.downloading_resolution;
-        notifyObjectsMutated(targetName);
+        const errDetail = e?.message || 'Network error contacting sky survey endpoint';
+        syncTargetInstances(targetName, obj, (targetObj) => {
+            targetObj.status = 'error';
+            targetObj.error_message = errDetail;
+            delete targetObj.downloading_resolution;
+            delete targetObj.download_started_ms;
+        });
     }
 };
 
@@ -296,9 +323,13 @@ const fetchCustomFramedImageForObject = async (obj, centerRa, centerDec, fov, ex
         explicitResolution !== null && Number.isFinite(Number(explicitResolution))
             ? Number(explicitResolution)
             : defaultRes;
-    obj.status = 'downloading';
-    obj.downloading_resolution = requestedRes;
-    notifyObjectsMutated(targetName);
+    const startedAtMs = Date.now();
+    syncTargetInstances(targetName, obj, (targetObj) => {
+        targetObj.status = 'downloading';
+        targetObj.downloading_resolution = requestedRes;
+        targetObj.download_started_ms = startedAtMs;
+        delete targetObj.error_message;
+    });
     try {
         const res = await fetch('/api/fetch-custom-image', {
             method: 'POST',
@@ -316,8 +347,7 @@ const fetchCustomFramedImageForObject = async (obj, centerRa, centerDec, fov, ex
             const data = await res.json();
             const effectiveFov = data.image_fov || requestedFov;
             const effectiveRes = Number(data.resolution) || requestedRes;
-            const applyCustom = (targetObj) => {
-                if (!targetObj) return;
+            syncTargetInstances(targetName, obj, (targetObj) => {
                 targetObj.image_url = data.url;
                 targetObj.center_ra = centerRa;
                 targetObj.center_dec = centerDec;
@@ -325,15 +355,10 @@ const fetchCustomFramedImageForObject = async (obj, centerRa, centerDec, fov, ex
                 targetObj.image_fov = effectiveFov;
                 targetObj.image_resolution = effectiveRes;
                 delete targetObj.downloading_resolution;
+                delete targetObj.download_started_ms;
+                delete targetObj.error_message;
                 targetObj.status = 'cached';
-            };
-            applyCustom(obj);
-            const liveObj = objectMap.get(targetName) || objects.value.find(o => o.name === targetName);
-            if (liveObj && liveObj !== obj) applyCustom(liveObj);
-            if (selectedObject.value?.name === targetName && selectedObject.value !== obj) {
-                applyCustom(selectedObject.value);
-            }
-            notifyObjectsMutated(targetName);
+            });
             if (!obj.is_custom) {
                 updateObjectSettingsEntry(targetName, {
                     fov: effectiveFov,
@@ -346,15 +371,23 @@ const fetchCustomFramedImageForObject = async (obj, centerRa, centerDec, fov, ex
                 });
             }
         } else {
-            obj.status = 'error';
-            delete obj.downloading_resolution;
-            notifyObjectsMutated(targetName);
+            const errDetail = await extractResponseErrorDetail(res, 'Custom framing survey request failed');
+            syncTargetInstances(targetName, obj, (targetObj) => {
+                targetObj.status = 'error';
+                targetObj.error_message = errDetail;
+                delete targetObj.downloading_resolution;
+                delete targetObj.download_started_ms;
+            });
         }
     } catch (e) {
         console.error(e);
-        obj.status = 'error';
-        delete obj.downloading_resolution;
-        notifyObjectsMutated(targetName);
+        const errDetail = e?.message || 'Network error contacting custom framing endpoint';
+        syncTargetInstances(targetName, obj, (targetObj) => {
+            targetObj.status = 'error';
+            targetObj.error_message = errDetail;
+            delete targetObj.downloading_resolution;
+            delete targetObj.download_started_ms;
+        });
     }
 };
 
@@ -1465,8 +1498,8 @@ const stopDownloadPolling = () => {
 
 const applyDownloadObjectUpdate = (s) => {
     if (!s || !s.name) return;
-    const o = objectMap.get(s.name) || objects.value.find(obj => obj.name === s.name);
-    if (o) {
+    const applyOne = (o) => {
+        if (!o) return;
         const isSelected = selectedObject.value && selectedObject.value.name === o.name;
         if (isSelected && isManualFov.value) {
             o.status = s.status;
@@ -1475,8 +1508,52 @@ const applyDownloadObjectUpdate = (s) => {
             if (s.url) o.image_url = s.url;
             if (s.image_fov) o.image_fov = s.image_fov;
         }
+        if (s.status === 'downloading') {
+            if (!o.download_started_ms) o.download_started_ms = Date.now();
+            delete o.error_message;
+        } else if (s.status === 'error') {
+            if (s.error) o.error_message = s.error;
+            delete o.download_started_ms;
+            delete o.downloading_resolution;
+        } else {
+            delete o.error_message;
+            delete o.download_started_ms;
+            delete o.downloading_resolution;
+        }
+    };
+    const o = objectMap.get(s.name) || objects.value.find(obj => obj.name === s.name);
+    if (o) {
+        applyOne(o);
+        if (selectedObject.value && selectedObject.value.name === s.name && selectedObject.value !== o) {
+            applyOne(selectedObject.value);
+        }
         scheduleObjectsTrigger(o.name);
     }
+};
+
+const formatDownloadProgressText = (d) => {
+    if (!d || typeof d !== 'object') return 'Downloading...';
+    const current = Number(d.current ?? 0);
+    const total = Number(d.total ?? 0);
+    if (total <= 0) return 'Starting...';
+    let text = `Downloading ${current} of ${total}`;
+    const active = Array.isArray(d.active_targets) ? d.active_targets : [];
+    if (active.length > 0) {
+        const names = active
+            .slice(0, 2)
+            .map((t) => {
+                const sec = Math.max(0, Math.round(Number(t.elapsed_s) || 0));
+                return sec > 0 ? `${t.name} (${sec}s)` : t.name;
+            })
+            .join(', ');
+        text += ` · ${names}`;
+    } else if (d.already_cached && d.already_cached > 0) {
+        text += ` (${d.already_cached} cached)`;
+    }
+    if (Number(d.failed) > 0) {
+        text += ` · ${d.failed} failed`;
+    }
+    return text;
 };
 
 const applyDownloadStatus = (statusData) => {
@@ -1486,17 +1563,26 @@ const applyDownloadStatus = (statusData) => {
             applyDownloadObjectUpdate(upd);
         }
     }
+    downloadDetails.value = {
+        active: Boolean(statusData.active),
+        mode: statusData.mode || 'filtered',
+        current: Number(statusData.current ?? 0),
+        total: Number(statusData.total ?? 0),
+        succeeded: Number(statusData.succeeded ?? 0),
+        failed: Number(statusData.failed ?? 0),
+        already_cached: Number(statusData.already_cached ?? 0),
+        total_candidates: Number(statusData.total_candidates ?? 0),
+        image_fov: Number(statusData.image_fov || systemFov.value || 1.0),
+        image_source: statusData.image_source || settings.value?.image_server?.source || 'dss2r',
+        elapsed_s: Number(statusData.elapsed_s ?? 0),
+        active_targets: Array.isArray(statusData.active_targets) ? statusData.active_targets : [],
+        last_error: statusData.last_error || '',
+        last_error_target: statusData.last_error_target || '',
+        last_summary: statusData.last_summary || ''
+    };
     if (statusData.active) {
         isDownloading.value = true;
-        if (statusData.total > 0) {
-            if (statusData.already_cached && statusData.already_cached > 0) {
-                downloadProgress.value = `Downloading ${statusData.current} of ${statusData.total} (${statusData.already_cached} cached)`;
-            } else {
-                downloadProgress.value = `Downloading ${statusData.current} of ${statusData.total}`;
-            }
-        } else {
-            downloadProgress.value = "Starting...";
-        }
+        downloadProgress.value = formatDownloadProgressText(downloadDetails.value);
         ensureDownloadPolling();
     } else {
         isDownloading.value = false;
@@ -1526,6 +1612,23 @@ const ensureDownloadPolling = () => {
 const startBackgroundDownload = async (mode = 'filtered') => {
     isDownloading.value = true;
     downloadProgress.value = "Starting...";
+    downloadDetails.value = {
+        active: true,
+        mode,
+        current: 0,
+        total: 0,
+        succeeded: 0,
+        failed: 0,
+        already_cached: 0,
+        total_candidates: 0,
+        image_fov: systemFov.value,
+        image_source: settings.value?.image_server?.source || 'dss2r',
+        elapsed_s: 0,
+        active_targets: [],
+        last_error: '',
+        last_error_target: '',
+        last_summary: ''
+    };
     const params = buildStreamQueryParams(mode);
     try {
         const res = await fetch(`/api/downloads/start?${params.toString()}`, {
@@ -1536,13 +1639,27 @@ const startBackgroundDownload = async (mode = 'filtered') => {
             const data = await res.json();
             applyDownloadStatus(data);
         } else {
+            const errDetail = await extractResponseErrorDetail(res, 'Failed to start batch download');
             isDownloading.value = false;
             downloadProgress.value = "";
+            downloadDetails.value = {
+                ...(downloadDetails.value || {}),
+                active: false,
+                last_error: errDetail,
+                last_summary: errDetail
+            };
         }
     } catch (e) {
         console.error(e);
+        const errDetail = e?.message || 'Network error starting batch download';
         isDownloading.value = false;
         downloadProgress.value = "";
+        downloadDetails.value = {
+            ...(downloadDetails.value || {}),
+            active: false,
+            last_error: errDetail,
+            last_summary: errDetail
+        };
     }
 };
 
@@ -1592,11 +1709,15 @@ const startStream = (mode = 'selected') => {
             const p = JSON.parse(e.data);
             if (p.current !== undefined && p.total !== undefined) {
                 isDownloading.value = p.current < p.total;
-                if (p.already_cached && p.already_cached > 0) {
-                    downloadProgress.value = `Downloading ${p.current} of ${p.total} (${p.already_cached} cached)`;
-                } else {
-                    downloadProgress.value = `Downloading ${p.current} of ${p.total}`;
-                }
+                const merged = {
+                    ...(downloadDetails.value || {}),
+                    ...p,
+                    active: p.current < p.total
+                };
+                downloadDetails.value = merged;
+                downloadProgress.value = isDownloading.value
+                    ? formatDownloadProgressText(merged)
+                    : "";
                 if (isDownloading.value) {
                     ensureDownloadPolling();
                 }
@@ -1666,6 +1787,15 @@ const startStream = (mode = 'selected') => {
                         item.center_ra = prevObj.center_ra;
                         item.center_dec = prevObj.center_dec;
                         item.custom_framed = prevObj.custom_framed;
+                        if (prevObj.downloading_resolution) {
+                            item.downloading_resolution = prevObj.downloading_resolution;
+                        }
+                        if (prevObj.download_started_ms) {
+                            item.download_started_ms = prevObj.download_started_ms;
+                        }
+                    } else if (sameEquipment && prevObj.status === 'error' && prevObj.error_message) {
+                        item.status = 'error';
+                        item.error_message = prevObj.error_message;
                     }
                 }
             }
@@ -1981,6 +2111,7 @@ watch(clientSettings, () => {
                 :stream-status="streamStatus"
                 :is-downloading="isDownloading"
                 :download-progress="downloadProgress"
+                :download-details="downloadDetails"
                 :system-fov="systemFov"
                 :selected-object="selectedObject"
                 :total-objects-count="typeFilteredObjectsCount"
@@ -2002,6 +2133,7 @@ watch(clientSettings, () => {
                 @download-filtered="startBackgroundDownload('filtered')"
                 @download-all="startBackgroundDownload('all')"
                 @stop-download="stopBackgroundDownload"
+                @dismiss-download-summary="downloadDetails = null"
             />
 
             <!-- Center Framing Canvas -->
@@ -2098,6 +2230,7 @@ watch(clientSettings, () => {
                         :nightTimes="nightTimes"
                         :isDownloading="isDownloading"
                         :downloadProgress="downloadProgress"
+                        :downloadDetails="downloadDetails"
                         @select="handleListSelectObject"
                         @enter-frame="handleListEnterFrame"
                         @update-search="handleSearchUpdate"
@@ -2106,6 +2239,7 @@ watch(clientSettings, () => {
                         @fetch-all="startBackgroundDownload('all')"
                         @download-filtered="startBackgroundDownload('filtered')"
                         @stop-download="stopBackgroundDownload"
+                        @dismiss-download-summary="downloadDetails = null"
                     />
                 </div>
             </aside>

@@ -1,7 +1,7 @@
 from typing import Literal, Union
 from pydantic import BaseModel, Field
 
-AllowedImageSource = Literal["dss2r", "dss2b", "dss2ir"]
+AllowedImageSource = Literal["dss2r", "dss2b", "dss2ir", "dss", "mellinger-r"]
 
 
 class FOVRectangle(BaseModel):

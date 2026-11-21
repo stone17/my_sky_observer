@@ -42,6 +42,10 @@ const props = defineProps({
     streamStatus: String,
     isDownloading: Boolean,
     downloadProgress: String,
+    downloadDetails: {
+        type: Object,
+        default: null
+    },
     systemFov: Number,
     selectedObject: Object,
     totalObjectsCount: {
@@ -91,6 +95,7 @@ const emit = defineEmits([
     'download-filtered',
     'download-all',
     'stop-download',
+    'dismiss-download-summary',
     'update-active-tab',
     'toggle-mobile-list'
 ]);
@@ -184,6 +189,35 @@ const fetchCacheStatus = async () => {
 watch(() => props.setupHash, () => {
     fetchCacheStatus();
 });
+
+watch(
+    () => [props.isDownloading, props.downloadDetails?.succeeded],
+    () => {
+        fetchCacheStatus();
+    }
+);
+
+const isWideFovDss2 = computed(() => {
+    const fov = Number(props.systemFov) || 0;
+    const src = localSettings.value?.image_server?.source || 'dss2r';
+    return fov >= 5.0 && (src === 'dss2r' || src === 'dss2b' || src === 'dss2ir');
+});
+
+const downloadPercent = computed(() => {
+    const total = Number(props.downloadDetails?.total || 0);
+    const current = Number(props.downloadDetails?.current || 0);
+    if (total <= 0) return 0;
+    return Math.min(100, Math.max(0, Math.round((current / total) * 100)));
+});
+
+const switchSurveySource = (newSource) => {
+    if (!localSettings.value.image_server) {
+        localSettings.value.image_server = { resolution: 1024, timeout: 120, source: newSource };
+    } else {
+        localSettings.value.image_server.source = newSource;
+    }
+    emitSettings();
+};
 
 // Sync settings
 watch(() => props.settings, (newVal) => {
@@ -1243,6 +1277,24 @@ const activeFiltersCount = computed(() => {
                             Pre-fetch sky survey images for offline use or rapid browsing. Already cached images for the current equipment setup are automatically skipped.
                         </p>
                         <div v-if="!isDownloading" class="btn-col">
+                            <div
+                                v-if="downloadDetails?.last_summary"
+                                class="dl-summary-banner"
+                                :class="{
+                                    'has-errors': Number(downloadDetails.failed) > 0 || Boolean(downloadDetails.last_error),
+                                    'is-ok': !(Number(downloadDetails.failed) > 0 || Boolean(downloadDetails.last_error))
+                                }"
+                            >
+                                <span class="dl-summary-text">{{ downloadDetails.last_summary }}</span>
+                                <button
+                                    type="button"
+                                    class="dl-summary-close"
+                                    title="Dismiss"
+                                    @click="$emit('dismiss-download-summary')"
+                                >
+                                    ✕
+                                </button>
+                            </div>
                             <button
                                 type="button"
                                 class="btn-primary"
@@ -1285,7 +1337,61 @@ const activeFiltersCount = computed(() => {
                             </button>
                         </div>
                         <div v-else class="download-active-box">
-                            <div class="dl-status">{{ downloadProgress || 'Downloading...' }}</div>
+                            <div class="dl-header-row">
+                                <span class="dl-status">
+                                    <template v-if="downloadDetails?.total > 0">
+                                        Downloading {{ downloadDetails.current }} of {{ downloadDetails.total }}
+                                    </template>
+                                    <template v-else>
+                                        {{ downloadProgress || 'Starting download...' }}
+                                    </template>
+                                </span>
+                                <span v-if="downloadDetails?.image_fov" class="dl-fov-pill">
+                                    {{ Number(downloadDetails.image_fov).toFixed(2) }}° · {{ downloadDetails.image_source || 'dss2r' }}
+                                </span>
+                            </div>
+
+                            <div class="dl-progress-track">
+                                <div
+                                    class="dl-progress-fill"
+                                    :class="{ indeterminate: !downloadDetails?.total || downloadDetails.current === 0 }"
+                                    :style="downloadDetails?.total > 0 && downloadDetails.current > 0 ? { width: `${downloadPercent}%` } : {}"
+                                ></div>
+                            </div>
+
+                            <div v-if="downloadDetails?.active_targets?.length" class="dl-active-targets">
+                                <div
+                                    v-for="t in downloadDetails.active_targets"
+                                    :key="t.name"
+                                    class="dl-target-item"
+                                >
+                                    <div class="dl-target-top">
+                                        <span class="dl-target-name">⟳ {{ t.name }}</span>
+                                        <span class="dl-target-elapsed">{{ Math.max(0, Math.round(t.elapsed_s || 0)) }}s</span>
+                                    </div>
+                                    <div v-if="t.detail" class="dl-target-detail">
+                                        {{ t.detail }}
+                                    </div>
+                                </div>
+                            </div>
+                            <div v-else class="dl-waiting-note">
+                                Preparing target queue…
+                            </div>
+
+                            <div v-if="downloadDetails?.total > 0" class="dl-stats-row">
+                                <span class="dl-stat-ok">✓ {{ downloadDetails.succeeded || 0 }} saved</span>
+                                <span v-if="downloadDetails.already_cached > 0" class="dl-stat-muted">
+                                    {{ downloadDetails.already_cached }} pre-cached
+                                </span>
+                                <span v-if="downloadDetails.failed > 0" class="dl-stat-err">
+                                    ✗ {{ downloadDetails.failed }} failed
+                                </span>
+                            </div>
+
+                            <div v-if="downloadDetails?.last_error" class="dl-inline-error" :title="downloadDetails.last_error">
+                                <strong>{{ downloadDetails.last_error_target }}:</strong> {{ downloadDetails.last_error }}
+                            </div>
+
                             <button type="button" class="btn-danger" @click="$emit('stop-download')">
                                 🛑 Stop Downloading
                             </button>
@@ -1297,10 +1403,28 @@ const activeFiltersCount = computed(() => {
                         <div class="form-field">
                             <label>Survey Source</label>
                             <select v-model="localSettings.image_server.source" @change="emitSettings" class="select-input">
-                                <option value="dss2r">DSS2 Red (Default)</option>
-                                <option value="dss2b">DSS2 Blue</option>
-                                <option value="dss2ir">DSS2 IR</option>
+                                <option value="dss2r">DSS2 Red — High Detail (Default)</option>
+                                <option value="dss2b">DSS2 Blue — High Detail</option>
+                                <option value="dss2ir">DSS2 IR — High Detail</option>
+                                <option value="dss">DSS1 Optical — Faster Wide-Field (5°–20°)</option>
+                                <option value="mellinger-r">Mellinger Optical — Ultra-Wide (&gt;10°)</option>
                             </select>
+                        </div>
+
+                        <div v-if="isWideFovDss2" class="wide-fov-hint">
+                            <div class="wide-fov-hint-text">
+                                <strong>Wide FOV ({{ Number(systemFov).toFixed(2) }}°):</strong>
+                                NASA SkyView stitches multiple DSS2 plates at this field size (~20–40s per target).
+                            </div>
+                            <div class="wide-fov-hint-actions">
+                                <button
+                                    type="button"
+                                    class="preset-btn"
+                                    @click="switchSurveySource(systemFov >= 14 ? 'mellinger-r' : 'dss')"
+                                >
+                                    ⚡ Use {{ systemFov >= 14 ? 'Mellinger Ultra-Wide' : 'DSS1 Wide-Field' }}
+                                </button>
+                            </div>
                         </div>
 
                         <div class="two-col">
@@ -2120,16 +2244,193 @@ const activeFiltersCount = computed(() => {
     flex-direction: column;
     gap: 8px;
     background: #111827;
-    padding: 8px;
-    border-radius: 4px;
-    border: 1px solid #f59e0b;
+    padding: 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(245, 158, 11, 0.65);
+}
+
+.dl-header-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
 }
 
 .dl-status {
     font-size: 0.8rem;
     color: #fbbf24;
-    text-align: center;
     font-weight: 600;
+}
+
+.dl-fov-pill {
+    font-size: 0.68rem;
+    color: #93c5fd;
+    background: rgba(30, 58, 138, 0.45);
+    border: 1px solid rgba(59, 130, 246, 0.4);
+    border-radius: 999px;
+    padding: 1px 7px;
+    white-space: nowrap;
+}
+
+.dl-progress-track {
+    width: 100%;
+    height: 5px;
+    background: #1f2937;
+    border-radius: 999px;
+    overflow: hidden;
+}
+
+.dl-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #f59e0b, #fbbf24);
+    border-radius: 999px;
+    transition: width 0.3s ease;
+}
+
+.dl-progress-fill.indeterminate {
+    width: 35%;
+    animation: dl-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes dl-slide {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(300%); }
+}
+
+.dl-active-targets {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.dl-target-item {
+    background: rgba(30, 41, 59, 0.75);
+    border: 1px solid rgba(71, 85, 105, 0.5);
+    border-radius: 4px;
+    padding: 5px 7px;
+}
+
+.dl-target-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.75rem;
+    color: #e5e7eb;
+    font-weight: 600;
+}
+
+.dl-target-elapsed {
+    font-variant-numeric: tabular-nums;
+    color: #fbbf24;
+    font-size: 0.72rem;
+}
+
+.dl-target-detail {
+    font-size: 0.68rem;
+    color: #94a3b8;
+    margin-top: 2px;
+    line-height: 1.3;
+}
+
+.dl-waiting-note {
+    font-size: 0.72rem;
+    color: #94a3b8;
+    text-align: center;
+}
+
+.dl-stats-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 0.72rem;
+    justify-content: space-between;
+}
+
+.dl-stat-ok {
+    color: #34d399;
+}
+
+.dl-stat-muted {
+    color: #94a3b8;
+}
+
+.dl-stat-err {
+    color: #f87171;
+    font-weight: 600;
+}
+
+.dl-inline-error {
+    font-size: 0.7rem;
+    color: #fca5a5;
+    background: rgba(127, 29, 29, 0.35);
+    border: 1px solid rgba(239, 68, 68, 0.4);
+    border-radius: 4px;
+    padding: 4px 6px;
+    line-height: 1.3;
+    word-break: break-word;
+}
+
+.dl-summary-banner {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 6px 8px;
+    border-radius: 5px;
+    font-size: 0.73rem;
+    line-height: 1.35;
+}
+
+.dl-summary-banner.is-ok {
+    background: rgba(6, 78, 59, 0.35);
+    border: 1px solid rgba(16, 185, 129, 0.45);
+    color: #a7f3d0;
+}
+
+.dl-summary-banner.has-errors {
+    background: rgba(127, 29, 29, 0.35);
+    border: 1px solid rgba(239, 68, 68, 0.5);
+    color: #fecaca;
+}
+
+.dl-summary-text {
+    flex: 1;
+    word-break: break-word;
+}
+
+.dl-summary-close {
+    background: transparent;
+    border: none;
+    color: inherit;
+    opacity: 0.75;
+    cursor: pointer;
+    padding: 0 2px;
+    font-size: 0.75rem;
+}
+
+.dl-summary-close:hover {
+    opacity: 1;
+}
+
+.wide-fov-hint {
+    background: rgba(120, 53, 15, 0.28);
+    border: 1px solid rgba(245, 158, 11, 0.45);
+    border-radius: 5px;
+    padding: 7px 8px;
+    margin-bottom: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.wide-fov-hint-text {
+    font-size: 0.72rem;
+    color: #fde68a;
+    line-height: 1.35;
+}
+
+.wide-fov-hint-actions {
+    display: flex;
 }
 
 .empty-hint {

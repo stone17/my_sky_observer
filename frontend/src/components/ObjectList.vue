@@ -37,7 +37,8 @@ const props = defineProps([
     'nightTimes',
     'searchQuery',
     'isDownloading',
-    'downloadProgress'
+    'downloadProgress',
+    'downloadDetails'
 ]);
 const emit = defineEmits([
     'select',
@@ -45,10 +46,57 @@ const emit = defineEmits([
     'fetch-all',
     'download-filtered',
     'stop-download',
+    'dismiss-download-summary',
     'update-settings',
     'update-client-settings',
     'update-search'
 ]);
+
+const listDownloadPercent = computed(() => {
+    const total = Number(props.downloadDetails?.total || 0);
+    const current = Number(props.downloadDetails?.current || 0);
+    if (total <= 0) return 0;
+    return Math.min(100, Math.max(0, Math.round((current / total) * 100)));
+});
+
+const stopBtnLabel = computed(() => {
+    const d = props.downloadDetails;
+    if (d && Number(d.total) > 0) {
+        return `${d.current ?? 0}/${d.total}`;
+    }
+    if (props.downloadProgress) {
+        return props.downloadProgress.replace(/^Downloading\s*/i, '').replace(/\s*—.*$/, '').replace(/\s*\(.*\)/, '') || 'Stop';
+    }
+    return 'Stop';
+});
+
+const activeDownloadTargets = computed(() => {
+    const list = props.downloadDetails?.active_targets;
+    return Array.isArray(list) ? list : [];
+});
+
+const showPostDownloadBanner = computed(() => {
+    if (props.isDownloading) return false;
+    const d = props.downloadDetails;
+    if (!d?.last_summary) return false;
+    return Number(d.failed) > 0 || Number(d.total) === 0 || Boolean(d.last_error);
+});
+
+const getStatusTooltip = (item) => {
+    if (!item) return '';
+    if (item.status === 'error') {
+        return item.error_message ? `Download failed: ${item.error_message}` : 'Survey download failed';
+    }
+    if (item.status === 'downloading') {
+        const active = activeDownloadTargets.value.find((t) => t.id === item.name);
+        if (active) {
+            return `Downloading (${Math.round(Number(active.elapsed_s) || 0)}s) — ${active.detail || 'Fetching from SkyView'}`;
+        }
+        return 'Downloading survey image…';
+    }
+    if (item.status === 'cached') return 'Survey image cached locally';
+    return 'Pending survey image';
+};
 
 const showInfoModal = ref(false);
 const infoObject = ref(null);
@@ -958,7 +1006,49 @@ onUnmounted(() => {
                             @click="emit('stop-download')"
                             :title="downloadProgress ? `${downloadProgress} — Click to stop` : 'Stop downloading images'"
                         >
-                            🛑 {{ downloadProgress ? downloadProgress.replace('Downloading ', '').replace(/\s*\(.*\)/, '') : 'Stop' }}
+                            🛑 {{ stopBtnLabel }}
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Compact Live Batch Download Status Strip -->
+                <div v-if="isDownloading" class="list-dl-strip">
+                    <div class="list-dl-strip-top">
+                        <span class="list-dl-spinner" aria-hidden="true"></span>
+                        <span class="list-dl-text">
+                            <template v-if="activeDownloadTargets.length > 0">
+                                <strong>{{ activeDownloadTargets.map((t) => `${t.id} (${Math.round(Number(t.elapsed_s) || 0)}s)`).join(', ') }}</strong>
+                                <span v-if="activeDownloadTargets[0]?.detail" class="list-dl-sub"> · {{ activeDownloadTargets[0].detail }}</span>
+                            </template>
+                            <template v-else>
+                                {{ downloadProgress || 'Preparing download queue…' }}
+                            </template>
+                        </span>
+                        <span v-if="Number(downloadDetails?.failed) > 0" class="list-dl-fail-pill" :title="downloadDetails?.last_error || ''">
+                            ✗ {{ downloadDetails.failed }}
+                        </span>
+                    </div>
+                    <div class="list-dl-bar">
+                        <div
+                            class="list-dl-bar-fill"
+                            :class="{ indeterminate: !downloadDetails?.total || listDownloadPercent === 0 }"
+                            :style="downloadDetails?.total ? { width: `${listDownloadPercent}%` } : {}"
+                        ></div>
+                    </div>
+                </div>
+                <div v-else-if="showPostDownloadBanner" class="list-dl-strip summary" :class="{ error: Number(downloadDetails?.failed) > 0 || Boolean(downloadDetails?.last_error) }">
+                    <div class="list-dl-strip-top">
+                        <span class="list-dl-text" :title="downloadDetails?.last_error || downloadDetails?.last_summary">
+                            {{ downloadDetails?.last_summary }}
+                            <template v-if="downloadDetails?.last_error"> — {{ downloadDetails.last_error }}</template>
+                        </span>
+                        <button
+                            type="button"
+                            class="list-dl-dismiss"
+                            @click="emit('dismiss-download-summary')"
+                            title="Dismiss"
+                        >
+                            ✕
                         </button>
                     </div>
                 </div>
@@ -1026,9 +1116,9 @@ onUnmounted(() => {
                                 </span>
                                 <button type="button" class="info-icon" @click.stop="openInfo(item)" @dblclick.stop title="Target Details">ⓘ</button>
 
-                                <div class="status-indicator" :class="`status-${item.status}`" :title="item.status">
+                                <div class="status-indicator" :class="`status-${item.status}`" :title="getStatusTooltip(item)">
                                     <span v-if="item.status === 'cached'">✓</span>
-                                    <span v-else-if="item.status === 'downloading'">⟳</span>
+                                    <span v-else-if="item.status === 'downloading'" class="spin-glyph">⟳</span>
                                     <span v-else-if="item.status === 'error'">✗</span>
                                     <span v-else>⋯</span>
                                 </div>
@@ -1526,7 +1616,122 @@ onUnmounted(() => {
 
 .status-cached { color: #10b981; }
 .status-downloading { color: #f59e0b; }
-.status-error { color: #ef4444; }
+.status-error { color: #ef4444; cursor: help; }
+
+.spin-glyph {
+    display: inline-block;
+    animation: listSpin 1s linear infinite;
+}
+
+@keyframes listSpin {
+    to { transform: rotate(360deg); }
+}
+
+.list-dl-strip {
+    margin-top: 6px;
+    padding: 5px 8px;
+    border-radius: 5px;
+    background: rgba(15, 23, 42, 0.85);
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.list-dl-strip.summary {
+    border-color: rgba(56, 189, 248, 0.4);
+}
+
+.list-dl-strip.summary.error {
+    border-color: rgba(239, 68, 68, 0.55);
+    background: rgba(127, 29, 29, 0.2);
+}
+
+.list-dl-strip-top {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.list-dl-spinner {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    border: 2px solid rgba(251, 191, 36, 0.25);
+    border-top-color: #fbbf24;
+    animation: listSpin 0.8s linear infinite;
+    flex-shrink: 0;
+}
+
+.list-dl-text {
+    flex: 1;
+    font-size: 0.7rem;
+    line-height: 1.25;
+    color: #e2e8f0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.list-dl-text strong {
+    color: #fde68a;
+    font-weight: 600;
+}
+
+.list-dl-sub {
+    color: #94a3b8;
+}
+
+.list-dl-fail-pill {
+    font-size: 0.66rem;
+    font-weight: 700;
+    color: #fca5a5;
+    background: rgba(239, 68, 68, 0.2);
+    border: 1px solid rgba(239, 68, 68, 0.45);
+    border-radius: 4px;
+    padding: 1px 5px;
+    flex-shrink: 0;
+    cursor: help;
+}
+
+.list-dl-dismiss {
+    background: transparent;
+    border: none;
+    color: #94a3b8;
+    font-size: 0.72rem;
+    padding: 0 2px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.list-dl-dismiss:hover {
+    color: #f8fafc;
+}
+
+.list-dl-bar {
+    height: 3px;
+    border-radius: 999px;
+    background: rgba(51, 65, 85, 0.8);
+    overflow: hidden;
+    position: relative;
+}
+
+.list-dl-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #10b981, #38bdf8);
+    transition: width 0.25s ease;
+}
+
+.list-dl-bar-fill.indeterminate {
+    width: 35%;
+    animation: listBarSlide 1.2s ease-in-out infinite;
+}
+
+@keyframes listBarSlide {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(300%); }
+}
 
 .common-name {
     font-size: 0.72rem;
