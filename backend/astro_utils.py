@@ -13,9 +13,15 @@ import numpy as np
 from astroplan import Observer
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord, get_body, get_sun
 from astropy.time import Time
+from astropy.utils import iers
 from PIL import Image
 
 from .models import AltitudePoint, Camera, Location, Telescope
+
+# Prevent Astropy from blocking on remote IERS-A downloads or raising ValueError
+# when offline at a dark-sky site or planning future observing dates (>30 days out).
+iers.conf.auto_max_age = None
+iers.conf.auto_download = False
 
 
 class AstroCalculator:
