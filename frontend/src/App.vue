@@ -21,7 +21,16 @@ import {
     prepareCatalogTrigTable,
     computeCatalogVisibilityHours
 } from './utils/observingTime.js';
-import { requestEnterFrameMode } from './utils/skyViewOptions.js';
+import {
+    requestEnterFrameMode,
+    savedEphemerides,
+    ephemeridesVersion,
+    ensureEphemeridesLoaded
+} from './utils/skyViewOptions.js';
+import {
+    buildSolarSystemTargets,
+    solarConstellationVersion
+} from './utils/solarSystem.js';
 
 const LOCAL_STORAGE_BACKUP_KEY = 'my_sky_observer_settings_backup';
 
@@ -47,6 +56,9 @@ const clientSettings = ref({
     comparison_profiles: [],
     favorites: [],
     filter_favorites_only: false,
+    target_view_mode: 'dso',
+    solar_categories: ['sun_moon', 'planets', 'minor'],
+    solar_filter_alt: false,
     selected_object: '',
     search_query: '',
     object_settings: {}
@@ -212,7 +224,7 @@ const extractResponseErrorDetail = async (res, fallbackMsg) => {
 const downloadImage = async (obj, explicitFov = null, explicitResolution = null) => {
     if (!obj) return;
 
-    if (obj.is_custom) {
+    if (obj.is_custom || obj.is_solar_system) {
         const ra = obj.center_ra !== undefined ? obj.center_ra : obj.ra;
         const dec = obj.center_dec !== undefined ? obj.center_dec : obj.dec;
         const fovToUse =
@@ -401,7 +413,13 @@ watch(equipmentSignature, (newSig, oldSig) => {
             selectedObject.value.custom_framed = false;
             delete selectedObject.value.center_ra;
             delete selectedObject.value.center_dec;
-            downloadImage(selectedObject.value, systemFov.value);
+            if (selectedObject.value.is_solar_system) {
+                selectedObject.value.image_url = '';
+                selectedObject.value.status = 'live';
+                triggerRef(selectedObject);
+            } else {
+                downloadImage(selectedObject.value, systemFov.value);
+            }
         }
     } else if (!isManualFov.value) {
         activeFov.value = systemFov.value;
@@ -557,7 +575,7 @@ const isValidSingleSessionGraph = (
 
 const ensureObjectDetails = async (targetObj) => {
     const objName = targetObj?.name;
-    if (!objName || targetObj?.is_custom) return;
+    if (!objName || targetObj?.is_custom || targetObj?.is_solar_system) return;
     const currentEveningKey = observingEvening.value?.key || '';
     if (isValidSingleSessionGraph(targetObj.altitude_graph, nightTimes.value, currentEveningKey)) return;
 
@@ -611,6 +629,16 @@ const ensureObjectDetails = async (targetObj) => {
 
 const handleExternalSelectObject = (incomingObj) => {
     if (!incomingObj || !incomingObj.name) return;
+    if (incomingObj.is_solar_system) {
+        const liveSolar =
+            solarObjectMap.value.get(incomingObj.name) ||
+            solarObjects.value.find((s) => s.solar_id && s.solar_id === incomingObj.solar_id) ||
+            incomingObj;
+        pinnedTopObjectId.value = liveSolar.name;
+        pinnedTopSeq.value += 1;
+        selectedObject.value = liveSolar;
+        return;
+    }
     let canonical = objectMap.get(incomingObj.name) || objects.value.find(o => o.name === incomingObj.name);
     if (!canonical) {
         canonical = mergeObjectDetailsPayload(incomingObj, true) || incomingObj;
@@ -1002,7 +1030,9 @@ const handleListSelectObject = (item) => {
     if (pinnedTopObjectId.value && item.name !== pinnedTopObjectId.value) {
         pinnedTopObjectId.value = '';
     }
-    const canonical = objectMap.get(item.name) || item;
+    const canonical =
+        (item.is_solar_system ? solarObjectMap.value.get(item.name) : objectMap.get(item.name)) ||
+        item;
     selectedObject.value = canonical;
     ensureObjectDetails(canonical);
 };
@@ -1064,7 +1094,7 @@ watch(selectedObject, (newVal, oldVal) => {
         if (!hasCustomImg && newVal.status !== 'downloading') {
             fetchCustomFramedImageForObject(newVal, savedObj.center_ra, savedObj.center_dec, targetFov);
         }
-    } else {
+    } else if (!newVal.is_solar_system) {
         const hasMatchingImage =
             Boolean(newVal.image_url) &&
             newVal.status === 'cached' &&
@@ -1117,9 +1147,15 @@ const handleFovUpdate = (payload) => {
                     offset_y_pct: 0
                 });
             }
-            notifyObjectsMutated(objName);
-            if (!skipDownload) {
-                downloadImage(selectedObject.value, systemFov.value, explicitResolution);
+            if (selectedObject.value.is_solar_system) {
+                selectedObject.value.image_url = '';
+                selectedObject.value.status = 'live';
+                triggerRef(selectedObject);
+            } else {
+                notifyObjectsMutated(objName);
+                if (!skipDownload) {
+                    downloadImage(selectedObject.value, systemFov.value, explicitResolution);
+                }
             }
         }
         return;
@@ -1253,12 +1289,40 @@ const persistFavoritesImmediate = async (favorites, filterFavoritesOnly) => {
     }
 };
 
+const normalizeTargetViewState = (cs) => {
+    if (!cs || typeof cs !== 'object') return;
+    if (!Array.isArray(cs.solar_categories)) {
+        cs.solar_categories = ['sun_moon', 'planets', 'minor'];
+    }
+    if (cs.solar_filter_alt === undefined) {
+        cs.solar_filter_alt = false;
+    }
+    const validModes = new Set(['dso', 'solar', 'favorites']);
+    if (!validModes.has(cs.target_view_mode)) {
+        cs.target_view_mode = cs.filter_favorites_only ? 'favorites' : 'dso';
+    }
+};
+
 const updateClientSettings = (newClientSettings, shouldSave = true) => {
     if (!newClientSettings) return;
     const cloned = JSON.parse(JSON.stringify(newClientSettings));
+    const prevMode = clientSettings.value.target_view_mode || 'dso';
     const prevFavs = JSON.stringify(clientSettings.value.favorites || []);
     const prevFavFilter = Boolean(clientSettings.value.filter_favorites_only);
+
+    if (cloned.target_view_mode && cloned.target_view_mode !== prevMode) {
+        cloned.filter_favorites_only = cloned.target_view_mode === 'favorites';
+    } else if (
+        cloned.filter_favorites_only !== undefined &&
+        Boolean(cloned.filter_favorites_only) !== prevFavFilter &&
+        (!cloned.target_view_mode || cloned.target_view_mode === prevMode)
+    ) {
+        cloned.target_view_mode = cloned.filter_favorites_only ? 'favorites' : 'dso';
+    }
+
     Object.assign(clientSettings.value, cloned);
+    normalizeTargetViewState(clientSettings.value);
+
     if (cloned.search_query !== undefined && searchQuery.value !== cloned.search_query) {
         searchQuery.value = cloned.search_query || '';
     }
@@ -1373,9 +1437,15 @@ const fetchSettings = async () => {
                     }
                     if (favData?.filter_favorites_only !== undefined) {
                         clientSettings.value.filter_favorites_only = Boolean(favData.filter_favorites_only);
+                        if (favData.filter_favorites_only) {
+                            clientSettings.value.target_view_mode = 'favorites';
+                        } else if (clientSettings.value.target_view_mode === 'favorites') {
+                            clientSettings.value.target_view_mode = 'dso';
+                        }
                     }
                 }
             } catch (e) { }
+            normalizeTargetViewState(clientSettings.value);
             searchQuery.value = clientSettings.value.search_query || '';
         }
     } catch (e) { console.error(e); }
@@ -1823,7 +1893,9 @@ const startStream = (mode = 'selected') => {
                     }
                     selectedObject.value = found;
                     ensureObjectDetails(found);
-                } else if (prevSelected && !prevSelected.is_custom) {
+                } else if (solarObjectMap.value.has(currentId)) {
+                    selectedObject.value = solarObjectMap.value.get(currentId);
+                } else if (prevSelected && !prevSelected.is_custom && !prevSelected.is_solar_system) {
                     selectedObject.value = null;
                 }
             }
@@ -1887,6 +1959,61 @@ const availableTypes = computed(() => {
     const types = new Set();
     objects.value.forEach(o => { if (o.type) types.add(o.type); });
     return Array.from(types).sort();
+});
+
+const solarObjects = computed(() => {
+    void ephemeridesVersion.value;
+    void solarConstellationVersion.value;
+    const minAlt = settings.value?.min_altitude ?? 30.0;
+    const minHoursAlt = clientSettings.value?.min_hours_altitude ?? minAlt;
+    const tw = resolveEffectiveTimeWindow(clientSettings.value || {}, nightTimes.value);
+    const list = buildSolarSystemTargets({
+        timeMs: effectiveObsTimeMs.value,
+        evening: observingEvening.value,
+        observerLocation: observerLocation.value,
+        minHoursAltitude: minHoursAlt,
+        timeWindow: tw,
+        savedEphemerides: savedEphemerides.value
+    });
+    for (let i = 0; i < list.length; i++) {
+        applySavedStateToObject(list[i]);
+    }
+    return list;
+});
+
+const solarObjectMap = computed(() => {
+    const map = new Map();
+    const list = solarObjects.value;
+    for (let i = 0; i < list.length; i++) {
+        map.set(list[i].name, list[i]);
+    }
+    return map;
+});
+
+watch(solarObjects, (nextSolarList) => {
+    const cur = selectedObject.value;
+    if (!cur || !cur.is_solar_system) return;
+    const match =
+        nextSolarList.find((s) => (cur.solar_id && s.solar_id === cur.solar_id) || s.name === cur.name) ||
+        null;
+    if (!match) return;
+    const preservedImg = cur.custom_framed && cur.image_url ? cur.image_url : match.image_url;
+    const preservedStatus = cur.custom_framed && cur.image_url ? cur.status : match.status;
+    const preservedCenterRa = cur.custom_framed ? cur.center_ra : undefined;
+    const preservedCenterDec = cur.custom_framed ? cur.center_dec : undefined;
+    const preservedFov = cur.image_fov;
+    const preservedRot = cur.rotation;
+
+    Object.assign(cur, match);
+    if (preservedRot !== undefined) cur.rotation = preservedRot;
+    if (cur.custom_framed && preservedImg) {
+        cur.image_url = preservedImg;
+        cur.status = preservedStatus;
+        cur.center_ra = preservedCenterRa;
+        cur.center_dec = preservedCenterDec;
+    }
+    if (preservedFov) cur.image_fov = preservedFov;
+    triggerRef(selectedObject);
 });
 
 const typeCounts = computed(() => {
@@ -2067,6 +2194,7 @@ onMounted(async () => {
         activeLeftTab.value = null;
     }
     isInitializing = true;
+    ensureEphemeridesLoaded();
     await fetchSettings();
     if (observerLocation.value) {
         const eph = computeNightEphemerisForEvening(observingEvening.value, observerLocation.value);
@@ -2106,6 +2234,7 @@ watch(clientSettings, () => {
                 :settings="settings"
                 :client-settings="clientSettings"
                 :night-times="nightTimes"
+                :solar-objects="solarObjects"
                 :available-types="availableTypes"
                 :type-counts="typeCounts"
                 :stream-status="streamStatus"
@@ -2127,6 +2256,7 @@ watch(clientSettings, () => {
                 @toggle-mobile-list="toggleMobileList"
                 @update-settings="saveSettings"
                 @update-client-settings="updateClientSettings"
+                @select-object="handleExternalSelectObject"
                 @start-stream="startStream"
                 @stop-stream="stopStream"
                 @purge-cache="handlePurge"
@@ -2142,6 +2272,7 @@ watch(clientSettings, () => {
                     <Framing
                         :object="selectedObject"
                         :objects="objects"
+                        :solar-objects="solarObjects"
                         :filtered-objects="filteredObjectsList"
                         :settings="settings"
                         :clientSettings="clientSettings"
@@ -2218,6 +2349,7 @@ watch(clientSettings, () => {
                 <div class="list-panel">
                     <ObjectList
                         :objects="objects"
+                        :solarObjects="solarObjects"
                         :catalogTrigTable="catalogTrigTable"
                         :observingEvening="observingEvening"
                         :selectedId="selectedObject?.name"
@@ -2246,7 +2378,10 @@ watch(clientSettings, () => {
         </div>
 
         <!-- Global Ephemeris Manager & JPL Horizons Downloader -->
-        <EphemerisModal :effective-obs-time-ms="effectiveObsTimeMs" />
+        <EphemerisModal
+            :settings="settings"
+            :effective-time-ms="effectiveObsTimeMs"
+        />
     </div>
 </template>
 

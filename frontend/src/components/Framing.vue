@@ -25,6 +25,7 @@ import { pendingSkyMapCenter, enterFrameModeToken } from '../utils/skyViewOption
 const props = defineProps([
     'object',
     'objects',
+    'solarObjects',
     'filteredObjects',
     'settings',
     'clientSettings',
@@ -417,8 +418,8 @@ const fovOverlayObjects = computed(() => {
 
     const items = [];
 
-    // 1. Primary selected object (skip synthetic custom sky positions)
-    if (!props.object.is_custom) {
+    // 1. Primary selected object (skip synthetic custom sky positions & solar system bodies)
+    if (!props.object.is_custom && !props.object.is_solar_system) {
         const primaryProj = projectCoord(props.object.ra, props.object.dec);
         const primaryMaj = parseSizeArcmin(props.object);
         if (primaryProj) {
@@ -564,6 +565,126 @@ const fovOverlayObjects = computed(() => {
 const onOverlayObjectClick = (marker) => {
     if (marker.catalogRef && marker.catalogRef.name !== props.object?.name) {
         emit('select-object', marker.catalogRef);
+    }
+};
+
+// --- LIVE SOLAR SYSTEM BODY OVERLAYS IN FRAMING VIEW ---
+const buildFramingLunarLitPath = (phaseFraction = 0.5) => {
+    // Sunlit limb oriented toward +X in local SVG viewBox (-50..50, r = 46)
+    const r = 46;
+    const k = Math.max(0.0, Math.min(1.0, Number(phaseFraction) || 0));
+    if (k <= 0.01) return '';
+    if (k >= 0.99) {
+        return `M 0,${-r} A ${r},${r} 0 1,1 0,${r} A ${r},${r} 0 1,1 0,${-r} Z`;
+    }
+    const rx = Math.abs(1.0 - 2.0 * k) * r;
+    const termSweep = k > 0.5 ? 1 : 0;
+    return `M 0,${-r} A ${r},${r} 0 0,1 0,${r} A ${rx.toFixed(2)},${r} 0 0,${termSweep} 0,${-r} Z`;
+};
+
+const fovSolarBodies = computed(() => {
+    if (!props.object) return [];
+    const imgFov = effectiveDisplayFov.value;
+    if (!imgFov || imgFov <= 0.001) return [];
+
+    const centerRa = parseFloat(
+        props.object.center_ra !== undefined ? props.object.center_ra : props.object.ra
+    );
+    const centerDec = parseFloat(
+        props.object.center_dec !== undefined ? props.object.center_dec : props.object.dec
+    );
+    if (!Number.isFinite(centerRa) || !Number.isFinite(centerDec)) return [];
+
+    const cosDec = Math.max(Math.cos((centerDec * Math.PI) / 180.0), 0.01);
+    const halfFov = imgFov * 0.5;
+    const candidates = Array.isArray(props.solarObjects) && props.solarObjects.length > 0
+        ? props.solarObjects
+        : props.object.is_solar_system
+          ? [props.object]
+          : [];
+
+    const markers = [];
+    for (let i = 0; i < candidates.length; i++) {
+        const body = candidates[i];
+        if (!body || !Number.isFinite(Number(body.ra)) || !Number.isFinite(Number(body.dec))) continue;
+        const isPrimary = body.name === props.object.name;
+        if (!isPrimary && !showOverlays.value) continue;
+
+        const bRa = Number(body.ra);
+        const bDec = Number(body.dec);
+        let dRa = bRa - centerRa;
+        if (dRa > 180) dRa -= 360;
+        if (dRa < -180) dRa += 360;
+        const dDec = bDec - centerDec;
+
+        const dxDeg = -dRa * cosDec;
+        const dyDeg = -dDec;
+        const bodyRadDeg = Math.max(0.02, Number(body.angular_diameter_deg || 0) * 0.5);
+        if (Math.abs(dxDeg) > halfFov + bodyRadDeg || Math.abs(dyDeg) > halfFov + bodyRadDeg) {
+            continue;
+        }
+
+        const xPct = 50 + (dxDeg / imgFov) * 100;
+        const yPct = 50 + (dyDeg / imgFov) * 100;
+        const trueDiamPct = ((Number(body.angular_diameter_deg) || 0) / imgFov) * 100;
+        const ringDiamPct = ((Number(body.ring_diameter_deg) || 0) / imgFov) * 100;
+        const boxPct = Math.max(trueDiamPct, ringDiamPct, 4.4);
+
+        let limbAngleDeg = 0;
+        if (body.solar_id === 'moon' && Number.isFinite(Number(body.sun_ra)) && Number.isFinite(Number(body.sun_dec))) {
+            const aM = (bRa * Math.PI) / 180.0;
+            const dM = (bDec * Math.PI) / 180.0;
+            const aS = (Number(body.sun_ra) * Math.PI) / 180.0;
+            const dS = (Number(body.sun_dec) * Math.PI) / 180.0;
+            const cdM = Math.cos(dM);
+            const cdS = Math.cos(dS);
+            const mx = cdM * Math.cos(aM);
+            const my = cdM * Math.sin(aM);
+            const mz = Math.sin(dM);
+            const sx = cdS * Math.cos(aS);
+            const sy = cdS * Math.sin(aS);
+            const sz = Math.sin(dS);
+            const dot = mx * sx + my * sy + mz * sz;
+            const tx = sx - dot * mx;
+            const ty = sy - dot * my;
+            const tz = sz - dot * mz;
+            const ex = -Math.sin(aM);
+            const ey = Math.cos(aM);
+            const nx = -Math.sin(dM) * Math.cos(aM);
+            const ny = -Math.sin(dM) * Math.sin(aM);
+            const nz = cdM;
+            const sxScreen = -(tx * ex + ty * ey);
+            const syScreen = -(tx * nx + ty * ny + tz * nz);
+            if (sxScreen * sxScreen + syScreen * syScreen > 1e-10) {
+                limbAngleDeg = (Math.atan2(syScreen, sxScreen) * 180.0) / Math.PI;
+            }
+        }
+
+        markers.push({
+            key: `solar-${body.solar_id || body.name}`,
+            name: body.name,
+            symbol: body.symbol || '🪐',
+            solarId: body.solar_id || '',
+            isEphemeris: Boolean(body.is_ephemeris),
+            color: body.solar_color || '#fbbf24',
+            sizeLabel: body.size || '',
+            subtitle: body.common_name || '',
+            xPct,
+            yPct,
+            boxPct: Math.min(boxPct, 180),
+            isTrueScaleDisc: trueDiamPct >= 2.2,
+            phaseFraction: body.phase_fraction ?? 1.0,
+            limbAngleDeg,
+            isPrimary,
+            solarRef: body
+        });
+    }
+    return markers;
+});
+
+const onSolarBodyClick = (marker) => {
+    if (marker?.solarRef && marker.name !== props.object?.name) {
+        emit('select-object', marker.solarRef);
     }
 };
 
@@ -1342,6 +1463,7 @@ onUnmounted(() => {
                 v-if="showSkyMap && object"
                 :object="object"
                 :objects="objects"
+                :solarObjects="solarObjects"
                 :filteredObjects="filteredObjects"
                 :settings="settings"
                 :clientSettings="clientSettings"
@@ -1438,6 +1560,26 @@ onUnmounted(() => {
                     </button>
                 </template>
 
+                <template v-else-if="object.is_solar_system">
+                    <span class="status-banner-badge live-ephem">LIVE</span>
+                    <div class="status-banner-copy">
+                        <span class="status-banner-title">
+                            {{ object.symbol || '🪐' }} {{ object.name }} · True-Scale Ephemeris ({{ effectiveDisplayFov.toFixed(2) }}° View)
+                        </span>
+                        <span class="status-banner-sub">
+                            Live Sky Atlas starfield · Scrub time below to preview motion across sensor
+                        </span>
+                    </div>
+                    <button
+                        type="button"
+                        class="status-banner-action"
+                        @click="updateImage()"
+                        title="Download high-resolution background starfield at current RA/Dec"
+                    >
+                        ↻ Starfield
+                    </button>
+                </template>
+
                 <template v-else>
                     <span class="status-banner-badge preview">PREVIEW</span>
                     <div class="status-banner-copy">
@@ -1490,6 +1632,71 @@ onUnmounted(() => {
                     />
                     <div v-if="!object.image_url && !hasAtlasPreview" class="sky-image placeholder-text">
                         <span>No Image Loaded</span>
+                    </div>
+                </div>
+
+                <!-- Live Solar System Body Overlays (True-Scale Sun/Moon Phase & Planet Reticles) -->
+                <div
+                    v-if="(!isObjectDownloading || hasAtlasPreview) && fovSolarBodies.length > 0"
+                    class="object-overlays-layer solar-overlays-layer"
+                >
+                    <div
+                        v-for="sBody in fovSolarBodies"
+                        :key="sBody.key"
+                        class="solar-fov-marker"
+                        :class="{
+                            'is-primary': sBody.isPrimary,
+                            'is-clickable': !sBody.isPrimary
+                        }"
+                        :style="{
+                            left: `${sBody.xPct}%`,
+                            top: `${sBody.yPct}%`,
+                            width: `${sBody.boxPct}%`,
+                            height: `${sBody.boxPct}%`
+                        }"
+                    >
+                        <svg class="solar-fov-svg" viewBox="-50 -50 100 100" overflow="visible">
+                            <template v-if="sBody.solarId === 'sun'">
+                                <circle cx="0" cy="0" r="49" fill="rgba(251, 191, 36, 0.24)" />
+                                <circle cx="0" cy="0" r="46" fill="rgba(253, 224, 71, 0.88)" stroke="#f59e0b" stroke-width="1.5" />
+                            </template>
+                            <template v-else-if="sBody.solarId === 'moon'">
+                                <g :transform="`rotate(${sBody.limbAngleDeg.toFixed(1)})`">
+                                    <circle cx="0" cy="0" r="46" fill="rgba(30, 41, 59, 0.9)" stroke="rgba(226, 232, 240, 0.65)" stroke-width="1.4" />
+                                    <path
+                                        v-if="buildFramingLunarLitPath(sBody.phaseFraction)"
+                                        :d="buildFramingLunarLitPath(sBody.phaseFraction)"
+                                        fill="rgba(248, 250, 252, 0.92)"
+                                    />
+                                </g>
+                            </template>
+                            <template v-else-if="sBody.solarId === 'saturn'">
+                                <circle cx="0" cy="0" r="44" fill="none" stroke="rgba(251, 191, 36, 0.65)" stroke-width="1.5" stroke-dasharray="4,3" />
+                                <ellipse cx="0" cy="0" rx="34" ry="12" transform="rotate(-16)" fill="none" stroke="#fde68a" stroke-width="3.2" />
+                                <circle cx="0" cy="0" r="16" :fill="sBody.color" />
+                            </template>
+                            <template v-else-if="sBody.isEphemeris">
+                                <circle cx="0" cy="0" r="44" fill="none" :stroke="sBody.color" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.8" />
+                                <line x1="28" y1="-28" x2="0" y2="0" :stroke="sBody.color" stroke-width="6" stroke-linecap="round" opacity="0.45" />
+                                <circle cx="0" cy="0" r="11" :fill="sBody.color" />
+                            </template>
+                            <template v-else>
+                                <circle cx="0" cy="0" r="44" fill="none" :stroke="sBody.color" stroke-width="1.5" stroke-dasharray="4,3" opacity="0.8" />
+                                <circle cx="0" cy="0" :r="sBody.isTrueScaleDisc ? 46 : 14" :fill="sBody.color" fill-opacity="0.9" />
+                            </template>
+                        </svg>
+                        <div
+                            v-if="showOverlays || !sBody.isPrimary"
+                            class="fov-object-label solar-fov-label"
+                            :class="{ 'label-below': sBody.yPct - sBody.boxPct / 2 < 10 }"
+                            :title="`${sBody.name} — ${sBody.subtitle} (${sBody.sizeLabel})`"
+                            @click.stop="onSolarBodyClick(sBody)"
+                        >
+                            <span class="fov-label-id">{{ sBody.symbol }} {{ sBody.name }}</span>
+                            <span v-if="sBody.sizeLabel && sBody.sizeLabel !== '—'" class="fov-label-common">
+                                · {{ sBody.sizeLabel }}
+                            </span>
+                        </div>
                     </div>
                 </div>
 
@@ -3029,5 +3236,43 @@ onUnmounted(() => {
     background: rgba(14, 116, 144, 0.34);
     border-color: rgba(56, 189, 248, 0.65);
     color: #ffffff;
+}
+
+.status-banner-badge.live-ephem {
+    background: rgba(56, 189, 248, 0.2);
+    color: #38bdf8;
+    border: 1px solid rgba(56, 189, 248, 0.5);
+}
+
+.solar-overlays-layer {
+    z-index: 12;
+}
+
+.solar-fov-marker {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    min-width: 28px;
+    min-height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.solar-fov-svg {
+    width: 100%;
+    height: 100%;
+    filter: drop-shadow(0 0 8px rgba(0, 0, 0, 0.65));
+}
+
+.solar-fov-label {
+    border-color: rgba(251, 191, 36, 0.6) !important;
+    background: rgba(15, 23, 42, 0.88) !important;
+    color: #fde68a !important;
+}
+
+.solar-fov-marker.is-clickable .solar-fov-label {
+    pointer-events: auto;
+    cursor: pointer;
 }
 </style>

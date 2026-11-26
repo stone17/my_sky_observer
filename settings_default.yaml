@@ -68,6 +68,12 @@ client_settings:
   comparison_profiles: []
   favorites: []
   filter_favorites_only: false
+  target_view_mode: "dso"
+  solar_categories:
+  - sun_moon
+  - planets
+  - minor
+  solar_filter_alt: false
   selected_object: ""
   search_query: ""
   object_settings: {}

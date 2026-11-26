@@ -176,3 +176,49 @@ def test_api_object_details_obs_date_updates_graph_and_night_times():
         assert winter["hours_visible"] > summer["hours_visible"] + 4.0
 
 
+def test_solar_system_object_details():
+    mock_settings = {
+        "location": {"latitude": 48.1351, "longitude": 11.5820},
+        "telescope": {"focal_length": 1000.0},
+        "camera": {"sensor_width": 23.5, "sensor_height": 15.6},
+        "min_altitude": 20.0,
+    }
+    with patch("backend.main.load_settings", return_value=dict(mock_settings)):
+        client = TestClient(app)
+
+        jup_resp = client.get(
+            "/api/object-details/Jupiter", params={"obs_date": "2026-11-26"}
+        )
+        assert jup_resp.status_code == 200
+        jup = jup_resp.json()
+        assert jup["name"] == "Jupiter"
+        assert jup["is_solar_system"] is True
+        assert jup["solar_id"] == "jupiter"
+        assert jup["type"] == "Planet"
+        assert jup["status"] == "live"
+        assert len(jup["altitude_graph"]) == 60
+        assert '"' in jup["size"]  # Planet size formatted in arcseconds
+
+        moon_resp = client.get(
+            "/api/object-details/Moon", params={"obs_date": "2026-11-26"}
+        )
+        assert moon_resp.status_code == 200
+        moon = moon_resp.json()
+        assert moon["name"] == "Moon"
+        assert moon["is_solar_system"] is True
+        assert moon["solar_id"] == "moon"
+        assert "'" in moon["size"]  # Moon size formatted in arcminutes
+
+        sun_resp = client.get(
+            "/api/object-details/Sun", params={"obs_date": "2026-06-21"}
+        )
+        assert sun_resp.status_code == 200
+        sun = sun_resp.json()
+        assert sun["name"] == "Sun"
+        assert sun["is_solar_system"] is True
+        assert sun["solar_id"] == "sun"
+        assert max(pt["altitude"] for pt in sun["altitude_graph"]) > 55.0
+        assert sun["hours_visible"] > 6.0
+
+
+

@@ -23,9 +23,11 @@ import {
     ensureSkyAtlasLoaded,
     getAtlasThumbnailSnapshot
 } from '../utils/skyAtlas.js';
+import { openEphemerisModal } from '../utils/skyViewOptions.js';
 
 const props = defineProps([
     'objects',
+    'solarObjects',
     'catalogTrigTable',
     'observingEvening',
     'selectedId',
@@ -84,6 +86,11 @@ const showPostDownloadBanner = computed(() => {
 
 const getStatusTooltip = (item) => {
     if (!item) return '';
+    if (item.status === 'live') {
+        return item.solar_id === 'sun'
+            ? 'Live solar ephemeris (daytime altitude arc)'
+            : 'Live topocentric ephemeris at active observing time';
+    }
     if (item.status === 'error') {
         return item.error_message ? `Download failed: ${item.error_message}` : 'Survey download failed';
     }
@@ -136,6 +143,17 @@ watch(() => props.clientSettings, (newVal) => {
         if (localClientSettings.value.filter_na_mag === undefined) localClientSettings.value.filter_na_mag = true;
         if (localClientSettings.value.filter_active_size === undefined) localClientSettings.value.filter_active_size = true;
         if (localClientSettings.value.filter_na_size === undefined) localClientSettings.value.filter_na_size = true;
+        if (!Array.isArray(localClientSettings.value.solar_categories)) {
+            localClientSettings.value.solar_categories = ['sun_moon', 'planets', 'minor'];
+        }
+        if (localClientSettings.value.solar_filter_alt === undefined) {
+            localClientSettings.value.solar_filter_alt = false;
+        }
+        if (!['dso', 'solar', 'favorites'].includes(localClientSettings.value.target_view_mode)) {
+            localClientSettings.value.target_view_mode = localClientSettings.value.filter_favorites_only
+                ? 'favorites'
+                : 'dso';
+        }
     }
 }, { immediate: true, deep: true });
 
@@ -148,9 +166,28 @@ const favoritesSet = computed(() => {
 
 const favoritesCount = computed(() => favoritesSet.value.size);
 
-const isFavoritesFilterActive = computed(() => {
-    return Boolean(localClientSettings.value?.filter_favorites_only);
+const activeViewMode = computed(() => {
+    const m = localClientSettings.value?.target_view_mode;
+    if (m === 'solar' || m === 'favorites' || m === 'dso') return m;
+    return localClientSettings.value?.filter_favorites_only ? 'favorites' : 'dso';
 });
+
+const isFavoritesFilterActive = computed(() => {
+    return activeViewMode.value === 'favorites';
+});
+
+const setViewMode = (mode) => {
+    if (!['dso', 'solar', 'favorites'].includes(mode)) return;
+    const updated = {
+        ...localClientSettings.value,
+        target_view_mode: mode,
+        filter_favorites_only: mode === 'favorites'
+    };
+    localClientSettings.value = updated;
+    renderedLimit.value = 50;
+    scrollListToTop();
+    emit('update-client-settings', updated);
+};
 
 const isFavorite = (name) => {
     return Boolean(name && favoritesSet.value.has(name));
@@ -173,12 +210,7 @@ const toggleFavorite = (name) => {
 };
 
 const toggleFavoritesFilter = () => {
-    const updated = {
-        ...localClientSettings.value,
-        filter_favorites_only: !localClientSettings.value.filter_favorites_only
-    };
-    localClientSettings.value = updated;
-    emit('update-client-settings', updated);
+    setViewMode(activeViewMode.value === 'favorites' ? 'dso' : 'favorites');
 };
 
 const scrollListToTop = () => {
@@ -228,6 +260,11 @@ const clearSearch = () => {
 };
 
 const selectSuggestion = (obj) => {
+    if (obj?.is_solar_system && activeViewMode.value === 'dso') {
+        setViewMode('solar');
+    } else if (obj && !obj.is_solar_system && activeViewMode.value === 'solar') {
+        setViewMode('dso');
+    }
     emit('update-search', obj.name);
     handleObjectClick(obj);
     showSuggestions.value = false;
@@ -237,23 +274,36 @@ const onSearchBlur = () => {
     setTimeout(() => { showSuggestions.value = false; }, 200);
 };
 
+const ensureNormSearchFields = (o) => {
+    if (!o) return;
+    if (o._normId === undefined) o._normId = (o.name || '').toLowerCase().replace(/\s+/g, '');
+    if (o._normCommon === undefined) o._normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
+    if (o._normOther === undefined) o._normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
+    if (o._normAliases === undefined) o._normAliases = (o.aliases || '').toLowerCase().replace(/\s+/g, '');
+    if (o._normAliasTokens === undefined) {
+        o._normAliasTokens = (o.aliases || '')
+            .split(',')
+            .map(t => t.toLowerCase().replace(/\s+/g, ''))
+            .filter(Boolean);
+    }
+};
+
 const suggestionList = computed(() => {
     const q = (props.searchQuery || '').trim();
     if (!q) return [];
     const normQ = q.toLowerCase().replace(/\s+/g, '');
-    const matches = (props.objects || []).filter(o => {
-        if (o._normId === undefined) o._normId = (o.name || '').toLowerCase().replace(/\s+/g, '');
-        if (o._normCommon === undefined) o._normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
-        if (o._normOther === undefined) o._normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
-        if (o._normAliases === undefined) o._normAliases = (o.aliases || '').toLowerCase().replace(/\s+/g, '');
-        if (o._normAliasTokens === undefined) {
-            o._normAliasTokens = (o.aliases || '')
-                .split(',')
-                .map(t => t.toLowerCase().replace(/\s+/g, ''))
-                .filter(Boolean);
-        }
-        
-        return o._normId.includes(normQ) || o._normCommon.includes(normQ) || o._normOther.includes(normQ) || o._normAliases.includes(normQ);
+    const pool =
+        activeViewMode.value === 'solar'
+            ? [...(props.solarObjects || []), ...(props.objects || [])]
+            : [...(props.solarObjects || []), ...(props.objects || [])];
+    const matches = pool.filter(o => {
+        ensureNormSearchFields(o);
+        return (
+            o._normId.includes(normQ) ||
+            o._normCommon.includes(normQ) ||
+            o._normOther.includes(normQ) ||
+            o._normAliases.includes(normQ)
+        );
     });
     return matches.slice(0, 8);
 });
@@ -288,6 +338,9 @@ const visibilityHoursArr = computed(() => {
 
 const getItemHours = (item) => {
     if (!item) return 0;
+    if (item.is_solar_system) {
+        return item.hours_visible ? Math.round(item.hours_visible * 10) / 10 : 0;
+    }
     const arr = visibilityHoursArr.value;
     if (arr) {
         const idx = catalogIndexByName.value.get(item.name);
@@ -301,11 +354,9 @@ const getItemHours = (item) => {
 };
 
 const filteredState = computed(() => {
-    const list = props.objects || [];
-    const len = list.length;
-    if (len === 0) {
-        return { list: [], searchMatches: new Set() };
-    }
+    const dsoList = props.objects || [];
+    const solarList = props.solarObjects || [];
+    const mode = activeViewMode.value;
 
     const minAlt = localSettings.value.min_altitude || 30;
     const activeAlt = localClientSettings.value.filter_active_alt !== false;
@@ -328,12 +379,16 @@ const filteredState = computed(() => {
     const selectedTypeSet =
         !rejectAllTypes && selectedTypes.length > 0 ? new Set(selectedTypes) : null;
 
+    const solarCategories = Array.isArray(localClientSettings.value.solar_categories)
+        ? new Set(localClientSettings.value.solar_categories)
+        : new Set(['sun_moon', 'planets', 'minor']);
+    const solarFilterAlt = Boolean(localClientSettings.value.solar_filter_alt);
+
     const sortKey = localSettings.value.sort_key || 'time';
 
     const q = (props.searchQuery || '').trim().toLowerCase();
     const normQ = q.replace(/\s+/g, '');
 
-    const onlyFavs = Boolean(localClientSettings.value.filter_favorites_only);
     const favSet = favoritesSet.value;
     const pinnedName = props.pinnedId || '';
 
@@ -342,77 +397,107 @@ const filteredState = computed(() => {
     const result = [];
     const resultHours = sortKey === 'hours_above' ? new Map() : null;
 
-    for (let i = 0; i < len; i++) {
-        const o = list[i];
-        const isPinned = Boolean(pinnedName && o.name === pinnedName);
-        if (!isPinned && onlyFavs && !favSet.has(o.name)) continue;
-
-        let isMatch = false;
-        if (normQ) {
-            if (o._normId === undefined) o._normId = (o.name || '').toLowerCase().replace(/\s+/g, '');
-            if (o._normCommon === undefined) o._normCommon = (o.common_name || '').toLowerCase().replace(/\s+/g, '');
-            if (o._normOther === undefined) o._normOther = (o.other_id || '').toLowerCase().replace(/\s+/g, '');
-            if (o._normAliases === undefined) o._normAliases = (o.aliases || '').toLowerCase().replace(/\s+/g, '');
-            if (
-                o._normId.includes(normQ) ||
-                o._normCommon.includes(normQ) ||
-                o._normOther.includes(normQ) ||
-                o._normAliases.includes(normQ)
-            ) {
-                isMatch = true;
-                searchMatches.add(o.name);
-            }
+    const checkSearchMatch = (o) => {
+        if (!normQ) return false;
+        ensureNormSearchFields(o);
+        if (
+            o._normId.includes(normQ) ||
+            o._normCommon.includes(normQ) ||
+            o._normOther.includes(normQ) ||
+            o._normAliases.includes(normQ)
+        ) {
+            searchMatches.add(o.name);
+            return true;
         }
+        return false;
+    };
 
-        const rawHrs = visHours && i < visHours.length ? visHours[i] : o.hours_visible;
-        const isNaHrs = rawHrs === undefined || rawHrs === null || rawHrs < 0;
-        const effectiveHrs = isNaHrs ? 0 : rawHrs;
+    // 1. Solar System items (in 'solar' mode, 'favorites' mode, or if pinned from Sky Map)
+    if (mode === 'solar' || mode === 'favorites' || pinnedName) {
+        for (let i = 0; i < solarList.length; i++) {
+            const s = solarList[i];
+            const isPinned = Boolean(pinnedName && s.name === pinnedName);
+            if (mode === 'dso' && !isPinned) continue;
+            if (mode === 'favorites' && !isPinned && !favSet.has(s.name)) continue;
 
-        // If it's not a search match or Sky-Map-pinned target, apply normal filters.
-        if (!isMatch && !isPinned) {
-            if (rejectAllTypes) continue;
-            if (selectedTypeSet && !selectedTypeSet.has(o.type)) continue;
-
-            if (activeHrs) {
-                if (isNaHrs) {
-                    if (!naHrs) continue;
-                } else if (minHrs > 0 && effectiveHrs < minHrs) {
+            const isMatch = checkSearchMatch(s);
+            if (!isMatch && !isPinned) {
+                if (mode === 'solar') {
+                    const cat = s.solar_category || 'planets';
+                    if (!solarCategories.has(cat)) continue;
+                }
+                if (solarFilterAlt && minAlt > 0 && (s.max_altitude ?? 0) < minAlt) {
                     continue;
                 }
             }
 
-            if (activeAlt) {
-                const isNaAlt = o.max_altitude === undefined || o.max_altitude === null;
-                if (isNaAlt) {
-                    if (!naAlt) continue;
-                } else if (minAlt > 0 && o.max_altitude < minAlt) {
-                    continue;
-                }
+            if (resultHours) {
+                resultHours.set(s.name, s.hours_visible || 0);
             }
-
-            if (activeMag) {
-                const isNaMag = o.mag === undefined || o.mag === null || o.mag >= 99;
-                if (isNaMag) {
-                    if (!naMag) continue;
-                } else if (maxMag !== undefined && o.mag > maxMag) {
-                    continue;
-                }
-            }
-
-            if (activeSize) {
-                const isNaSize = o.maj_ax === undefined || o.maj_ax === null || o.maj_ax === 0;
-                if (isNaSize) {
-                    if (!naSize) continue;
-                } else if (minSize > 0 && o.maj_ax < minSize) {
-                    continue;
-                }
-            }
+            result.push(s);
         }
+    }
 
-        if (resultHours) {
-            resultHours.set(o.name, effectiveHrs);
+    // 2. Deep-Sky Catalog items (in 'dso' or 'favorites' mode)
+    if (mode === 'dso' || mode === 'favorites') {
+        const len = dsoList.length;
+        for (let i = 0; i < len; i++) {
+            const o = dsoList[i];
+            const isPinned = Boolean(pinnedName && o.name === pinnedName);
+            if (mode === 'favorites' && !isPinned && !favSet.has(o.name)) continue;
+
+            const isMatch = checkSearchMatch(o);
+
+            const rawHrs = visHours && i < visHours.length ? visHours[i] : o.hours_visible;
+            const isNaHrs = rawHrs === undefined || rawHrs === null || rawHrs < 0;
+            const effectiveHrs = isNaHrs ? 0 : rawHrs;
+
+            // If it's not a search match or Sky-Map-pinned target, apply normal filters.
+            if (!isMatch && !isPinned) {
+                if (rejectAllTypes) continue;
+                if (selectedTypeSet && !selectedTypeSet.has(o.type)) continue;
+
+                if (activeHrs) {
+                    if (isNaHrs) {
+                        if (!naHrs) continue;
+                    } else if (minHrs > 0 && effectiveHrs < minHrs) {
+                        continue;
+                    }
+                }
+
+                if (activeAlt) {
+                    const isNaAlt = o.max_altitude === undefined || o.max_altitude === null;
+                    if (isNaAlt) {
+                        if (!naAlt) continue;
+                    } else if (minAlt > 0 && o.max_altitude < minAlt) {
+                        continue;
+                    }
+                }
+
+                if (activeMag) {
+                    const isNaMag = o.mag === undefined || o.mag === null || o.mag >= 99;
+                    if (isNaMag) {
+                        if (!naMag) continue;
+                    } else if (maxMag !== undefined && o.mag > maxMag) {
+                        continue;
+                    }
+                }
+
+                if (activeSize) {
+                    const isNaSize = o.maj_ax === undefined || o.maj_ax === null || o.maj_ax === 0;
+                    if (isNaSize) {
+                        if (!naSize) continue;
+                    } else if (minSize > 0 && o.maj_ax < minSize) {
+                        continue;
+                    }
+                }
+            }
+
+            if (resultHours) {
+                resultHours.set(o.name, effectiveHrs);
+            }
+            result.push(o);
         }
-        result.push(o);
     }
 
     result.sort((a, b) => {
@@ -455,8 +540,8 @@ const filteredState = computed(() => {
             valA = resultHours ? (resultHours.get(a.name) || 0) : 0;
             valB = resultHours ? (resultHours.get(b.name) || 0) : 0;
         } else if (sortKey === 'brightness') {
-            valA = a.mag || 99;
-            valB = b.mag || 99;
+            valA = a.mag !== undefined && a.mag !== null ? a.mag : 99;
+            valB = b.mag !== undefined && b.mag !== null ? b.mag : 99;
             dir = 1;
         } else if (sortKey === 'size') {
             valA = a.maj_ax || 0;
@@ -478,6 +563,15 @@ const displayedObjects = computed(() => {
 });
 
 const typePoolCount = computed(() => {
+    if (activeViewMode.value === 'solar') {
+        const cats = Array.isArray(localClientSettings.value.solar_categories)
+            ? new Set(localClientSettings.value.solar_categories)
+            : new Set(['sun_moon', 'planets', 'minor']);
+        return (props.solarObjects || []).filter((s) => cats.has(s.solar_category || 'planets')).length;
+    }
+    if (activeViewMode.value === 'favorites') {
+        return favoritesCount.value;
+    }
     const selectedTypes = localClientSettings.value.selected_types || [];
     if (selectedTypes.length === 0) return (props.objects || []).length;
     if (selectedTypes.includes('__NONE__')) return 0;
@@ -488,7 +582,7 @@ const typePoolCount = computed(() => {
 const uncachedFilteredCount = computed(() => {
     let count = 0;
     for (const o of filteredAndSortedObjects.value) {
-        if (o.status !== 'cached') {
+        if (!o.is_solar_system && o.status !== 'cached') {
             count++;
         }
     }
@@ -503,7 +597,10 @@ watch(filteredAndSortedObjects, (newList) => {
         if (savedIdx !== -1) {
             handleObjectClick(newList[savedIdx]);
         } else {
-            const savedInAll = savedId ? (props.objects || []).find(o => o.name === savedId) : null;
+            const savedInAll = savedId
+                ? (props.solarObjects || []).find(o => o.name === savedId) ||
+                  (props.objects || []).find(o => o.name === savedId)
+                : null;
             handleObjectClick(savedInAll || newList[0]);
         }
     }
@@ -850,6 +947,9 @@ const getAltitudePath = (altitudeGraph) => {
 
 const getMiniSparklinePath = (item) => {
     if (!item) return "";
+    if (item.is_solar_system && Array.isArray(item.altitude_graph) && item.altitude_graph.length > 1) {
+        return getAltitudePath(item.altitude_graph);
+    }
     if (sparklineBasis.value && Number.isFinite(item.ra) && Number.isFinite(item.dec)) {
         return computeObjectSparklinePath(item, sparklineBasis.value, 100, 40);
     }
@@ -861,6 +961,20 @@ const getMiniSparklinePath = (item) => {
         return getAltitudePath(item.altitude_graph);
     }
     return "";
+};
+
+const buildLunarPhaseThumbPath = (phaseFraction = 0.5, isWaxing = true) => {
+    const r = 13;
+    const k = Math.max(0.0, Math.min(1.0, Number(phaseFraction) || 0));
+    if (k <= 0.01) return '';
+    if (k >= 0.99) {
+        return `M 18,${18 - r} A ${r},${r} 0 1,1 18,${18 + r} A ${r},${r} 0 1,1 18,${18 - r} Z`;
+    }
+    const rx = Math.abs(1.0 - 2.0 * k) * r;
+    // Waxing: sunlit limb on right; Waning: sunlit limb on left
+    const outerSweep = isWaxing ? 1 : 0;
+    const innerSweep = k > 0.5 ? outerSweep : 1 - outerSweep;
+    return `M 18,${18 - r} A ${r},${r} 0 0,${outerSweep} 18,${18 + r} A ${rx.toFixed(2)},${r} 0 0,${innerSweep} 18,${18 - r} Z`;
 };
 
 const handleKeydown = (e) => {
@@ -907,8 +1021,46 @@ onUnmounted(() => {
 <template>
     <div class="list-wrapper">
         <div class="list-content">
-            <!-- Unified Search + Sort + Count Header -->
+            <!-- Unified Mode Switcher + Search + Sort + Count Header -->
             <div class="list-header">
+                <div class="list-mode-tabs" role="tablist" aria-label="Target List View">
+                    <button
+                        type="button"
+                        role="tab"
+                        class="list-mode-tab"
+                        :class="{ active: activeViewMode === 'dso' }"
+                        :aria-selected="activeViewMode === 'dso'"
+                        @click="setViewMode('dso')"
+                        title="Deep-Sky Catalog Targets"
+                    >
+                        <span>✨ Deep Sky</span>
+                    </button>
+                    <button
+                        type="button"
+                        role="tab"
+                        class="list-mode-tab solar"
+                        :class="{ active: activeViewMode === 'solar' }"
+                        :aria-selected="activeViewMode === 'solar'"
+                        @click="setViewMode('solar')"
+                        title="Sun, Moon, Planets &amp; Saved JPL Ephemerides"
+                    >
+                        <span>🪐 Solar</span>
+                        <span class="mode-pill-count">{{ (solarObjects || []).length }}</span>
+                    </button>
+                    <button
+                        type="button"
+                        role="tab"
+                        class="list-mode-tab favs"
+                        :class="{ active: activeViewMode === 'favorites' }"
+                        :aria-selected="activeViewMode === 'favorites'"
+                        @click="setViewMode('favorites')"
+                        title="Saved Favorites across Deep Sky &amp; Solar System"
+                    >
+                        <span>{{ activeViewMode === 'favorites' ? '★' : '☆' }} Favs</span>
+                        <span class="mode-pill-count">{{ favoritesCount }}</span>
+                    </button>
+                </div>
+
                 <div class="search-box">
                     <span class="search-icon">🔍</span>
                     <input
@@ -917,7 +1069,11 @@ onUnmounted(() => {
                         @input="onSearchInput"
                         @focus="showSuggestions = true"
                         @blur="onSearchBlur"
-                        placeholder="Search targets (name, M31, NGC...)"
+                        :placeholder="
+                            activeViewMode === 'solar'
+                                ? 'Search solar objects (Mars, Moon, 12P...)'
+                                : 'Search targets (name, M31, Jupiter...)'
+                        "
                         class="search-input"
                     />
                     <button
@@ -933,12 +1089,13 @@ onUnmounted(() => {
                     <div v-if="showSuggestions && suggestionList.length > 0" class="suggestions-popover">
                         <div
                             v-for="s in suggestionList"
-                            :key="s.name"
+                            :key="`${s.is_solar_system ? 'sol-' : ''}${s.name}`"
                             class="suggestion-item"
                             @mousedown.prevent="selectSuggestion(s)"
                             @touchstart.passive="selectSuggestion(s)"
                         >
                             <div class="sug-main">
+                                <span v-if="s.is_solar_system" class="sug-solar-sym">{{ s.symbol || '🪐' }}</span>
                                 <strong>{{ s.name }}</strong>
                                 <span v-if="s.aliases" class="sug-aliases">({{ s.aliases }})</span>
                             </div>
@@ -958,27 +1115,21 @@ onUnmounted(() => {
                     </div>
 
                     <div class="toolbar-right">
-                        <button
-                            type="button"
-                            class="toolbar-fav-btn"
-                            :class="{ active: isFavoritesFilterActive }"
-                            @click="toggleFavoritesFilter"
-                            :title="
-                                isFavoritesFilterActive
-                                    ? 'Showing Favorites only — Click to show all matching targets'
-                                    : `Filter list to saved Favorites (${favoritesCount})`
-                            "
-                        >
-                            <span>{{ isFavoritesFilterActive ? '★' : '☆' }}</span>
-                            <span>{{ favoritesCount }}</span>
-                        </button>
-
-                        <div class="list-stats" title="Matching targets / Total targets in selected object types">
+                        <div class="list-stats" title="Matching targets / Total targets in active view">
                             <strong>{{ filteredAndSortedObjects.length }}</strong> / {{ typePoolCount }}
                         </div>
 
                         <button
-                            v-if="!isDownloading"
+                            v-if="activeViewMode === 'solar'"
+                            type="button"
+                            class="toolbar-dl-btn solar-add-btn"
+                            @click="openEphemerisModal()"
+                            title="Search &amp; download Comet, Asteroid, or Spacecraft from NASA JPL Horizons"
+                        >
+                            ☄ + Add Object
+                        </button>
+                        <button
+                            v-else-if="!isDownloading"
                             type="button"
                             class="toolbar-dl-btn"
                             :class="{ 'all-cached': filteredAndSortedObjects.length > 0 && uncachedFilteredCount === 0 }"
@@ -986,9 +1137,9 @@ onUnmounted(() => {
                             @click="emit('download-filtered')"
                             :title="
                                 uncachedFilteredCount > 0
-                                    ? `Download ${uncachedFilteredCount} remaining sky survey images (${filteredAndSortedObjects.length - uncachedFilteredCount} of ${filteredAndSortedObjects.length} already cached)`
+                                    ? `Download ${uncachedFilteredCount} remaining sky survey images`
                                     : filteredAndSortedObjects.length > 0
-                                      ? `All ${filteredAndSortedObjects.length} matching targets are already downloaded`
+                                      ? `All matching deep-sky targets are already downloaded`
                                       : 'No matching targets to download'
                             "
                         >
@@ -1077,6 +1228,44 @@ onUnmounted(() => {
                                 decoding="async"
                             />
                             <div
+                                v-else-if="item.is_solar_system"
+                                class="solar-thumb-card"
+                                :title="`${item.name} — Live Solar System Target`"
+                            >
+                                <img
+                                    v-if="atlasThumbUrls[item.name]"
+                                    :src="atlasThumbUrls[item.name]"
+                                    class="list-thumb solar-bg-atlas"
+                                    decoding="async"
+                                />
+                                <svg class="solar-emblem-svg" viewBox="0 0 36 36" aria-hidden="true">
+                                    <template v-if="item.solar_id === 'sun'">
+                                        <circle cx="18" cy="18" r="15" fill="rgba(251, 191, 36, 0.22)" />
+                                        <circle cx="18" cy="18" r="10.5" fill="#fde047" stroke="#f59e0b" stroke-width="1.2" />
+                                    </template>
+                                    <template v-else-if="item.solar_id === 'moon'">
+                                        <circle cx="18" cy="18" r="13" fill="#1e293b" stroke="rgba(226, 232, 240, 0.45)" stroke-width="1" />
+                                        <path
+                                            v-if="buildLunarPhaseThumbPath(item.phase_fraction, item.is_waxing)"
+                                            :d="buildLunarPhaseThumbPath(item.phase_fraction, item.is_waxing)"
+                                            fill="#f8fafc"
+                                        />
+                                    </template>
+                                    <template v-else-if="item.solar_id === 'saturn'">
+                                        <ellipse cx="18" cy="18" rx="15.5" ry="5.5" transform="rotate(-16 18 18)" fill="none" stroke="#fde68a" stroke-width="2" />
+                                        <circle cx="18" cy="18" r="7.5" :fill="item.solar_color || '#fde68a'" />
+                                    </template>
+                                    <template v-else-if="item.is_ephemeris">
+                                        <line x1="28" y1="8" x2="15" y2="21" :stroke="item.solar_color || '#34d399'" stroke-width="3.5" stroke-linecap="round" opacity="0.45" />
+                                        <circle cx="14" cy="22" r="5" :fill="item.solar_color || '#34d399'" />
+                                    </template>
+                                    <template v-else>
+                                        <circle cx="18" cy="18" r="12" :fill="item.solar_color || '#fbbf24'" opacity="0.2" />
+                                        <circle cx="18" cy="18" r="8.5" :fill="item.solar_color || '#fbbf24'" />
+                                    </template>
+                                </svg>
+                            </div>
+                            <div
                                 v-else-if="atlasThumbUrls[item.name]"
                                 class="atlas-thumb-wrap"
                                 title="Live FOV snapshot from Sky Atlas"
@@ -1117,7 +1306,8 @@ onUnmounted(() => {
                                 <button type="button" class="info-icon" @click.stop="openInfo(item)" @dblclick.stop title="Target Details">ⓘ</button>
 
                                 <div class="status-indicator" :class="`status-${item.status}`" :title="getStatusTooltip(item)">
-                                    <span v-if="item.status === 'cached'">✓</span>
+                                    <span v-if="item.status === 'live'">●</span>
+                                    <span v-else-if="item.status === 'cached'">✓</span>
                                     <span v-else-if="item.status === 'downloading'" class="spin-glyph">⟳</span>
                                     <span v-else-if="item.status === 'error'">✗</span>
                                     <span v-else>⋯</span>
@@ -1150,7 +1340,12 @@ onUnmounted(() => {
                             <div class="altitude-chart" v-if="getMiniSparklinePath(item)">
                                 <svg viewBox="0 0 100 40" preserveAspectRatio="none" width="100%" height="40">
                                     <line x1="0" :y1="miniThresholdY" x2="100" :y2="miniThresholdY" stroke="#374151" stroke-width="1" stroke-dasharray="2" />
-                                    <path :d="getMiniSparklinePath(item)" fill="rgba(16, 185, 129, 0.25)" stroke="#10b981" stroke-width="1.2" />
+                                    <path
+                                        :d="getMiniSparklinePath(item)"
+                                        :fill="item.solar_id === 'sun' ? 'rgba(245, 158, 11, 0.28)' : 'rgba(16, 185, 129, 0.25)'"
+                                        :stroke="item.solar_id === 'sun' ? '#f59e0b' : '#10b981'"
+                                        stroke-width="1.2"
+                                    />
                                 </svg>
                             </div>
                             <div class="coord-label">
@@ -1162,10 +1357,13 @@ onUnmounted(() => {
 
                 <div v-if="filteredAndSortedObjects.length === 0" class="empty-list">
                     <p v-if="isFavoritesFilterActive && favoritesCount === 0">
-                        No favorites saved yet. Click ☆ on any target to bookmark it for later.
+                        No favorites saved yet. Click ☆ on any Deep Sky or Solar System target to bookmark it.
                     </p>
                     <p v-else-if="isFavoritesFilterActive">
                         None of your {{ favoritesCount }} saved favorites match the current filters.
+                    </p>
+                    <p v-else-if="activeViewMode === 'solar'">
+                        No Solar System objects match the selected categories or altitude filter.
                     </p>
                     <p v-else>No targets match your current filters.</p>
                 </div>
@@ -1175,8 +1373,9 @@ onUnmounted(() => {
         <!-- Info Modal -->
         <div v-if="showInfoModal" class="modal-overlay" @click="showInfoModal = false">
             <div class="modal-content" @click.stop>
-                <h3>{{ infoObject?.common_name && infoObject?.common_name !== 'N/A' ? infoObject.common_name : infoObject?.name }}</h3>
-                <p v-if="infoObject?.common_name && infoObject?.common_name !== 'N/A'"><strong>Catalog Name:</strong> {{ infoObject.name }}</p>
+                <h3>{{ infoObject?.is_solar_system ? `${infoObject.symbol || ''} ${infoObject.name}`.trim() : (infoObject?.common_name && infoObject?.common_name !== 'N/A' ? infoObject.common_name : infoObject?.name) }}</h3>
+                <p v-if="!infoObject?.is_solar_system && infoObject?.common_name && infoObject?.common_name !== 'N/A'"><strong>Catalog Name:</strong> {{ infoObject.name }}</p>
+                <p v-if="infoObject?.is_solar_system && infoObject?.common_name"><strong>Summary:</strong> {{ infoObject.common_name }}</p>
                 <p v-if="infoObject?.aliases"><strong>Also Known As:</strong> {{ infoObject.aliases }}</p>
                 <p v-if="infoObject?.sub_objects && infoObject.sub_objects.length > 0">
                     <strong>Collated in Field ({{ infoObject.sub_objects.length }}):</strong>
@@ -1184,10 +1383,14 @@ onUnmounted(() => {
                 </p>
                 <p><strong>RA/DEC:</strong> {{ typeof infoObject?.ra === 'number' ? infoObject.ra.toFixed(3) : infoObject?.ra }} / {{ typeof infoObject?.dec === 'number' ? infoObject.dec.toFixed(3) : infoObject?.dec }}</p>
                 <p><strong>Type:</strong> {{ getObjectTypeLabel(infoObject?.type) }} <small v-if="infoObject?.type">({{ infoObject.type }})</small></p>
-                <p><strong>Constellation:</strong> {{ infoObject?.constellation }}</p>
+                <p><strong>Constellation:</strong> {{ infoObject?.constellation || 'N/A' }}</p>
                 <p><strong>Magnitude:</strong> {{ formatMagnitude(infoObject?.mag) }}</p>
-                <p><strong>Size:</strong> {{ infoObject?.size }}</p>
-                <p><strong>Surface Brightness:</strong> {{ infoObject?.surface_brightness }}</p>
+                <p><strong>{{ infoObject?.is_ephemeris ? 'Distance:' : 'Angular Size:' }}</strong> {{ infoObject?.size }}</p>
+                <p v-if="infoObject?.is_solar_system && infoObject?.distance_au"><strong>Distance:</strong> {{ Number(infoObject.distance_au).toFixed(4) }} AU</p>
+                <p v-if="infoObject?.is_solar_system && !infoObject?.is_ephemeris && infoObject?.solar_id !== 'sun'">
+                    <strong>Illumination:</strong> {{ Math.round(Number(infoObject.phase_percent ?? 100)) }}%<template v-if="infoObject.phase_name"> ({{ infoObject.phase_name }})</template>
+                </p>
+                <p v-if="!infoObject?.is_solar_system"><strong>Surface Brightness:</strong> {{ infoObject?.surface_brightness }}</p>
                 <button @click="showInfoModal = false" class="close-btn">Close</button>
             </div>
         </div>
@@ -1213,11 +1416,114 @@ onUnmounted(() => {
 .list-header {
     background: #1f2937;
     border-bottom: 1px solid #374151;
-    padding: 8px 10px;
+    padding: 7px 10px 8px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 7px;
     z-index: 50;
+}
+
+.list-mode-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+    background: #111827;
+    padding: 3px;
+    border-radius: 7px;
+    border: 1px solid #374151;
+}
+
+.list-mode-tab {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 4px 6px;
+    border-radius: 5px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: #9ca3af;
+    font-size: 0.74rem;
+    font-weight: 600;
+    cursor: pointer;
+    margin: 0;
+    white-space: nowrap;
+    transition: all 0.15s ease;
+}
+
+.list-mode-tab:hover {
+    color: #f3f4f6;
+    background: rgba(55, 65, 81, 0.55);
+}
+
+.list-mode-tab.active {
+    background: rgba(16, 185, 129, 0.18);
+    border-color: rgba(16, 185, 129, 0.55);
+    color: #34d399;
+}
+
+.list-mode-tab.solar.active {
+    background: rgba(245, 158, 11, 0.18);
+    border-color: rgba(245, 158, 11, 0.55);
+    color: #fbbf24;
+}
+
+.list-mode-tab.favs.active {
+    background: rgba(251, 191, 36, 0.18);
+    border-color: rgba(251, 191, 36, 0.6);
+    color: #fde047;
+}
+
+.mode-pill-count {
+    font-size: 0.65rem;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: rgba(17, 24, 39, 0.75);
+    color: inherit;
+    font-weight: 700;
+}
+
+.sug-solar-sym {
+    font-size: 0.85rem;
+    flex-shrink: 0;
+}
+
+.toolbar-dl-btn.solar-add-btn {
+    background: rgba(56, 189, 248, 0.14);
+    color: #7dd3fc;
+    border-color: rgba(56, 189, 248, 0.45);
+}
+
+.toolbar-dl-btn.solar-add-btn:hover {
+    background: #0284c7;
+    color: #f8fafc;
+    border-color: #0284c7;
+}
+
+.solar-thumb-card {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    background: radial-gradient(circle at 50% 50%, #0f172a 0%, #030712 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+
+.solar-bg-atlas {
+    position: absolute;
+    inset: 0;
+    opacity: 0.45;
+    pointer-events: none;
+}
+
+.solar-emblem-svg {
+    position: relative;
+    z-index: 2;
+    width: 38px;
+    height: 38px;
+    filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.65));
 }
 
 .search-box {
@@ -1614,6 +1920,7 @@ onUnmounted(() => {
     flex-shrink: 0;
 }
 
+.status-live { color: #38bdf8; font-size: 0.68rem; }
 .status-cached { color: #10b981; }
 .status-downloading { color: #f59e0b; }
 .status-error { color: #ef4444; cursor: help; }

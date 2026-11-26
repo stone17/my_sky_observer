@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import os
 import re
 import time
@@ -10,7 +11,7 @@ import astropy.units as u
 import numpy as np
 import pandas as pd
 from astroplan import Observer
-from astropy.coordinates import EarthLocation
+from astropy.coordinates import AltAz, EarthLocation, SkyCoord, get_body, get_constellation, get_sun
 from astropy.time import Time
 from fastapi import HTTPException, Request
 
@@ -161,30 +162,58 @@ async def compute_object_detail_payload(
 ) -> dict:
     """Shared async builder for an object's altitude graphs, FOV info, and cache status."""
     obj_id = obj["id"]
+    is_solar = bool(obj.get("is_solar_system"))
     setup_hash = fov_info["setup_hash"]
-    url, filepath, _ = get_cache_info(obj_id, setup_hash)
-    is_cached = os.path.exists(filepath)
+    if is_solar:
+        url = ""
+        is_cached = False
+    else:
+        url, filepath, _ = get_cache_info(obj_id, setup_hash)
+        is_cached = os.path.exists(filepath)
 
-    alt_data = await asyncio.to_thread(
-        calculator.get_altitude_graph,
-        obj["ra"],
-        obj["dec"],
-        location,
-        60,
-        session_start,
-        session_end,
-    )
+    if is_solar and obj.get("solar_id") in ("sun", "moon"):
+        def _calc_moving_solar_graph():
+            ephem = calculator.prepare_session_ephemeris(
+                location=location,
+                start_time=session_start,
+                end_time=session_end,
+                num_points=60,
+            )
+            if obj.get("solar_id") == "sun":
+                return {
+                    "target": ephem["sun_points"],
+                    "moon": ephem["moon_points"],
+                    "sun": ephem["sun_points"],
+                }
+            return {
+                "target": ephem["moon_points"],
+                "moon": ephem["moon_points"],
+                "sun": ephem["sun_points"],
+            }
+        alt_data = await asyncio.to_thread(_calc_moving_solar_graph)
+    else:
+        alt_data = await asyncio.to_thread(
+            calculator.get_altitude_graph,
+            obj["ra"],
+            obj["dec"],
+            location,
+            60,
+            session_start,
+            session_end,
+        )
     hours = calculator.calculate_time_above_altitude(
         alt_data["target"],
         min_altitude,
-        twilight,
-        time_window_active=time_window_active,
+        None if (is_solar and obj.get("solar_id") == "sun") else twilight,
+        time_window_active=False if (is_solar and obj.get("solar_id") == "sun") else time_window_active,
         time_window_start=time_window_start,
         time_window_end=time_window_end,
         tz_offset_minutes=tz_offset_minutes,
     )
 
-    if is_cached:
+    if is_solar:
+        status = "live"
+    elif is_cached:
         status = "cached"
     elif download_ids is not None and obj_id in download_ids:
         status = "queued"
@@ -423,6 +452,158 @@ def apply_stream_query_overrides(
     return settings
 
 
+_SOLAR_EQ_ARCSEC_1AU = {
+    "sun": 1919.26,
+    "mercury": 6.74,
+    "venus": 16.92,
+    "mars": 9.36,
+    "jupiter": 196.74,
+    "saturn": 165.60,
+    "uranus": 70.56,
+    "neptune": 68.28,
+    "pluto": 3.28,
+}
+
+
+def _resolve_solar_system_object_sync(
+    obj_id: str,
+    settings: dict,
+    location: Location,
+) -> Optional[Tuple[dict, Time, Time, Dict[str, List[str]]]]:
+    """Resolve Sun, Moon, or Planet single-object details with Astropy topocentric coordinates."""
+    key = str(obj_id or "").strip().lower()
+    if key not in (
+        "sun",
+        "moon",
+        "mercury",
+        "venus",
+        "mars",
+        "jupiter",
+        "saturn",
+        "uranus",
+        "neptune",
+        "pluto",
+    ):
+        return None
+
+    earth_loc = EarthLocation(
+        lat=location.latitude * u.deg, lon=location.longitude * u.deg
+    )
+    observer = Observer(location=earth_loc)
+    night_start, night_end = calculator.get_observing_session_for_date(
+        observer, settings.get("obs_date")
+    )
+    night_mid = night_start + 0.5 * (night_end - night_start)
+    twilight = calculator.get_twilight_periods(location, night_mid)
+
+    if key == "sun":
+        # Center daytime solar window around local solar noon of the active date
+        obs_date_str = settings.get("obs_date")
+        if obs_date_str and isinstance(obs_date_str, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", obs_date_str.strip()):
+            t_noon = (
+                Time(f"{obs_date_str.strip()}T12:00:00", format="isot", scale="utc")
+                - (float(location.longitude) / 15.0) * u.hour
+            )
+        else:
+            t_noon = night_start - 6.0 * u.hour
+        rises, sets = calculator._find_solar_crossings(
+            earth_loc, t_noon, horizon_deg=0.0, window_before_h=14.0, window_after_h=14.0
+        )
+        past_rises = [t for t in rises if t <= t_noon + 2.0 * u.hour]
+        future_sets = [t for t in sets if t >= t_noon - 2.0 * u.hour]
+        if past_rises and future_sets and future_sets[0] > past_rises[-1]:
+            session_start = past_rises[-1] - 0.5 * u.hour
+            session_end = future_sets[0] + 0.5 * u.hour
+        else:
+            session_start = t_noon - 12.0 * u.hour
+            session_end = t_noon + 12.0 * u.hour
+        eval_time = session_start + 0.5 * (session_end - session_start)
+    else:
+        session_start = night_start
+        session_end = night_end
+        eval_time = night_mid
+
+    positions = calculator.get_solar_system_positions(
+        lat=location.latitude,
+        lon=location.longitude,
+        elevation=0.0,
+        time_str=eval_time.isot,
+    )
+    matched = next((p for p in positions if p.get("id") == key), None)
+    if not matched:
+        return None
+
+    ra_val = float(matched["ra"])
+    dec_val = float(matched["dec"])
+    dist_au = float(matched.get("distance_au") or 1.0)
+    mag_val = float(matched.get("mag") if matched.get("mag") is not None else 99.0)
+
+    if key == "moon":
+        topo_km = max(340000.0, dist_au * 149597870.7)
+        diam_deg = math.degrees(3474.8 / topo_km)
+    else:
+        arcsec_1au = _SOLAR_EQ_ARCSEC_1AU.get(key, 0.0)
+        diam_deg = arcsec_1au / (max(0.01, dist_au) * 3600.0)
+
+    maj_arcmin = round(diam_deg * 60.0, 4)
+    if maj_arcmin >= 1.0:
+        size_str = f"{maj_arcmin:.1f}'"
+    elif diam_deg > 0:
+        arcsec = diam_deg * 3600.0
+        size_str = f'{arcsec:.1f}"' if arcsec >= 1.0 else f'{arcsec:.2f}"'
+    else:
+        size_str = "—"
+
+    try:
+        const_code = get_constellation(
+            SkyCoord(ra=ra_val * u.deg, dec=dec_val * u.deg), short_name=True
+        ).upper()
+    except Exception:
+        const_code = ""
+
+    if key == "sun":
+        obj_type = "Sun"
+        common = f"Daytime Star · {dist_au:.3f} AU"
+    elif key == "moon":
+        obj_type = "Moon"
+        p_name = matched.get("phase_name", "Moon")
+        p_pct = matched.get("phase_percent", 50)
+        common = f"{p_name} ({round(p_pct)}%)"
+    elif key == "pluto":
+        obj_type = "Dwarf Planet"
+        common = f"Dwarf Planet · {dist_au:.1f} AU"
+    else:
+        obj_type = "Planet"
+        common = f"Solar System Planet · {dist_au:.2f} AU"
+
+    max_alt_arr = calculator.batch_get_max_altitude(
+        np.array([dec_val], dtype=float), location.latitude
+    )
+    peak_alt = float(max_alt_arr[0]) if len(max_alt_arr) > 0 else 0.0
+
+    obj = {
+        "id": matched["name"],
+        "name": common,
+        "type": obj_type,
+        "constellation": const_code,
+        "other_id": key,
+        "aliases": "",
+        "sub_objects": [],
+        "ra": ra_val,
+        "dec": dec_val,
+        "mag": mag_val,
+        "magnitude": mag_val,
+        "maj_ax": maj_arcmin,
+        "size_formatted": size_str,
+        "max_altitude": peak_alt,
+        "is_solar_system": True,
+        "solar_id": key,
+        "symbol": matched.get("symbol", ""),
+        "distance_au": dist_au,
+    }
+    return obj, session_start, session_end, twilight
+
+
 def _resolve_single_object_sync(
     obj_id: str,
     settings: dict,
@@ -430,6 +611,10 @@ def _resolve_single_object_sync(
     catalog_manager: CatalogManager = catalogs,
 ) -> Optional[Tuple[dict, Time, Time, Dict[str, List[str]]]]:
     """Fast single-object catalog lookup + session/twilight preparation without sorting all 14k rows."""
+    solar_match = _resolve_solar_system_object_sync(obj_id, settings, location)
+    if solar_match is not None:
+        return solar_match
+
     raw_objects = catalog_manager.get_all_objects(
         settings.get("catalogs") or CatalogManager.get_available_catalogs()
     )
@@ -565,6 +750,11 @@ async def build_single_object_details(
     detail.setdefault("max_altitude", round(float(obj.get("max_altitude") or 0.0), 1))
     detail["hours_visible"] = detail.get("hours_above_min", 0.0)
     detail["night_times"] = twilight
+    if obj.get("is_solar_system"):
+        detail["is_solar_system"] = True
+        detail["solar_id"] = obj.get("solar_id", "")
+        detail["symbol"] = obj.get("symbol", "")
+        detail["distance_au"] = obj.get("distance_au")
     return detail
 
 

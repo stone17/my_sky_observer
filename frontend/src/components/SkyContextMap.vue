@@ -41,6 +41,7 @@ import ObservingDateConsole from './ObservingDateConsole.vue';
 const props = defineProps({
     object: { type: Object, default: null },
     objects: { type: Array, default: () => [] },
+    solarObjects: { type: Array, default: () => [] },
     filteredObjects: { type: Array, default: null },
     settings: { type: Object, default: () => ({}) },
     clientSettings: { type: Object, default: () => ({}) },
@@ -2159,6 +2160,9 @@ const drawSolarSystemObjects = (
                 body.id === 'moon'
                     ? `${body.phase_name} · ${Math.round(body.phase_percent)}%`
                     : `mag ${body.mag.toFixed(1)}`;
+            const matchedSolarObj = Array.isArray(props.solarObjects)
+                ? props.solarObjects.find((s) => s.solar_id === body.id || s.name === body.name) || null
+                : null;
             pushInteractiveItem(
                 'solar_system',
                 body.name,
@@ -2169,8 +2173,8 @@ const drawSolarSystemObjects = (
                 sx,
                 sy,
                 Math.max(ringR + 4, 13),
-                null,
-                true,
+                matchedSolarObj,
+                !matchedSolarObj,
                 bx1,
                 by1,
                 bx2,
@@ -2384,6 +2388,11 @@ const drawEphemerisTrails = (
                     }
 
                     if (buildHitItems) {
+                        const matchedEphemObj = Array.isArray(props.solarObjects)
+                            ? props.solarObjects.find(
+                                  (s) => s.ephemeris_id === eph.id || s.name === objLabel
+                              ) || null
+                            : null;
                         pushInteractiveItem(
                             'ephemeris',
                             objLabel,
@@ -2394,8 +2403,8 @@ const drawEphemerisTrails = (
                             cx,
                             cy,
                             13,
-                            null,
-                            true,
+                            matchedEphemObj,
+                            !matchedEphemObj,
                             bx1,
                             by1,
                             bx2,

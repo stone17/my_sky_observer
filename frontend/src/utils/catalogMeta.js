@@ -104,6 +104,36 @@ export const OBJECT_TYPE_META = {
         short: 'Sky Field',
         icon: '🎯',
         description: 'Custom framed celestial coordinates'
+    },
+    'Sun': {
+        label: 'Sun',
+        short: 'Sun',
+        icon: '☀️',
+        description: 'Solar observation target (always use certified solar filtration!)'
+    },
+    'Moon': {
+        label: 'Moon',
+        short: 'Moon',
+        icon: '🌙',
+        description: 'Earth’s Moon with live topocentric coordinates & lunar phase'
+    },
+    'Planet': {
+        label: 'Planet',
+        short: 'Planet',
+        icon: '🪐',
+        description: 'Major Solar System planet at current observing epoch'
+    },
+    'Dwarf Planet': {
+        label: 'Dwarf Planet',
+        short: 'Dwarf Pln',
+        icon: '♇',
+        description: 'Solar System dwarf planet at current observing epoch'
+    },
+    'Comet / Minor': {
+        label: 'Comet / Minor Body',
+        short: 'Ephemeris',
+        icon: '☄️',
+        description: 'Saved NASA JPL Horizons comet, asteroid, or spacecraft trajectory'
     }
 };
 

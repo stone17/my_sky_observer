@@ -34,6 +34,10 @@ const props = defineProps({
         type: Object,
         default: () => ({})
     },
+    solarObjects: {
+        type: Array,
+        default: () => []
+    },
     availableTypes: Array,
     typeCounts: {
         type: Object,
@@ -89,6 +93,7 @@ const props = defineProps({
 const emit = defineEmits([
     'update-settings',
     'update-client-settings',
+    'select-object',
     'start-stream',
     'stop-stream',
     'purge-cache',
@@ -262,14 +267,103 @@ watch(() => props.clientSettings, (newVal) => {
         if (!localClientSettings.value.selected_types) localClientSettings.value.selected_types = [];
         if (!Array.isArray(localClientSettings.value.favorites)) localClientSettings.value.favorites = [];
         if (localClientSettings.value.filter_favorites_only === undefined) localClientSettings.value.filter_favorites_only = false;
+        if (!Array.isArray(localClientSettings.value.solar_categories)) {
+            localClientSettings.value.solar_categories = ['sun_moon', 'planets', 'minor'];
+        }
+        if (localClientSettings.value.solar_filter_alt === undefined) {
+            localClientSettings.value.solar_filter_alt = false;
+        }
+        if (!['dso', 'solar', 'favorites'].includes(localClientSettings.value.target_view_mode)) {
+            localClientSettings.value.target_view_mode = localClientSettings.value.filter_favorites_only
+                ? 'favorites'
+                : 'dso';
+        }
     }
 }, { immediate: true, deep: true });
+
+const activeTargetViewMode = computed(() => {
+    const m = localClientSettings.value?.target_view_mode;
+    if (m === 'solar' || m === 'favorites' || m === 'dso') return m;
+    return localClientSettings.value?.filter_favorites_only ? 'favorites' : 'dso';
+});
+
+const setTargetViewMode = (mode) => {
+    if (!['dso', 'solar', 'favorites'].includes(mode)) return;
+    localClientSettings.value.target_view_mode = mode;
+    localClientSettings.value.filter_favorites_only = mode === 'favorites';
+    emitClientSettings();
+};
+
+const SOLAR_CATEGORY_DEFS = [
+    {
+        id: 'sun_moon',
+        label: 'Sun & Moon',
+        icon: '☀️',
+        description: 'Daytime Sun & topocentric Moon with live phase'
+    },
+    {
+        id: 'planets',
+        label: 'Planets & Pluto',
+        icon: '🪐',
+        description: 'Mercury, Venus, Mars, Jupiter, Saturn, Uranus, Neptune & Pluto'
+    },
+    {
+        id: 'minor',
+        label: 'Comets & Minor Bodies',
+        icon: '☄️',
+        description: 'Custom trajectories downloaded from NASA JPL Horizons'
+    }
+];
+
+const solarCategoryCounts = computed(() => {
+    const counts = { sun_moon: 0, planets: 0, minor: 0 };
+    for (const obj of props.solarObjects || []) {
+        const cat = obj?.solar_category || 'planets';
+        if (counts[cat] !== undefined) counts[cat] += 1;
+    }
+    return counts;
+});
+
+const isSolarCategoryActive = (catId) => {
+    const cats = localClientSettings.value?.solar_categories;
+    if (!Array.isArray(cats)) return true;
+    return cats.includes(catId);
+};
+
+const toggleSolarCategory = (catId) => {
+    const current = Array.isArray(localClientSettings.value.solar_categories)
+        ? [...localClientSettings.value.solar_categories]
+        : ['sun_moon', 'planets', 'minor'];
+    const idx = current.indexOf(catId);
+    if (idx === -1) {
+        current.push(catId);
+    } else {
+        current.splice(idx, 1);
+    }
+    localClientSettings.value.solar_categories = current;
+    emitClientSettings();
+};
+
+const selectSavedEphemerisAsTarget = (ephem) => {
+    if (!ephem) return;
+    const match = (props.solarObjects || []).find(
+        (s) => s.ephemeris_id === ephem.id || s.name === ephem.name
+    );
+    if (match) {
+        emit('select-object', match);
+    } else {
+        handleQuickLocateEphemeris(ephem);
+    }
+};
 
 const clearAllFavorites = () => {
     if (!localClientSettings.value.favorites?.length) return;
     if (!confirm(`Clear all ${localClientSettings.value.favorites.length} saved favorites?`)) return;
     localClientSettings.value.favorites = [];
     localClientSettings.value.filter_favorites_only = false;
+    if (localClientSettings.value.target_view_mode === 'favorites') {
+        localClientSettings.value.target_view_mode = 'dso';
+    }
     emitClientSettings();
 };
 
@@ -696,23 +790,177 @@ const activeFiltersCount = computed(() => {
             <div class="drawer-body">
                 <!-- TAB 1: FILTERS & CATALOGS -->
                 <div v-if="activeTab === 'filters'" class="tab-section">
-                    <!-- Target Thresholds -->
-                    <div class="section-card">
+                    <!-- Central Target List Switcher (Deep Sky / Solar System / Favorites) -->
+                    <div class="section-card target-mode-card">
                         <div class="section-title-row">
-                            <h4>Visibility & Target Thresholds</h4>
+                            <h4>Target List</h4>
+                        </div>
+                        <div class="target-mode-segmented" role="tablist" aria-label="Target List View">
+                            <button
+                                type="button"
+                                role="tab"
+                                class="target-mode-btn"
+                                :class="{ active: activeTargetViewMode === 'dso' }"
+                                :aria-selected="activeTargetViewMode === 'dso'"
+                                @click="setTargetViewMode('dso')"
+                                title="Browse Deep-Sky Catalog Targets (Galaxies, Nebulae, Clusters)"
+                            >
+                                <span class="tm-icon">✨</span>
+                                <span class="tm-label">Deep Sky</span>
+                            </button>
+                            <button
+                                type="button"
+                                role="tab"
+                                class="target-mode-btn solar"
+                                :class="{ active: activeTargetViewMode === 'solar' }"
+                                :aria-selected="activeTargetViewMode === 'solar'"
+                                @click="setTargetViewMode('solar')"
+                                title="Browse Sun, Moon, Planets & JPL Ephemeris Objects"
+                            >
+                                <span class="tm-icon">🪐</span>
+                                <span class="tm-label">Solar</span>
+                                <span class="tm-badge">{{ solarObjects.length }}</span>
+                            </button>
+                            <button
+                                type="button"
+                                role="tab"
+                                class="target-mode-btn favs"
+                                :class="{ active: activeTargetViewMode === 'favorites' }"
+                                :aria-selected="activeTargetViewMode === 'favorites'"
+                                @click="setTargetViewMode('favorites')"
+                                title="Browse Bookmarked Favorites across Deep Sky & Solar System"
+                            >
+                                <span class="tm-icon">{{ activeTargetViewMode === 'favorites' ? '★' : '☆' }}</span>
+                                <span class="tm-label">Favs</span>
+                                <span class="tm-badge">{{ (localClientSettings.favorites || []).length }}</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- SOLAR SYSTEM VIEW CONTROLS -->
+                    <template v-if="activeTargetViewMode === 'solar'">
+                        <div class="section-card">
+                            <div class="section-title-row">
+                                <div class="title-with-sub">
+                                    <h4>Solar System Categories</h4>
+                                    <span class="sub-badge">{{ solarObjects.length }} live</span>
+                                </div>
+                            </div>
+
+                            <div class="type-list-grid">
+                                <button
+                                    v-for="cat in SOLAR_CATEGORY_DEFS"
+                                    :key="cat.id"
+                                    type="button"
+                                    class="type-chip"
+                                    :class="{ active: isSolarCategoryActive(cat.id) }"
+                                    @click="toggleSolarCategory(cat.id)"
+                                    :title="cat.description"
+                                >
+                                    <span class="type-chip-icon">{{ cat.icon }}</span>
+                                    <span class="type-chip-label">{{ cat.label }}</span>
+                                    <span class="type-chip-count">{{ solarCategoryCounts[cat.id] || 0 }}</span>
+                                </button>
+                            </div>
+
+                            <div v-if="savedEphemerides.length > 0" class="sky-ephem-mini-list">
+                                <div
+                                    v-for="ephem in savedEphemerides"
+                                    :key="ephem.id"
+                                    class="sky-ephem-mini-item"
+                                    :class="{ muted: ephem.visible === false }"
+                                >
+                                    <span
+                                        class="sky-ephem-dot"
+                                        :style="{ backgroundColor: ephem.color || '#38bdf8' }"
+                                    ></span>
+                                    <span
+                                        class="sky-ephem-name clickable"
+                                        :title="`Select ${ephem.name}`"
+                                        @click="selectSavedEphemerisAsTarget(ephem)"
+                                    >
+                                        {{ ephem.name }}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        class="sky-ephem-mini-btn"
+                                        @click="handleQuickLocateEphemeris(ephem)"
+                                        title="Open Sky Map &amp; center on object at observing time"
+                                    >
+                                        ⌖
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div class="sky-action-wrap">
+                                <button
+                                    type="button"
+                                    class="btn-primary sky-ephem-manage-btn"
+                                    @click="openEphemerisModal"
+                                >
+                                    <span>☄ + Add Solar Object (JPL Horizons)</span>
+                                    <span v-if="savedEphemerides.length > 0" class="sky-ephem-count-badge">
+                                        {{ savedEphemerides.length }}
+                                    </span>
+                                </button>
+                            </div>
                         </div>
 
-                        <!-- Favorites Filter -->
-                        <div class="threshold-item">
-                            <div class="threshold-top">
-                                <label class="toggle-label">
+                        <div class="section-card">
+                            <div class="section-title-row">
+                                <h4>Solar Visibility Settings</h4>
+                            </div>
+
+                            <div class="threshold-item">
+                                <div class="threshold-top">
+                                    <label class="toggle-label">
+                                        <input
+                                            type="checkbox"
+                                            v-model="localClientSettings.solar_filter_alt"
+                                            @change="emitClientSettings"
+                                        />
+                                        <span>Filter by Min Peak Altitude (°)</span>
+                                    </label>
                                     <input
-                                        type="checkbox"
-                                        v-model="localClientSettings.filter_favorites_only"
-                                        @change="emitClientSettings"
+                                        type="number"
+                                        v-model.number="localSettings.min_altitude"
+                                        :disabled="!localClientSettings.solar_filter_alt"
+                                        @input="emitSettings"
+                                        class="num-input"
                                     />
-                                    <span>★ Favorites Only ({{ (localClientSettings.favorites || []).length }})</span>
-                                </label>
+                                </div>
+                            </div>
+
+                            <div class="threshold-item">
+                                <div class="threshold-sub-row" style="margin-top: 0;">
+                                    <span class="sub-input-label" title="Lower altitude threshold (°) for counting visible hours">
+                                        Visible Hours Altitude Limit (°)
+                                    </span>
+                                    <input
+                                        type="number"
+                                        step="1"
+                                        min="0"
+                                        max="90"
+                                        v-model.number="localClientSettings.min_hours_altitude"
+                                        @input="emitClientSettings"
+                                        @change="emitClientSettings"
+                                        class="num-input"
+                                    />
+                                </div>
+                            </div>
+
+                            <p class="helper-text" style="margin: 8px 0 0;">
+                                Coordinates, phases, and angular sizes update live for the selected observing date &amp; time. Solar altitude uses local daytime.
+                            </p>
+                        </div>
+                    </template>
+
+                    <!-- FAVORITES & DEEP SKY VIEW CONTROLS -->
+                    <template v-else>
+                        <!-- Saved Favorites Summary Banner when in Favorites mode -->
+                        <div v-if="activeTargetViewMode === 'favorites'" class="section-card">
+                            <div class="section-title-row">
+                                <h4>★ Saved Favorites ({{ (localClientSettings.favorites || []).length }})</h4>
                                 <button
                                     v-if="(localClientSettings.favorites || []).length > 0"
                                     type="button"
@@ -720,12 +968,21 @@ const activeFiltersCount = computed(() => {
                                     @click="clearAllFavorites"
                                     title="Remove all saved targets from Favorites"
                                 >
-                                    Clear
+                                    Clear All
                                 </button>
                             </div>
+                            <p class="helper-text" style="margin: 0;">
+                                Showing bookmarked targets across both Deep Sky catalogs and Solar System objects.
+                            </p>
                         </div>
 
-                        <!-- Max Altitude -->
+                        <!-- Target Thresholds -->
+                        <div class="section-card">
+                            <div class="section-title-row">
+                                <h4>Visibility & Target Thresholds</h4>
+                            </div>
+
+                            <!-- Max Altitude -->
                         <div class="threshold-item">
                             <div class="threshold-top">
                                 <label class="toggle-label">
@@ -943,6 +1200,7 @@ const activeFiltersCount = computed(() => {
                         </div>
                         <div v-else class="empty-hint">No object types loaded yet.</div>
                     </div>
+                    </template>
                 </div>
 
                 <!-- TAB 2: EQUIPMENT & PROFILES -->
@@ -2520,6 +2778,90 @@ const activeFiltersCount = computed(() => {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.sky-ephem-name.clickable {
+    cursor: pointer;
+}
+
+.sky-ephem-name.clickable:hover {
+    color: #38bdf8;
+    text-decoration: underline;
+}
+
+.target-mode-card {
+    padding: 10px 12px;
+}
+
+.target-mode-segmented {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 5px;
+    background: #0b1120;
+    padding: 4px;
+    border-radius: 8px;
+    border: 1px solid #1e293b;
+}
+
+.target-mode-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 6px 5px;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: #94a3b8;
+    font-size: 0.74rem;
+    font-weight: 600;
+    cursor: pointer;
+    margin: 0;
+    white-space: nowrap;
+    transition: all 0.15s ease;
+}
+
+.target-mode-btn:hover {
+    color: #f1f5f9;
+    background: rgba(30, 41, 59, 0.7);
+}
+
+.target-mode-btn.active {
+    background: rgba(16, 185, 129, 0.18);
+    border-color: rgba(16, 185, 129, 0.55);
+    color: #34d399;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+
+.target-mode-btn.solar.active {
+    background: rgba(245, 158, 11, 0.18);
+    border-color: rgba(245, 158, 11, 0.55);
+    color: #fbbf24;
+}
+
+.target-mode-btn.favs.active {
+    background: rgba(251, 191, 36, 0.18);
+    border-color: rgba(251, 191, 36, 0.6);
+    color: #fde047;
+}
+
+.tm-icon {
+    font-size: 0.82rem;
+    line-height: 1;
+}
+
+.tm-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tm-badge {
+    font-size: 0.66rem;
+    padding: 1px 5px;
+    border-radius: 999px;
+    background: rgba(15, 23, 42, 0.75);
+    color: inherit;
+    font-weight: 700;
 }
 
 .sky-ephem-mini-btn {

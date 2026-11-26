@@ -79,7 +79,12 @@ const eveningBadgeText = computed(() => {
     return formatShortEveningBadge(activeEvening.value, effectiveNowRefMs.value);
 });
 
+const isSolarDaytimeChart = computed(() => Boolean(props.object?.solar_id === 'sun'));
+
 const backendGraphMatchesEvening = computed(() => {
+    if (props.object?.is_solar_system && Array.isArray(props.object.altitude_graph) && props.object.altitude_graph.length > 1) {
+        return true;
+    }
     return doesGraphMatchEvening(props.object?.altitude_graph, activeEvening.value?.key);
 });
 
@@ -541,11 +546,11 @@ const handleMouseLeave = () => {
     <div class="altitude-wrapper">
         <div class="chart-header">
             <div class="chart-title-wrap">
-                <span class="title">Altitude & Visibility</span>
+                <span class="title">{{ isSolarDaytimeChart ? 'Daytime Solar Altitude' : 'Altitude & Visibility' }}</span>
                 <span
                     v-if="eveningBadgeText"
                     class="chart-date-badge"
-                    :title="`Showing observing night of ${eveningBadgeText}`"
+                    :title="`Showing ${isSolarDaytimeChart ? 'daytime of' : 'observing night of'} ${eveningBadgeText}`"
                 >
                     📅 {{ eveningBadgeText }}
                 </span>
@@ -633,13 +638,25 @@ const handleMouseLeave = () => {
                     <path
                         v-if="objectPath"
                         :d="objectPath"
-                        :fill="hasCustomFovCoords ? 'rgba(45, 212, 191, 0.34)' : 'rgba(16, 185, 129, 0.4)'"
-                        :stroke="hasCustomFovCoords ? '#2dd4bf' : '#10b981'"
+                        :fill="
+                            hasCustomFovCoords
+                                ? 'rgba(45, 212, 191, 0.34)'
+                                : isSolarDaytimeChart
+                                  ? 'rgba(245, 158, 11, 0.34)'
+                                  : 'rgba(16, 185, 129, 0.4)'
+                        "
+                        :stroke="
+                            hasCustomFovCoords
+                                ? '#2dd4bf'
+                                : isSolarDaytimeChart
+                                  ? '#f59e0b'
+                                  : '#10b981'
+                        "
                         stroke-width="2"
                     />
 
                     <!-- Moon Graph -->
-                    <path v-if="moonPath" :d="moonPath" fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,2" />
+                    <path v-if="moonPath && object?.solar_id !== 'moon'" :d="moonPath" fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,2" />
 
                     <!-- Excluded Time Window Shading & Boundaries -->
                     <rect
