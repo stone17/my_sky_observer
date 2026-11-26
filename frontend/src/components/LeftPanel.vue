@@ -795,7 +795,7 @@ const activeFiltersCount = computed(() => {
                         <div class="section-title-row">
                             <h4>Target List</h4>
                         </div>
-                        <div class="target-mode-segmented" role="tablist" aria-label="Target List View">
+                        <div class="target-mode-stack" role="tablist" aria-label="Target List View">
                             <button
                                 type="button"
                                 role="tab"
@@ -806,7 +806,8 @@ const activeFiltersCount = computed(() => {
                                 title="Browse Deep-Sky Catalog Targets (Galaxies, Nebulae, Clusters)"
                             >
                                 <span class="tm-icon">✨</span>
-                                <span class="tm-label">Deep Sky</span>
+                                <span class="tm-label">Deep Sky Targets</span>
+                                <span class="tm-badge">{{ filteredCount }}</span>
                             </button>
                             <button
                                 type="button"
@@ -818,7 +819,7 @@ const activeFiltersCount = computed(() => {
                                 title="Browse Sun, Moon, Planets & JPL Ephemeris Objects"
                             >
                                 <span class="tm-icon">🪐</span>
-                                <span class="tm-label">Solar</span>
+                                <span class="tm-label">Solar System Objects</span>
                                 <span class="tm-badge">{{ solarObjects.length }}</span>
                             </button>
                             <button
@@ -831,7 +832,7 @@ const activeFiltersCount = computed(() => {
                                 title="Browse Bookmarked Favorites across Deep Sky & Solar System"
                             >
                                 <span class="tm-icon">{{ activeTargetViewMode === 'favorites' ? '★' : '☆' }}</span>
-                                <span class="tm-label">Favs</span>
+                                <span class="tm-label">Saved Favorites</span>
                                 <span class="tm-badge">{{ (localClientSettings.favorites || []).length }}</span>
                             </button>
                         </div>
@@ -2793,75 +2794,82 @@ const activeFiltersCount = computed(() => {
     padding: 10px 12px;
 }
 
-.target-mode-segmented {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+.target-mode-stack {
+    display: flex;
+    flex-direction: column;
     gap: 5px;
-    background: #0b1120;
-    padding: 4px;
-    border-radius: 8px;
-    border: 1px solid #1e293b;
+    width: 100%;
 }
 
 .target-mode-btn {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    justify-content: center;
-    gap: 4px;
-    padding: 6px 5px;
+    gap: 8px;
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 7px 10px !important;
     border-radius: 6px;
-    border: 1px solid transparent;
-    background: transparent;
-    color: #94a3b8;
-    font-size: 0.74rem;
+    border: 1px solid #374151;
+    background: #111827;
+    color: #9ca3af;
+    font-size: 0.78rem;
     font-weight: 600;
+    text-align: left;
     cursor: pointer;
     margin: 0;
-    white-space: nowrap;
     transition: all 0.15s ease;
 }
 
 .target-mode-btn:hover {
-    color: #f1f5f9;
-    background: rgba(30, 41, 59, 0.7);
+    border-color: #6b7280;
+    color: #f3f4f6;
 }
 
 .target-mode-btn.active {
-    background: rgba(16, 185, 129, 0.18);
+    background: rgba(16, 185, 129, 0.16);
     border-color: rgba(16, 185, 129, 0.55);
-    color: #34d399;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+    color: #ecfdf5;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.28);
 }
 
 .target-mode-btn.solar.active {
-    background: rgba(245, 158, 11, 0.18);
+    background: rgba(245, 158, 11, 0.16);
     border-color: rgba(245, 158, 11, 0.55);
-    color: #fbbf24;
+    color: #fef3c7;
 }
 
 .target-mode-btn.favs.active {
-    background: rgba(251, 191, 36, 0.18);
+    background: rgba(251, 191, 36, 0.16);
     border-color: rgba(251, 191, 36, 0.6);
-    color: #fde047;
+    color: #fef9c3;
 }
 
 .tm-icon {
-    font-size: 0.82rem;
+    font-size: 0.88rem;
     line-height: 1;
+    width: 18px;
+    text-align: center;
+    flex-shrink: 0;
 }
 
 .tm-label {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
 .tm-badge {
-    font-size: 0.66rem;
-    padding: 1px 5px;
+    font-size: 0.68rem;
+    padding: 1px 6px;
     border-radius: 999px;
-    background: rgba(15, 23, 42, 0.75);
+    background: rgba(15, 23, 42, 0.8);
+    border: 1px solid rgba(71, 85, 105, 0.5);
     color: inherit;
     font-weight: 700;
+    flex-shrink: 0;
 }
 
 .sky-ephem-mini-btn {

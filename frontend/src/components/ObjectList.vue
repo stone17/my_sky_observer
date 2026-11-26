@@ -1438,7 +1438,8 @@ onUnmounted(() => {
     align-items: center;
     justify-content: center;
     gap: 4px;
-    padding: 4px 6px;
+    min-width: 0;
+    padding: 4px 6px !important;
     border-radius: 5px;
     border: 1px solid transparent;
     background: transparent;
