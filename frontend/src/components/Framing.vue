@@ -20,7 +20,7 @@ import {
     drawAtlasFrameToCanvas,
     skyAtlasVersion
 } from '../utils/skyAtlas.js';
-import { pendingSkyMapCenter, enterFrameModeToken } from '../utils/skyViewOptions.js';
+import { pendingSkyMapCenter, enterFrameModeToken, skyTargetPinned } from '../utils/skyViewOptions.js';
 
 const props = defineProps([
     'object',
@@ -122,17 +122,47 @@ const isImageFovMatched = computed(() => {
     return Math.abs(imgFov - localFov.value) < 0.02;
 });
 
+const isSolarCutoutMoved = computed(() => {
+    if (!props.object?.is_solar_system) return false;
+    if (props.object.center_ra === undefined || props.object.center_dec === undefined) return false;
+    const cRa = Number(props.object.center_ra);
+    const cDec = Number(props.object.center_dec);
+    const oRa = Number(props.object.ra);
+    const oDec = Number(props.object.dec);
+    if (!Number.isFinite(cRa) || !Number.isFinite(cDec) || !Number.isFinite(oRa) || !Number.isFinite(oDec)) {
+        return false;
+    }
+    let dRa = oRa - cRa;
+    if (dRa > 180) dRa -= 360;
+    if (dRa < -180) dRa += 360;
+    const cosD = Math.max(Math.cos(((oDec + cDec) * 0.5 * Math.PI) / 180.0), 0.01);
+    return Math.hypot(dRa * cosD, oDec - cDec) > 0.01;
+});
+
+const getEffectiveObjectFrameCenter = () => {
+    if (!props.object) return { ra: NaN, dec: NaN };
+    const trackLiveSolar = Boolean(
+        props.object.is_solar_system && skyTargetPinned.value && isSolarCutoutMoved.value
+    );
+    const ra = parseFloat(
+        !trackLiveSolar && props.object.center_ra !== undefined
+            ? props.object.center_ra
+            : props.object.ra
+    );
+    const dec = parseFloat(
+        !trackLiveSolar && props.object.center_dec !== undefined
+            ? props.object.center_dec
+            : props.object.dec
+    );
+    return { ra, dec };
+};
+
 const previewFrameSpec = computed(() => {
     // Subscribe to atlas load / sheet decode updates
     void skyAtlasVersion.value;
     if (!props.object) return null;
 
-    const ra = parseFloat(
-        props.object.center_ra !== undefined ? props.object.center_ra : props.object.ra
-    );
-    const dec = parseFloat(
-        props.object.center_dec !== undefined ? props.object.center_dec : props.object.dec
-    );
+    const { ra, dec } = getEffectiveObjectFrameCenter();
     if (!Number.isFinite(ra) || !Number.isFinite(dec)) return null;
 
     const fov = parseFloat(
@@ -149,6 +179,9 @@ const hasAtlasPreview = computed(() => {
 });
 
 const isHdReady = computed(() => {
+    if (props.object?.is_solar_system && skyTargetPinned.value && isSolarCutoutMoved.value) {
+        return false;
+    }
     return Boolean(
         props.object?.image_url &&
             loadedHdUrl.value === props.object.image_url &&
@@ -375,12 +408,7 @@ const fovOverlayObjects = computed(() => {
     const imgFov = effectiveDisplayFov.value;
     if (!imgFov || imgFov <= 0.001) return [];
 
-    const centerRa = parseFloat(
-        props.object.center_ra !== undefined ? props.object.center_ra : props.object.ra
-    );
-    const centerDec = parseFloat(
-        props.object.center_dec !== undefined ? props.object.center_dec : props.object.dec
-    );
+    const { ra: centerRa, dec: centerDec } = getEffectiveObjectFrameCenter();
     if (Number.isNaN(centerRa) || Number.isNaN(centerDec)) return [];
 
     const cosDec = Math.max(Math.cos((centerDec * Math.PI) / 180.0), 0.01);
@@ -587,12 +615,7 @@ const fovSolarBodies = computed(() => {
     const imgFov = effectiveDisplayFov.value;
     if (!imgFov || imgFov <= 0.001) return [];
 
-    const centerRa = parseFloat(
-        props.object.center_ra !== undefined ? props.object.center_ra : props.object.ra
-    );
-    const centerDec = parseFloat(
-        props.object.center_dec !== undefined ? props.object.center_dec : props.object.dec
-    );
+    const { ra: centerRa, dec: centerDec } = getEffectiveObjectFrameCenter();
     if (!Number.isFinite(centerRa) || !Number.isFinite(centerDec)) return [];
 
     const cosDec = Math.max(Math.cos((centerDec * Math.PI) / 180.0), 0.01);
@@ -1087,8 +1110,7 @@ const getCurrentCenterCoordinates = () => {
     const baseFov = effectiveDisplayFov.value || localFov.value;
     const pxToDeg = baseFov / (wrapperSize.value || 1);
 
-    const centerRa = parseFloat(props.object?.center_ra !== undefined ? props.object.center_ra : props.object.ra);
-    const centerDec = parseFloat(props.object?.center_dec !== undefined ? props.object.center_dec : props.object.dec);
+    const { ra: centerRa, dec: centerDec } = getEffectiveObjectFrameCenter();
 
     const decOffset = -(offsetY.value * pxToDeg);
     const cosDec = Math.max(Math.cos(centerDec * Math.PI / 180), 0.01);
@@ -1103,6 +1125,12 @@ const getCurrentCenterCoordinates = () => {
 const currentSensorCenter = computed(() => {
     if (!props.object) return null;
     return getCurrentCenterCoordinates();
+});
+
+watch(skyTargetPinned, (pinned) => {
+    if (pinned && skyMapSensorOverride.value) {
+        skyMapSensorOverride.value = null;
+    }
 });
 
 let lastEmittedFramingCoords = null;
@@ -1567,9 +1595,27 @@ onUnmounted(() => {
                             {{ object.symbol || '🪐' }} {{ object.name }} · True-Scale Ephemeris ({{ effectiveDisplayFov.toFixed(2) }}° View)
                         </span>
                         <span class="status-banner-sub">
-                            Live Sky Atlas starfield · Scrub time below to preview motion across sensor
+                            {{
+                                skyTargetPinned
+                                    ? 'Pinned to target · Scrub time below to track across starfield'
+                                    : 'Live Sky Atlas starfield · Scrub time below to preview motion across sensor'
+                            }}
                         </span>
                     </div>
+                    <button
+                        type="button"
+                        class="status-banner-action pin-target-action"
+                        :class="{ active: skyTargetPinned }"
+                        :aria-pressed="skyTargetPinned"
+                        @click="skyTargetPinned = !skyTargetPinned"
+                        :title="
+                            skyTargetPinned
+                                ? 'Pinned to target: stays centered on active target while spinning time · Click to unpin'
+                                : 'Pin to target so spinning time stays locked on the target'
+                        "
+                    >
+                        {{ skyTargetPinned ? '⌖ Pinned' : '⌖ Pin Target' }}
+                    </button>
                     <button
                         type="button"
                         class="status-banner-action"
@@ -2495,6 +2541,25 @@ onUnmounted(() => {
 .status-banner-action:hover {
     background: rgba(56, 189, 248, 0.32);
     border-color: #7dd3fc;
+}
+
+.status-banner-action.pin-target-action {
+    border-color: rgba(245, 158, 11, 0.52);
+    background: rgba(245, 158, 11, 0.14);
+    color: #fde68a;
+}
+
+.status-banner-action.pin-target-action:hover {
+    background: rgba(245, 158, 11, 0.28);
+    border-color: #fbbf24;
+    color: #fef9c3;
+}
+
+.status-banner-action.pin-target-action.active {
+    background: rgba(245, 158, 11, 0.32);
+    border-color: #f59e0b;
+    color: #fef3c7;
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.25);
 }
 
 .placeholder-text {

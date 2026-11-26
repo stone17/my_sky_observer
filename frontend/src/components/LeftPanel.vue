@@ -9,6 +9,7 @@ import {
 } from '../utils/catalogMeta.js';
 import {
     skyFrameMode,
+    skyTargetPinned,
     showHorizon,
     showMeridian,
     showSolarSystem,
@@ -1493,38 +1494,49 @@ const activeFiltersCount = computed(() => {
                         </div>
                     </div>
 
-                    <!-- Horizon & Observation Mode -->
-                    <div class="section-card" v-if="settings.location">
+                    <!-- Target Tracking, Horizon & Observation Mode -->
+                    <div class="section-card">
                         <div class="section-title-row">
-                            <h4>⛰ Observation &amp; Horizon</h4>
+                            <h4>⛰ Observation &amp; Target Lock</h4>
                         </div>
                         <div class="threshold-item">
-                            <label class="toggle-label">
-                                <input type="checkbox" v-model="showHorizon" />
-                                <span>Local Horizon &amp; Min-Altitude Ring</span>
+                            <label
+                                class="toggle-label"
+                                title="Keep Sky Map view and framing locked onto the active target while spinning time"
+                            >
+                                <input type="checkbox" v-model="skyTargetPinned" />
+                                <span>Pin View to Active Target</span>
                             </label>
                         </div>
-                        <div class="sky-frame-block">
-                            <div class="sky-frame-label">Sky Reference Frame:</div>
-                            <div class="sky-frame-row">
-                                <button
-                                    type="button"
-                                    class="preset-btn sky-frame-btn"
-                                    :class="{ active: skyFrameMode !== 'horizon' }"
-                                    @click="setSkyFrameMode('sky')"
-                                >
-                                    ✦ Equatorial
-                                </button>
-                                <button
-                                    type="button"
-                                    class="preset-btn sky-frame-btn"
-                                    :class="{ active: skyFrameMode === 'horizon' }"
-                                    @click="setSkyFrameMode('horizon')"
-                                >
-                                    🧭 Horizon Fixed
-                                </button>
+                        <template v-if="settings.location">
+                            <div class="threshold-item">
+                                <label class="toggle-label">
+                                    <input type="checkbox" v-model="showHorizon" />
+                                    <span>Local Horizon &amp; Min-Altitude Ring</span>
+                                </label>
                             </div>
-                        </div>
+                            <div class="sky-frame-block">
+                                <div class="sky-frame-label">Sky Reference Frame:</div>
+                                <div class="sky-frame-row">
+                                    <button
+                                        type="button"
+                                        class="preset-btn sky-frame-btn"
+                                        :class="{ active: skyFrameMode !== 'horizon' }"
+                                        @click="setSkyFrameMode('sky')"
+                                    >
+                                        ✦ Equatorial
+                                    </button>
+                                    <button
+                                        type="button"
+                                        class="preset-btn sky-frame-btn"
+                                        :class="{ active: skyFrameMode === 'horizon' }"
+                                        @click="setSkyFrameMode('horizon')"
+                                    >
+                                        🧭 Horizon Fixed
+                                    </button>
+                                </div>
+                            </div>
+                        </template>
                     </div>
                 </div>
 

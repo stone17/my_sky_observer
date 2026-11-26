@@ -454,8 +454,8 @@ const resetToLiveNow = () => {
 
 /* Sky View bottom-right placement (zero backdrop-filter over 60fps canvas) */
 .obs-date-console.is-sky {
-    min-width: 304px;
-    max-width: 368px;
+    min-width: 320px;
+    max-width: 396px;
 }
 
 /* Framing View compact horizontal bar above .canvas-hud */

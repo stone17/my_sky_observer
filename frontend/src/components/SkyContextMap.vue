@@ -19,6 +19,7 @@ import {
 import { computeSolarSystemPositions } from '../utils/solarSystem.js';
 import {
     skyFrameMode,
+    skyTargetPinned,
     showHorizon,
     showMeridian,
     showSolarSystem,
@@ -699,8 +700,70 @@ const canvasRef = ref(null);
 const viewportW = ref(800);
 const viewportH = ref(600);
 
-const getCatalogTargetCoords = () => {
+// Observer Location, Minimum Altitude & Shared Observation Time State
+const observerLocation = computed(() => parseObserverLocation(props.settings));
+
+const minAltitudeDeg = computed(() => {
+    const raw = props.clientSettings?.min_hours_altitude ?? props.settings?.min_altitude ?? 30;
+    const val = Number(raw);
+    return Number.isFinite(val) ? Math.max(0, Math.min(88, val)) : 30;
+});
+
+const isLiveTime = ref(props.isLiveObsTime ?? true);
+const liveNowMs = ref(Number.isFinite(props.liveNowMs) ? props.liveNowMs : Date.now());
+const scrubTimeMs = ref(
+    Number.isFinite(props.effectiveObsTimeMs) ? props.effectiveObsTimeMs : Date.now()
+);
+const effectiveTimeMs = computed(() => (isLiveTime.value ? liveNowMs.value : scrubTimeMs.value));
+
+const getLiveTargetCoords = (timeMs = effectiveTimeMs.value) => {
     if (!props.object) return { ra: 83.822, dec: -5.391 };
+    const tMs = Number.isFinite(timeMs) ? timeMs : Date.now();
+
+    if (props.object.is_ephemeris && props.object.ephemeris_id) {
+        const list = savedEphemerides.value;
+        if (Array.isArray(list) && list.length > 0) {
+            const eph =
+                list.find((e) => e && e.id === props.object.ephemeris_id) ||
+                list.find((e) => e && e.name === props.object.name);
+            const interp = eph ? interpolateEphemerisAtTime(eph, tMs) : null;
+            if (interp && Number.isFinite(interp.ra) && Number.isFinite(interp.dec)) {
+                return {
+                    ra: wrapRaDeg(interp.ra),
+                    dec: clampDecDeg(interp.dec)
+                };
+            }
+        }
+    } else if (props.object.is_solar_system && props.object.solar_id) {
+        const loc = observerLocation.value;
+        const bodies = computeSolarSystemPositions(
+            tMs,
+            loc ? loc.lat : 0.0,
+            loc ? loc.lon : 0.0,
+            loc ? loc.elevation || 0.0 : 0.0
+        );
+        if (Array.isArray(bodies)) {
+            const b = bodies.find((item) => item.id === props.object.solar_id);
+            if (b && Number.isFinite(b.ra) && Number.isFinite(b.dec)) {
+                return {
+                    ra: wrapRaDeg(b.ra),
+                    dec: clampDecDeg(b.dec)
+                };
+            }
+        }
+    }
+
+    return {
+        ra: wrapRaDeg(parseFloat(props.object.ra) || 0),
+        dec: clampDecDeg(parseFloat(props.object.dec) || 0)
+    };
+};
+
+const getCatalogTargetCoords = (timeMs = effectiveTimeMs.value) => {
+    if (!props.object) return { ra: 83.822, dec: -5.391 };
+    if (props.object.is_solar_system && (skyTargetPinned.value || props.object.center_ra === undefined)) {
+        return getLiveTargetCoords(timeMs);
+    }
     const ra =
         props.object.center_ra !== undefined
             ? props.object.center_ra
@@ -713,6 +776,32 @@ const getCatalogTargetCoords = () => {
         ra: wrapRaDeg(parseFloat(ra) || 0),
         dec: clampDecDeg(parseFloat(dec) || 0)
     };
+};
+
+const computeOffsetFromTarget = (ra, dec, timeMs = effectiveTimeMs.value) => {
+    const tgt = getLiveTargetCoords(timeMs);
+    const clampedD = clampDecDeg(dec);
+    let dRa = wrapRaDeg(ra) - tgt.ra;
+    if (dRa > 180) dRa -= 360;
+    if (dRa < -180) dRa += 360;
+    const dNorthDeg = clampedD - tgt.dec;
+    const cosDec = Math.max(Math.cos(((tgt.dec + clampedD) * 0.5) * DEG2RAD), 0.01);
+    const dEastDeg = dRa * cosDec;
+    if (Math.hypot(dEastDeg, dNorthDeg) < 1e-4) {
+        return { dEastDeg: 0, dNorthDeg: 0 };
+    }
+    return { dEastDeg, dNorthDeg };
+};
+
+const applyOffsetToTarget = (offset, timeMs = effectiveTimeMs.value) => {
+    const tgt = getLiveTargetCoords(timeMs);
+    if (!offset || (Math.abs(offset.dEastDeg) < 1e-5 && Math.abs(offset.dNorthDeg) < 1e-5)) {
+        return tgt;
+    }
+    const dec = clampDecDeg(tgt.dec + offset.dNorthDeg);
+    const cosDec = Math.max(Math.cos(((tgt.dec + dec) * 0.5) * DEG2RAD), 0.01);
+    const ra = wrapRaDeg(tgt.ra + offset.dEastDeg / cosDec);
+    return { ra, dec };
 };
 
 const getPropSensorCoords = () => {
@@ -728,14 +817,37 @@ const getPropSensorCoords = () => {
     return getCatalogTargetCoords();
 };
 
-const initialCoords = getPropSensorCoords();
-const viewRa = ref(initialCoords.ra);
-const viewDec = ref(initialCoords.dec);
+const initialPropCoords = getPropSensorCoords();
+const initialTargetCoords = getLiveTargetCoords(effectiveTimeMs.value);
+let targetFovOffset = computeOffsetFromTarget(
+    initialPropCoords.ra,
+    initialPropCoords.dec,
+    effectiveTimeMs.value
+);
+const maxInitComposeOffset = Math.max((Number(props.baseImageFov) || 1.0) * 1.5, 2.0);
+if (
+    skyTargetPinned.value &&
+    Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg) > maxInitComposeOffset
+) {
+    targetFovOffset = { dEastDeg: 0, dNorthDeg: 0 };
+}
+let userDraggedFovOffTarget =
+    Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg) > 0.03;
+
+const initialFovCoords =
+    skyTargetPinned.value && props.object
+        ? applyOffsetToTarget(targetFovOffset, effectiveTimeMs.value)
+        : initialPropCoords;
+const initialViewCoords =
+    skyTargetPinned.value && props.object ? initialTargetCoords : initialPropCoords;
+
+const viewRa = ref(initialViewCoords.ra);
+const viewDec = ref(initialViewCoords.dec);
 const mapFovDeg = ref(Math.max(0.4, Math.min(100.0, Number(props.initialMapFov) || 35.0)));
 
 // Sensor FOV interactive state (pinned to sky vs unpinned centered in viewport)
-const fovRa = ref(initialCoords.ra);
-const fovDec = ref(initialCoords.dec);
+const fovRa = ref(initialFovCoords.ra);
+const fovDec = ref(initialFovCoords.dec);
 const fovPinned = ref(readSavedFovPinned());
 const isHoveringFov = ref(false);
 const isDraggingFov = ref(false);
@@ -743,7 +855,7 @@ const fovCtrlRef = ref(null);
 const fovOverlayVisible = ref(false);
 let fovOverlayLeft = 0;
 let fovOverlayTop = 0;
-let lastEmittedFov = { ra: initialCoords.ra, dec: initialCoords.dec };
+let lastEmittedFov = { ra: initialFovCoords.ra, dec: initialFovCoords.dec };
 const lastFovHit = {
     valid: false,
     cx: 0,
@@ -762,8 +874,8 @@ const hasValidSensorFov = computed(() =>
 
 const isFovDetached = computed(() => {
     if (!hasValidSensorFov.value) return false;
-    const cat = getCatalogTargetCoords();
-    return angularDistanceDeg(fovRa.value, fovDec.value, cat.ra, cat.dec) > 0.03;
+    const tgt = getLiveTargetCoords(effectiveTimeMs.value);
+    return angularDistanceDeg(fovRa.value, fovDec.value, tgt.ra, tgt.dec) > 0.03;
 });
 
 const openSkyOptionsPanel = () => {
@@ -812,22 +924,6 @@ const toggleApplyTargetFilters = () => {
     scheduleDraw();
 };
 
-// Observer Location, Minimum Altitude & Shared Observation Time State
-const observerLocation = computed(() => parseObserverLocation(props.settings));
-
-const minAltitudeDeg = computed(() => {
-    const raw = props.clientSettings?.min_hours_altitude ?? props.settings?.min_altitude ?? 30;
-    const val = Number(raw);
-    return Number.isFinite(val) ? Math.max(0, Math.min(88, val)) : 30;
-});
-
-const isLiveTime = ref(props.isLiveObsTime ?? true);
-const liveNowMs = ref(Number.isFinite(props.liveNowMs) ? props.liveNowMs : Date.now());
-const scrubTimeMs = ref(
-    Number.isFinite(props.effectiveObsTimeMs) ? props.effectiveObsTimeMs : Date.now()
-);
-const effectiveTimeMs = computed(() => (isLiveTime.value ? liveNowMs.value : scrubTimeMs.value));
-
 // Reference Frame Mode: 'sky' (Equatorial RA/Dec fixed) vs 'horizon' (Horizontal Alt-Az fixed)
 if (skyFrameMode.value === 'horizon') {
     showHorizon.value = true;
@@ -860,9 +956,12 @@ const syncHorizFromRaDec = (
     viewHorizSynced = true;
     return true;
 };
-syncHorizFromRaDec(initialCoords.ra, initialCoords.dec, effectiveTimeMs.value);
+syncHorizFromRaDec(initialViewCoords.ra, initialViewCoords.dec, effectiveTimeMs.value);
 
 const getCurrentCenterRaDec = () => {
+    if (skyTargetPinned.value && props.object) {
+        return getLiveTargetCoords(effectiveTimeMs.value);
+    }
     if (isHorizonFixed.value && observerLocation.value) {
         const loc = observerLocation.value;
         const horiz = makeHorizontalBasis(loc.lat, loc.lon, effectiveTimeMs.value);
@@ -877,8 +976,8 @@ const skyPhotoCount = ref(0);
 const hoveredItem = ref(null);
 
 // Throttled status bar readout refs (decoupled from high-frequency mousemove events)
-const readoutRaText = ref(formatRaHms(initialCoords.ra));
-const readoutDecText = ref(formatDecDms(initialCoords.dec));
+const readoutRaText = ref(formatRaHms(initialViewCoords.ra));
+const readoutDecText = ref(formatDecDms(initialViewCoords.dec));
 const readoutAltText = ref('');
 const readoutAzText = ref('');
 const readoutBelowHorizon = ref(false);
@@ -897,7 +996,7 @@ let animFrameId = null;
 let liveClockTimer = null;
 let resizeObserver = null;
 let lastReadoutTs = 0;
-let lastReadoutCoords = { ra: initialCoords.ra, dec: initialCoords.dec };
+let lastReadoutCoords = { ra: initialViewCoords.ra, dec: initialViewCoords.dec };
 
 // Cached canvas screen origin (avoids synchronous getBoundingClientRect() layout reflows on mousemove/wheel)
 let canvasLeft = 0;
@@ -1088,6 +1187,15 @@ const getActiveCameraBasis = (
     timeMs = effectiveTimeMs.value
 ) => {
     const loc = observerLocation.value;
+    if (skyTargetPinned.value && props.object) {
+        const tgt = getLiveTargetCoords(timeMs);
+        if (isHorizonFixed.value && loc) {
+            const horiz = makeHorizontalBasis(loc.lat, loc.lon, timeMs);
+            const { altDeg, azDeg } = computeAltAzFromRaDec(tgt.ra, tgt.dec, horiz);
+            return makeAltAzCameraBasis(azDeg, clampAltDeg(altDeg), horiz, w, h, fovDeg);
+        }
+        return makeCameraBasis(tgt.ra, tgt.dec, w, h, fovDeg);
+    }
     if (isHorizonFixed.value && loc) {
         const horiz = makeHorizontalBasis(loc.lat, loc.lon, timeMs);
         return makeAltAzCameraBasis(viewAz.value, viewAlt.value, horiz, w, h, fovDeg);
@@ -1260,6 +1368,61 @@ const updateFovFloatingCtrlPosition = (leftPx, topPx, visible) => {
     }
 };
 
+const syncPinnedTargetState = (timeMs = effectiveTimeMs.value) => {
+    if (!skyTargetPinned.value || !props.object) return null;
+    if (animFrameId) {
+        cancelAnimationFrame(animFrameId);
+        animFrameId = null;
+    }
+    const tgt = getLiveTargetCoords(timeMs);
+    viewRa.value = tgt.ra;
+    viewDec.value = tgt.dec;
+    if (observerLocation.value) {
+        syncHorizFromRaDec(tgt.ra, tgt.dec, timeMs);
+    }
+    if (hasValidSensorFov.value && !isDraggingFov.value) {
+        if (!fovPinned.value) {
+            fovRa.value = tgt.ra;
+            fovDec.value = tgt.dec;
+            lastEmittedFov = { ra: tgt.ra, dec: tgt.dec };
+        } else if (props.object.is_solar_system) {
+            const nextFovPos = applyOffsetToTarget(targetFovOffset, timeMs);
+            fovRa.value = nextFovPos.ra;
+            fovDec.value = nextFovPos.dec;
+            lastEmittedFov = { ra: nextFovPos.ra, dec: nextFovPos.dec };
+        }
+    }
+    return tgt;
+};
+
+const applyTargetPinnedChange = (pinned) => {
+    if (!pinned || !props.object) {
+        scheduleDraw();
+        return;
+    }
+    const maxComposeOffset = Math.max((Number(props.baseImageFov) || 1.0) * 1.5, 2.0);
+    const curDist = Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg);
+    if (!userDraggedFovOffTarget || curDist > maxComposeOffset) {
+        targetFovOffset = { dEastDeg: 0, dNorthDeg: 0 };
+        userDraggedFovOffTarget = false;
+        const tgt = getLiveTargetCoords(effectiveTimeMs.value);
+        fovRa.value = tgt.ra;
+        fovDec.value = tgt.dec;
+        lastEmittedFov = { ra: tgt.ra, dec: tgt.dec };
+        emit('reset-sensor-center');
+    }
+    const tgt = syncPinnedTargetState(effectiveTimeMs.value);
+    if (tgt) {
+        updateStatusReadout(tgt.ra, tgt.dec, true);
+    }
+    scheduleDraw();
+};
+
+const toggleTargetPin = () => {
+    if (!props.object) return;
+    skyTargetPinned.value = !skyTargetPinned.value;
+};
+
 const toggleFovPin = () => {
     const next = !fovPinned.value;
     fovPinned.value = next;
@@ -1269,19 +1432,27 @@ const toggleFovPin = () => {
         isHoveringFov.value = false;
         const cam = getActiveCameraBasis();
         syncUnpinnedFovToCenter(cam);
+        targetFovOffset = computeOffsetFromTarget(fovRa.value, fovDec.value, effectiveTimeMs.value);
+        userDraggedFovOffTarget =
+            Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg) > 0.03;
         emitSensorCenterIfChanged(true);
     } else {
+        targetFovOffset = computeOffsetFromTarget(fovRa.value, fovDec.value, effectiveTimeMs.value);
+        userDraggedFovOffTarget =
+            Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg) > 0.03;
         emitSensorCenterIfChanged(true);
     }
     scheduleDraw();
 };
 
 const resetSensorFovToTarget = () => {
-    const cat = getCatalogTargetCoords();
+    const cat = getLiveTargetCoords(effectiveTimeMs.value);
+    targetFovOffset = { dEastDeg: 0, dNorthDeg: 0 };
+    userDraggedFovOffTarget = false;
     fovRa.value = cat.ra;
     fovDec.value = cat.dec;
     lastEmittedFov = { ra: cat.ra, dec: cat.dec };
-    if (!fovPinned.value) {
+    if (!fovPinned.value || skyTargetPinned.value) {
         if (animFrameId) {
             cancelAnimationFrame(animFrameId);
             animFrameId = null;
@@ -1398,6 +1569,17 @@ const updateStatusReadout = (raDeg, decDeg, force = false) => {
 
 // --- OBSERVATION TIME & REFERENCE FRAME CONTROLS ---
 const refreshReadoutAfterTimeChange = () => {
+    if (skyTargetPinned.value && props.object) {
+        const tgt = syncPinnedTargetState(effectiveTimeMs.value);
+        if (pendingPointer && Number.isFinite(pendingPointer.px) && Number.isFinite(pendingPointer.py)) {
+            const cam = getActiveCameraBasis();
+            const pt = screenToSky(pendingPointer.px, pendingPointer.py, cam);
+            updateStatusReadout(pt.ra, pt.dec, true);
+        } else if (tgt) {
+            updateStatusReadout(tgt.ra, tgt.dec, true);
+        }
+        return;
+    }
     if (isHorizonFixed.value) {
         const cam = getActiveCameraBasis();
         if (!fovPinned.value && hasValidSensorFov.value) {
@@ -1452,7 +1634,9 @@ const applyFrameModeTransition = (mode) => {
         }
     }
 
-    if (!fovPinned.value && hasValidSensorFov.value) {
+    if (skyTargetPinned.value && props.object) {
+        syncPinnedTargetState(effectiveTimeMs.value);
+    } else if (!fovPinned.value && hasValidSensorFov.value) {
         syncUnpinnedFovToCenter();
         emitSensorCenterIfChanged();
     }
@@ -1978,13 +2162,17 @@ const drawSolarSystemObjects = (
     for (let i = 0; i < bodies.length; i++) {
         const body = bodies[i];
 
+        const isActiveSolarTarget = Boolean(
+            props.object?.is_solar_system &&
+                (props.object.solar_id === body.id || props.object.name === body.name)
+        );
         let belowHorizon = false;
         if (checkHorizon) {
             const sinAlt =
                 body.x * horizBasis.Zx + body.y * horizBasis.Zy + body.z * horizBasis.Zz;
             if (sinAlt < -0.008) {
-                // In Horizon Fixed mode, clip well below ground; in Equatorial mode, render subtly dimmed under veil
-                if (isHorizonFixed.value && sinAlt < -0.12) continue;
+                // In Horizon Fixed mode, clip well below ground unless it is the active selected target
+                if (isHorizonFixed.value && sinAlt < -0.12 && !isActiveSolarTarget) continue;
                 belowHorizon = true;
             }
         }
@@ -2864,7 +3052,8 @@ const ensureImageLoaded = (url, allowQueue = true) => {
 };
 
 const isOffTarget = computed(() => {
-    const tgt = getCatalogTargetCoords();
+    if (skyTargetPinned.value) return false;
+    const tgt = getLiveTargetCoords(effectiveTimeMs.value);
     const ctr = getCurrentCenterRaDec();
     return angularDistanceDeg(ctr.ra, ctr.dec, tgt.ra, tgt.dec) > 0.35;
 });
@@ -2966,6 +3155,9 @@ const drawSkyCanvas = () => {
     ctx.fillRect(0, 0, w, h);
 
     const fov = mapFovDeg.value;
+    if (skyTargetPinned.value && props.object) {
+        syncPinnedTargetState(effectiveTimeMs.value);
+    }
     const loc = observerLocation.value;
     const horizBasis =
         loc &&
@@ -3543,8 +3735,9 @@ const drawSkyCanvas = () => {
     let activeTargetScreen = null;
     let activeBadgeText = '';
     if (props.object) {
-        const tRa = parseFloat(props.object.ra);
-        const tDec = parseFloat(props.object.dec);
+        const liveTgt = getLiveTargetCoords(effectiveTimeMs.value);
+        const tRa = liveTgt.ra;
+        const tDec = liveTgt.dec;
         if (Number.isFinite(tRa) && Number.isFinite(tDec)) {
             const tp = projectRaDecWithBasis(tRa, tDec, cam);
             if (tp && tp.x >= -100 && tp.x <= w + 100 && tp.y >= -100 && tp.y <= h + 100) {
@@ -3553,7 +3746,8 @@ const drawSkyCanvas = () => {
                     props.object.common_name && props.object.common_name !== 'N/A'
                         ? ` · ${props.object.common_name}`
                         : '';
-                activeBadgeText = `${props.object.name}${common}`;
+                const pinPrefix = skyTargetPinned.value ? '⌖ ' : '';
+                activeBadgeText = `${pinPrefix}${props.object.name}${common}`;
                 ctx.font = '600 12.5px system-ui, -apple-system, sans-serif';
                 const tw = getMeasuredTextWidth(ctx, 'badge', activeBadgeText) + 22;
                 const baseImgPx = Math.max(
@@ -4128,7 +4322,7 @@ const drawSkyCanvas = () => {
                     (props.object.image_fov || props.baseImageFov || 1.0) * DEG2RAD * sp.f * sp.k;
                 const ringClearance = isFovDetached.value ? 0 : Math.max(baseImgPx * 0.58, 15);
                 const clearanceX = Math.max(aabbHalfW, ringClearance) + 7;
-                const ctrlW = isFovDetached.value ? 56 : 26;
+                const ctrlW = isFovDetached.value ? 86 : 56;
                 const ctrlH = 26;
                 let leftPx = sp.x + clearanceX;
                 if (leftPx + ctrlW > w - 12) {
@@ -4147,24 +4341,48 @@ const drawSkyCanvas = () => {
             const baseImgPx =
                 (props.object.image_fov || props.baseImageFov || 1.0) * DEG2RAD * tp.f * tp.k;
             const ringR = Math.max(baseImgPx * 0.58, 15);
+            const isLockedTarget = skyTargetPinned.value;
 
             ctx.beginPath();
             ctx.arc(tp.x, tp.y, ringR, 0, TAU);
-            ctx.strokeStyle = 'rgba(245, 158, 11, 0.55)';
-            ctx.lineWidth = 1.25;
+            ctx.strokeStyle = isLockedTarget
+                ? 'rgba(251, 191, 36, 0.85)'
+                : 'rgba(245, 158, 11, 0.55)';
+            ctx.lineWidth = isLockedTarget ? 1.65 : 1.25;
             ctx.stroke();
+
+            if (isLockedTarget) {
+                const tickIn = ringR + 2.5;
+                const tickOut = ringR + 7.0;
+                ctx.beginPath();
+                ctx.moveTo(tp.x, tp.y - tickOut);
+                ctx.lineTo(tp.x, tp.y - tickIn);
+                ctx.moveTo(tp.x, tp.y + tickIn);
+                ctx.lineTo(tp.x, tp.y + tickOut);
+                ctx.moveTo(tp.x - tickOut, tp.y);
+                ctx.lineTo(tp.x - tickIn, tp.y);
+                ctx.moveTo(tp.x + tickIn, tp.y);
+                ctx.lineTo(tp.x + tickOut, tp.y);
+                ctx.strokeStyle = 'rgba(253, 224, 71, 0.92)';
+                ctx.lineWidth = 1.6;
+                ctx.stroke();
+            }
 
             ctx.font = '600 12.5px system-ui, -apple-system, sans-serif';
             const textW = getMeasuredTextWidth(ctx, 'badge', activeBadgeText);
             const pillW = textW + 20;
             const pillH = 24;
             const px = Math.max(12, Math.min(w - pillW - 12, tp.x - pillW * 0.5));
-            const py = tp.y - ringR - pillH - 8;
+            const py = tp.y - ringR - pillH - (isLockedTarget ? 11 : 8);
 
             if (py > 8) {
-                ctx.fillStyle = 'rgba(14, 13, 12, 0.92)';
-                ctx.strokeStyle = 'rgba(217, 155, 67, 0.68)';
-                ctx.lineWidth = 1.15;
+                ctx.fillStyle = isLockedTarget
+                    ? 'rgba(36, 24, 8, 0.94)'
+                    : 'rgba(14, 13, 12, 0.92)';
+                ctx.strokeStyle = isLockedTarget
+                    ? 'rgba(251, 191, 36, 0.92)'
+                    : 'rgba(217, 155, 67, 0.68)';
+                ctx.lineWidth = isLockedTarget ? 1.4 : 1.15;
                 ctx.beginPath();
                 if (ctx.roundRect) {
                     ctx.roundRect(px, py, pillW, pillH, 6);
@@ -4317,7 +4535,7 @@ const centerOnCoords = (rawRa, rawDec, nextFov = null, instant = false) => {
 };
 
 const centerOnTarget = () => {
-    const tgt = getCatalogTargetCoords();
+    const tgt = getLiveTargetCoords(effectiveTimeMs.value);
     centerOnCoords(tgt.ra, tgt.dec);
 };
 
@@ -4326,6 +4544,12 @@ const consumePendingSkyMapCenter = (instant = false) => {
     if (!req) return;
     pendingSkyMapCenter.value = null;
     if (Number.isFinite(req.ra) && Number.isFinite(req.dec)) {
+        if (skyTargetPinned.value && props.object) {
+            const tgt = getLiveTargetCoords(effectiveTimeMs.value);
+            if (angularDistanceDeg(req.ra, req.dec, tgt.ra, tgt.dec) > 0.25) {
+                skyTargetPinned.value = false;
+            }
+        }
         centerOnCoords(req.ra, req.dec, req.fov, instant);
     }
 };
@@ -4394,7 +4618,7 @@ const applyZoomFactor = (factor, anchorPx = null, anchorPy = null) => {
 
 const onWheel = (e) => {
     if (!canvasRectValid) refreshCanvasRect();
-    const useCursorAnchor = !hasValidSensorFov.value || fovPinned.value;
+    const useCursorAnchor = (!hasValidSensorFov.value || fovPinned.value) && !skyTargetPinned.value;
     const px = useCursorAnchor && canvasRectValid ? e.clientX - canvasLeft : null;
     const py = useCursorAnchor && canvasRectValid ? e.clientY - canvasTop : null;
     const factor = e.deltaY > 0 ? 1.14 : 1 / 1.14;
@@ -4512,6 +4736,9 @@ const flushPointerFrame = () => {
             const skyPt = screenToSky(tx, ty, cam);
             fovRa.value = skyPt.ra;
             fovDec.value = skyPt.dec;
+            targetFovOffset = computeOffsetFromTarget(skyPt.ra, skyPt.dec, effectiveTimeMs.value);
+            userDraggedFovOffTarget =
+                Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg) > 0.03;
             emitSensorCenterIfChanged();
             drawSkyCanvas();
             updateStatusReadout(skyPt.ra, skyPt.dec);
@@ -4526,7 +4753,9 @@ const flushPointerFrame = () => {
             isLiveTime.value = false;
             scrubTimeMs.value = nextTimeMs;
             emit('update-obs-time', { isLive: false, timeMs: nextTimeMs });
-            if (!fovPinned.value && hasValidSensorFov.value) {
+            if (skyTargetPinned.value && props.object) {
+                syncPinnedTargetState(nextTimeMs);
+            } else if (!fovPinned.value && hasValidSensorFov.value) {
                 syncUnpinnedFovToCenter();
                 emitSensorCenterIfChanged();
             }
@@ -4534,6 +4763,10 @@ const flushPointerFrame = () => {
             const ctr = getCurrentCenterRaDec();
             updateStatusReadout(ctr.ra, ctr.dec);
             return;
+        }
+
+        if (skyTargetPinned.value && dx * dx + dy * dy > 36) {
+            skyTargetPinned.value = false;
         }
 
         if (panDragKind === 'altaz') {
@@ -4863,7 +5096,11 @@ watch(
             if (props.object?.image_url) {
                 upsertLivePhotoFromObject(props.object);
             }
-            const tgt = getCatalogTargetCoords();
+            targetFovOffset = { dEastDeg: 0, dNorthDeg: 0 };
+            userDraggedFovOffTarget = false;
+            const tgt = skyTargetPinned.value
+                ? getLiveTargetCoords(effectiveTimeMs.value)
+                : getCatalogTargetCoords(effectiveTimeMs.value);
             fovRa.value = tgt.ra;
             fovDec.value = tgt.dec;
             lastEmittedFov = { ra: tgt.ra, dec: tgt.dec };
@@ -4894,7 +5131,12 @@ watch(
         fovRa.value = nextRa;
         fovDec.value = nextDec;
         lastEmittedFov = { ra: nextRa, dec: nextDec };
-        if (!fovPinned.value) {
+        targetFovOffset = computeOffsetFromTarget(nextRa, nextDec, effectiveTimeMs.value);
+        userDraggedFovOffTarget =
+            Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg) > 0.03;
+        if (skyTargetPinned.value && props.object) {
+            syncPinnedTargetState(effectiveTimeMs.value);
+        } else if (!fovPinned.value) {
             viewRa.value = nextRa;
             viewDec.value = nextDec;
             syncHorizFromRaDec(nextRa, nextDec, effectiveTimeMs.value);
@@ -4903,8 +5145,14 @@ watch(
     }
 );
 
+watch(skyTargetPinned, (pinned) => {
+    applyTargetPinnedChange(pinned);
+});
+
 const hasTimeDependentLayers = computed(
     () =>
+        skyTargetPinned.value ||
+        Boolean(props.object?.is_solar_system) ||
         (Boolean(observerLocation.value) &&
             (showHorizon.value || isHorizonFixed.value || showMeridian.value)) ||
         showSolarSystem.value ||
@@ -5157,6 +5405,21 @@ onUnmounted(() => {
             </button>
 
             <button
+                type="button"
+                class="fov-anchor-btn target-pin-btn"
+                :class="{ active: skyTargetPinned }"
+                @click="toggleTargetPin"
+                :aria-pressed="skyTargetPinned"
+                :title="
+                    skyTargetPinned
+                        ? 'Pinned to target: view & framing stay locked on active target while spinning time (drag sky to unpin) · Click to unpin from target'
+                        : 'Pin to target: lock view & framing onto active target so spinning time stays on the target'
+                "
+            >
+                ⌖
+            </button>
+
+            <button
                 v-if="isFovDetached"
                 type="button"
                 class="fov-anchor-btn reset-btn"
@@ -5180,6 +5443,7 @@ onUnmounted(() => {
             </button>
 
             <button
+                v-if="object"
                 type="button"
                 class="sky-pill-btn"
                 :class="{ 'highlight-center': isOffTarget }"
@@ -5188,6 +5452,45 @@ onUnmounted(() => {
             >
                 <span class="pill-icon">⌖</span>
                 <span>Centre on target</span>
+            </button>
+
+            <button
+                v-if="object"
+                type="button"
+                class="sky-pill-btn pin-target-btn"
+                :class="{ active: skyTargetPinned }"
+                :aria-pressed="skyTargetPinned"
+                @click="toggleTargetPin"
+                :title="
+                    skyTargetPinned
+                        ? 'Pinned to target: view & framing stay locked on active target while spinning time (drag sky to unpin) · Click to unpin'
+                        : 'Pin to active target so spinning time keeps the view & framing on the target'
+                "
+            >
+                <svg
+                    viewBox="0 0 16 16"
+                    width="13"
+                    height="13"
+                    fill="none"
+                    aria-hidden="true"
+                    class="target-pin-svg"
+                >
+                    <path
+                        d="M5.2 2.2h5.6l-.7 3.5 1.9 1.8v1.2H4V7.5l1.9-1.8-.7-3.5Z"
+                        fill="currentColor"
+                        fill-opacity="0.28"
+                        stroke="currentColor"
+                        stroke-width="1.35"
+                        stroke-linejoin="round"
+                    />
+                    <path
+                        d="M8 8.7v5.1"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linecap="round"
+                    />
+                </svg>
+                <span>{{ skyTargetPinned ? 'Pinned to target' : 'Pin to target' }}</span>
             </button>
 
             <button
@@ -5340,6 +5643,22 @@ onUnmounted(() => {
                     </div>
 
                     <button
+                        v-if="object"
+                        type="button"
+                        class="pin-target-mini-pill"
+                        :class="{ active: skyTargetPinned }"
+                        :aria-pressed="skyTargetPinned"
+                        @click="toggleTargetPin"
+                        :title="
+                            skyTargetPinned
+                                ? 'Pinned to target: stays on active target while spinning time · Click to unpin'
+                                : 'Pin to target: stay locked on active target while spinning time'
+                        "
+                    >
+                        <span>⌖ Pin</span>
+                    </button>
+
+                    <button
                         type="button"
                         class="drag-sky-pill"
                         :class="{ active: isTimeDragActive }"
@@ -5466,6 +5785,32 @@ onUnmounted(() => {
     transform: rotate(0deg);
 }
 
+.fov-anchor-btn.target-pin-btn {
+    background: rgba(18, 16, 14, 0.92);
+    border-color: rgba(245, 158, 11, 0.42);
+    color: #cbd5e1;
+    font-size: 0.9rem;
+}
+
+.fov-anchor-btn.target-pin-btn:hover {
+    background: rgba(42, 30, 14, 0.97);
+    border-color: #fbbf24;
+    color: #fef3c7;
+}
+
+.fov-anchor-btn.target-pin-btn.active {
+    background: rgba(54, 34, 10, 0.96);
+    border-color: #f59e0b;
+    color: #fde68a;
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.3), 0 3px 10px rgba(0, 0, 0, 0.6);
+}
+
+.fov-anchor-btn.target-pin-btn.active:hover {
+    background: rgba(68, 44, 14, 0.98);
+    border-color: #fbbf24;
+    color: #fef9c3;
+}
+
 .fov-anchor-btn.reset-btn {
     background: rgba(28, 22, 14, 0.93);
     border-color: rgba(251, 191, 36, 0.48);
@@ -5514,6 +5859,29 @@ onUnmounted(() => {
 .sky-pill-btn.highlight-center {
     border-color: rgba(245, 158, 11, 0.55);
     color: #fde68a;
+}
+
+.sky-pill-btn.pin-target-btn .target-pin-svg {
+    transform: rotate(28deg);
+    transition: transform 0.14s ease;
+    flex-shrink: 0;
+}
+
+.sky-pill-btn.pin-target-btn.active {
+    background: rgba(54, 34, 10, 0.95);
+    border-color: rgba(245, 158, 11, 0.72);
+    color: #fde68a;
+    box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.25), 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+.sky-pill-btn.pin-target-btn.active:hover {
+    background: rgba(68, 44, 14, 0.98);
+    border-color: #fbbf24;
+    color: #fef9c3;
+}
+
+.sky-pill-btn.pin-target-btn.active .target-pin-svg {
+    transform: rotate(0deg);
 }
 
 .sky-pill-btn.fov-ctrl-btn {
@@ -5790,6 +6158,7 @@ onUnmounted(() => {
     color: #d1fae5;
 }
 
+.pin-target-mini-pill,
 .drag-sky-pill {
     display: inline-flex;
     align-items: center;
@@ -5809,12 +6178,14 @@ onUnmounted(() => {
     transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
 }
 
+.pin-target-mini-pill:hover,
 .drag-sky-pill:hover {
     background: rgba(28, 39, 58, 0.96);
     border-color: rgba(148, 163, 184, 0.48);
     color: #ffffff;
 }
 
+.pin-target-mini-pill.active,
 .drag-sky-pill.active {
     background: rgba(54, 34, 10, 0.95);
     border-color: rgba(245, 158, 11, 0.68);

@@ -7,6 +7,7 @@ import { DEG2RAD, RAD2DEG, wrapRaDeg } from './observingTime.js';
 const STORAGE_KEYS = {
     frameMode: 'sky_observer_sky_frame_mode_v1',
     legacyFrameMode: 'sky_observer_sky_frame_mode',
+    targetPinned: 'sky_observer_sky_target_pinned_v1',
     showHorizon: 'sky_observer_show_horizon_v1',
     showMeridian: 'sky_observer_show_meridian_v1',
     showSolarSystem: 'sky_observer_show_solar_system_v1',
@@ -66,6 +67,7 @@ watch(skyFrameMode, (mode) => {
     }
 });
 
+export const skyTargetPinned = bindPersistedBool(STORAGE_KEYS.targetPinned, false);
 export const showHorizon = bindPersistedBool(STORAGE_KEYS.showHorizon, true);
 export const showMeridian = bindPersistedBool(STORAGE_KEYS.showMeridian, false);
 export const showSolarSystem = bindPersistedBool(STORAGE_KEYS.showSolarSystem, true);
