@@ -959,7 +959,7 @@ const syncHorizFromRaDec = (
 syncHorizFromRaDec(initialViewCoords.ra, initialViewCoords.dec, effectiveTimeMs.value);
 
 const getCurrentCenterRaDec = () => {
-    if (skyTargetPinned.value && props.object) {
+    if (skyTargetPinned.value && props.object && !isCenteringToPinnedTarget) {
         return getLiveTargetCoords(effectiveTimeMs.value);
     }
     if (isHorizonFixed.value && observerLocation.value) {
@@ -993,6 +993,16 @@ let cachedBgKey = '';
 let rafId = null;
 let pointerRafId = null;
 let animFrameId = null;
+let isCenteringFovToScreen = false;
+let isCenteringToPinnedTarget = false;
+const cancelViewAnimation = () => {
+    if (animFrameId) {
+        cancelAnimationFrame(animFrameId);
+        animFrameId = null;
+    }
+    isCenteringFovToScreen = false;
+    isCenteringToPinnedTarget = false;
+};
 let liveClockTimer = null;
 let resizeObserver = null;
 let lastReadoutTs = 0;
@@ -1187,7 +1197,7 @@ const getActiveCameraBasis = (
     timeMs = effectiveTimeMs.value
 ) => {
     const loc = observerLocation.value;
-    if (skyTargetPinned.value && props.object) {
+    if (skyTargetPinned.value && props.object && !isCenteringToPinnedTarget) {
         const tgt = getLiveTargetCoords(timeMs);
         if (isHorizonFixed.value && loc) {
             const horiz = makeHorizontalBasis(loc.lat, loc.lon, timeMs);
@@ -1370,10 +1380,7 @@ const updateFovFloatingCtrlPosition = (leftPx, topPx, visible) => {
 
 const syncPinnedTargetState = (timeMs = effectiveTimeMs.value) => {
     if (!skyTargetPinned.value || !props.object) return null;
-    if (animFrameId) {
-        cancelAnimationFrame(animFrameId);
-        animFrameId = null;
-    }
+    cancelViewAnimation();
     const tgt = getLiveTargetCoords(timeMs);
     viewRa.value = tgt.ra;
     viewDec.value = tgt.dec;
@@ -1381,11 +1388,11 @@ const syncPinnedTargetState = (timeMs = effectiveTimeMs.value) => {
         syncHorizFromRaDec(tgt.ra, tgt.dec, timeMs);
     }
     if (hasValidSensorFov.value && !isDraggingFov.value) {
-        if (!fovPinned.value) {
+        if (!fovPinned.value && !isCenteringFovToScreen) {
             fovRa.value = tgt.ra;
             fovDec.value = tgt.dec;
             lastEmittedFov = { ra: tgt.ra, dec: tgt.dec };
-        } else if (props.object.is_solar_system) {
+        } else if (fovPinned.value && props.object.is_solar_system) {
             const nextFovPos = applyOffsetToTarget(targetFovOffset, timeMs);
             fovRa.value = nextFovPos.ra;
             fovDec.value = nextFovPos.dec;
@@ -1397,25 +1404,39 @@ const syncPinnedTargetState = (timeMs = effectiveTimeMs.value) => {
 
 const applyTargetPinnedChange = (pinned) => {
     if (!pinned || !props.object) {
+        if (isCenteringToPinnedTarget) {
+            cancelViewAnimation();
+        }
         scheduleDraw();
         return;
     }
-    const maxComposeOffset = Math.max((Number(props.baseImageFov) || 1.0) * 1.5, 2.0);
-    const curDist = Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg);
-    if (!userDraggedFovOffTarget || curDist > maxComposeOffset) {
-        targetFovOffset = { dEastDeg: 0, dNorthDeg: 0 };
-        userDraggedFovOffTarget = false;
-        const tgt = getLiveTargetCoords(effectiveTimeMs.value);
-        fovRa.value = tgt.ra;
-        fovDec.value = tgt.dec;
-        lastEmittedFov = { ra: tgt.ra, dec: tgt.dec };
-        emit('reset-sensor-center');
+    const tgt = getLiveTargetCoords(effectiveTimeMs.value);
+    if (fovPinned.value) {
+        if (!userDraggedFovOffTarget && props.object.is_solar_system) {
+            targetFovOffset = { dEastDeg: 0, dNorthDeg: 0 };
+            fovRa.value = tgt.ra;
+            fovDec.value = tgt.dec;
+            lastEmittedFov = { ra: tgt.ra, dec: tgt.dec };
+            emit('reset-sensor-center');
+        } else {
+            targetFovOffset = computeOffsetFromTarget(
+                fovRa.value,
+                fovDec.value,
+                effectiveTimeMs.value
+            );
+            userDraggedFovOffTarget =
+                Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg) > 0.03;
+        }
     }
-    const tgt = syncPinnedTargetState(effectiveTimeMs.value);
-    if (tgt) {
-        updateStatusReadout(tgt.ra, tgt.dec, true);
-    }
-    scheduleDraw();
+    centerOnCoords(tgt.ra, tgt.dec, null, false, {
+        isTargetPinPan: true,
+        onDone: () => {
+            if (skyTargetPinned.value && props.object) {
+                syncPinnedTargetState(effectiveTimeMs.value);
+                scheduleDraw();
+            }
+        }
+    });
 };
 
 const toggleTargetPin = () => {
@@ -1428,20 +1449,33 @@ const toggleFovPin = () => {
     fovPinned.value = next;
     persistFovPinned(next);
     if (!next) {
+        const keepRa = fovRa.value;
+        const keepDec = fovDec.value;
         isDraggingFov.value = false;
         isHoveringFov.value = false;
-        const cam = getActiveCameraBasis();
-        syncUnpinnedFovToCenter(cam);
-        targetFovOffset = computeOffsetFromTarget(fovRa.value, fovDec.value, effectiveTimeMs.value);
+        if (skyTargetPinned.value && props.object) {
+            const tgt = getLiveTargetCoords(effectiveTimeMs.value);
+            if (angularDistanceDeg(keepRa, keepDec, tgt.ra, tgt.dec) > 0.03) {
+                skyTargetPinned.value = false;
+            }
+        }
+        fovRa.value = keepRa;
+        fovDec.value = keepDec;
+        targetFovOffset = computeOffsetFromTarget(keepRa, keepDec, effectiveTimeMs.value);
         userDraggedFovOffTarget =
             Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg) > 0.03;
         emitSensorCenterIfChanged(true);
-    } else {
-        targetFovOffset = computeOffsetFromTarget(fovRa.value, fovDec.value, effectiveTimeMs.value);
-        userDraggedFovOffTarget =
-            Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg) > 0.03;
-        emitSensorCenterIfChanged(true);
+        centerOnCoords(keepRa, keepDec, null, false, { preserveFov: true });
+        return;
     }
+
+    if (isCenteringFovToScreen) {
+        cancelViewAnimation();
+    }
+    targetFovOffset = computeOffsetFromTarget(fovRa.value, fovDec.value, effectiveTimeMs.value);
+    userDraggedFovOffTarget =
+        Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg) > 0.03;
+    emitSensorCenterIfChanged(true);
     scheduleDraw();
 };
 
@@ -1453,10 +1487,7 @@ const resetSensorFovToTarget = () => {
     fovDec.value = cat.dec;
     lastEmittedFov = { ra: cat.ra, dec: cat.dec };
     if (!fovPinned.value || skyTargetPinned.value) {
-        if (animFrameId) {
-            cancelAnimationFrame(animFrameId);
-            animFrameId = null;
-        }
+        cancelViewAnimation();
         viewRa.value = cat.ra;
         viewDec.value = cat.dec;
         syncHorizFromRaDec(cat.ra, cat.dec, effectiveTimeMs.value);
@@ -1602,10 +1633,7 @@ const applyFrameModeTransition = (mode) => {
     const targetMode = mode === 'horizon' ? 'horizon' : 'sky';
     if (targetMode === activeFrameMode) return;
 
-    if (animFrameId) {
-        cancelAnimationFrame(animFrameId);
-        animFrameId = null;
-    }
+    cancelViewAnimation();
 
     if (targetMode === 'horizon') {
         if (!observerLocation.value) {
@@ -3155,7 +3183,7 @@ const drawSkyCanvas = () => {
     ctx.fillRect(0, 0, w, h);
 
     const fov = mapFovDeg.value;
-    if (skyTargetPinned.value && props.object) {
+    if (skyTargetPinned.value && props.object && !isCenteringToPinnedTarget) {
         syncPinnedTargetState(effectiveTimeMs.value);
     }
     const loc = observerLocation.value;
@@ -4171,14 +4199,14 @@ const drawSkyCanvas = () => {
     lastFovHit.valid = false;
     let placedFovCtrl = false;
     if (props.object) {
-        if (!fovPinned.value && hasValidSensorFov.value) {
+        if (!fovPinned.value && !isCenteringFovToScreen && hasValidSensorFov.value) {
             syncUnpinnedFovToCenter(cam);
             emitSensorCenterIfChanged();
         }
         const sensorRa = fovRa.value;
         const sensorDec = fovDec.value;
         let sp = projectRaDecWithBasis(sensorRa, sensorDec, cam);
-        if (sp && !fovPinned.value) {
+        if (sp && !fovPinned.value && !isCenteringFovToScreen) {
             sp.x = cam.halfW;
             sp.y = cam.halfH;
         }
@@ -4427,17 +4455,41 @@ const drawSkyCanvas = () => {
 };
 
 // --- INTERACTION HANDLERS (rAF-Coalesced Pan, Wheel Zoom, Touch Pinch, Click/Hover) ---
-const centerOnCoords = (rawRa, rawDec, nextFov = null, instant = false) => {
+const centerOnCoords = (rawRa, rawDec, nextFov = null, instant = false, opts = null) => {
     const targetRa = wrapRaDeg(rawRa);
     const targetDec = clampDecDeg(rawDec);
-    if (animFrameId) {
-        cancelAnimationFrame(animFrameId);
-        animFrameId = null;
-    }
+    cancelViewAnimation();
+
+    const preserveFov = Boolean(opts?.preserveFov);
+    isCenteringFovToScreen = preserveFov;
+    isCenteringToPinnedTarget = Boolean(opts?.isTargetPinPan);
+    const onDone = typeof opts?.onDone === 'function' ? opts.onDone : null;
 
     if (Number.isFinite(nextFov) && nextFov > 0) {
         mapFovDeg.value = Math.max(0.4, Math.min(105.0, nextFov));
     }
+
+    const finalizeCenter = (finalRa, finalDec, persistFov = false) => {
+        isCenteringFovToScreen = false;
+        isCenteringToPinnedTarget = false;
+        if (preserveFov) {
+            fovRa.value = targetRa;
+            fovDec.value = targetDec;
+            emitSensorCenterIfChanged(persistFov);
+        } else if (!fovPinned.value && hasValidSensorFov.value) {
+            syncUnpinnedFovToCenter();
+            targetFovOffset = computeOffsetFromTarget(
+                fovRa.value,
+                fovDec.value,
+                effectiveTimeMs.value
+            );
+            userDraggedFovOffTarget =
+                Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg) > 0.03;
+            emitSensorCenterIfChanged(persistFov);
+        }
+        updateStatusReadout(finalRa, finalDec, true);
+        if (onDone) onDone();
+    };
 
     if (isHorizonFixed.value && observerLocation.value) {
         const loc = observerLocation.value;
@@ -4459,11 +4511,7 @@ const centerOnCoords = (rawRa, rawDec, nextFov = null, instant = false) => {
         if (instant || Math.hypot(dAz, dAlt) < 0.05) {
             viewAz.value = targetAz;
             viewAlt.value = targetAlt;
-            if (!fovPinned.value && hasValidSensorFov.value) {
-                syncUnpinnedFovToCenter();
-                emitSensorCenterIfChanged();
-            }
-            updateStatusReadout(targetRa, targetDec, true);
+            finalizeCenter(targetRa, targetDec, false);
             scheduleDraw();
             return;
         }
@@ -4475,16 +4523,13 @@ const centerOnCoords = (rawRa, rawDec, nextFov = null, instant = false) => {
             const ease = 1 - Math.pow(1 - t, 3);
             viewAz.value = wrapRaDeg(startAz + dAz * ease);
             viewAlt.value = clampAltDeg(startAlt + dAlt * ease);
-            drawSkyCanvas();
             if (t < 1) {
+                drawSkyCanvas();
                 animFrameId = requestAnimationFrame(step);
             } else {
                 animFrameId = null;
-                if (!fovPinned.value && hasValidSensorFov.value) {
-                    syncUnpinnedFovToCenter();
-                    emitSensorCenterIfChanged(true);
-                }
-                updateStatusReadout(targetRa, targetDec, true);
+                finalizeCenter(targetRa, targetDec, true);
+                drawSkyCanvas();
             }
         };
         animFrameId = requestAnimationFrame(step);
@@ -4502,11 +4547,7 @@ const centerOnCoords = (rawRa, rawDec, nextFov = null, instant = false) => {
         viewRa.value = targetRa;
         viewDec.value = targetDec;
         syncHorizFromRaDec(targetRa, targetDec);
-        if (!fovPinned.value && hasValidSensorFov.value) {
-            syncUnpinnedFovToCenter();
-            emitSensorCenterIfChanged();
-        }
-        updateStatusReadout(targetRa, targetDec, true);
+        finalizeCenter(targetRa, targetDec, false);
         scheduleDraw();
         return;
     }
@@ -4518,17 +4559,14 @@ const centerOnCoords = (rawRa, rawDec, nextFov = null, instant = false) => {
         const ease = 1 - Math.pow(1 - t, 3);
         viewRa.value = wrapRaDeg(startRa + dRa * ease);
         viewDec.value = clampDecDeg(startDec + dDec * ease);
-        drawSkyCanvas();
         if (t < 1) {
+            drawSkyCanvas();
             animFrameId = requestAnimationFrame(step);
         } else {
             animFrameId = null;
             syncHorizFromRaDec(viewRa.value, viewDec.value);
-            if (!fovPinned.value && hasValidSensorFov.value) {
-                syncUnpinnedFovToCenter();
-                emitSensorCenterIfChanged(true);
-            }
-            updateStatusReadout(viewRa.value, viewDec.value, true);
+            finalizeCenter(viewRa.value, viewDec.value, true);
+            drawSkyCanvas();
         }
     };
     animFrameId = requestAnimationFrame(step);
@@ -4576,9 +4614,17 @@ const applyZoomFactor = (factor, anchorPx = null, anchorPy = null) => {
     // Unpinned mode: FOV stays locked at viewport center, so zoom around the center
     // keeping both the FOV rectangle and the sky inside it centered.
     if (hasValidSensorFov.value && !fovPinned.value) {
+        if (isCenteringFovToScreen) {
+            mapFovDeg.value = nextFov;
+            scheduleDraw();
+            return;
+        }
         mapFovDeg.value = nextFov;
         const cam = getActiveCameraBasis();
         syncUnpinnedFovToCenter(cam);
+        targetFovOffset = computeOffsetFromTarget(fovRa.value, fovDec.value, effectiveTimeMs.value);
+        userDraggedFovOffTarget =
+            Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg) > 0.03;
         emitSensorCenterIfChanged();
         updateStatusReadout(fovRa.value, fovDec.value);
         scheduleDraw();
@@ -4659,10 +4705,7 @@ const findHitItem = (px, py) => {
 };
 
 const beginPanGesture = (clientX, clientY, forceTimeDrag = false) => {
-    if (animFrameId) {
-        cancelAnimationFrame(animFrameId);
-        animFrameId = null;
-    }
+    cancelViewAnimation();
     refreshCanvasRect();
     isPanning.value = true;
     panMoved = false;
@@ -4950,6 +4993,9 @@ const finishPanSync = () => {
     }
     if (!fovPinned.value && hasValidSensorFov.value) {
         syncUnpinnedFovToCenter();
+        targetFovOffset = computeOffsetFromTarget(fovRa.value, fovDec.value, effectiveTimeMs.value);
+        userDraggedFovOffTarget =
+            Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg) > 0.03;
         emitSensorCenterIfChanged(true);
     }
     updateStatusReadout(ctr.ra, ctr.dec, true);
@@ -5375,8 +5421,8 @@ onUnmounted(() => {
                 :aria-pressed="fovPinned"
                 :title="
                     fovPinned
-                        ? 'FOV pinned to sky: moves and zooms with the sky (drag frame to reposition, double-click frame to enter Framing) · Click to unpin & lock to view center'
-                        : 'FOV unpinned: stays locked in the center of the view while panning or zooming (double-click frame to enter Framing) · Click to pin to current sky coordinates'
+                        ? 'FOV pinned to sky: moves and zooms with the sky (drag frame to reposition, double-click frame to enter Framing) · Click to move sky view onto FOV & lock to view center'
+                        : 'FOV locked to view center: stays centered while panning or zooming (double-click frame to enter Framing) · Click to pin to current sky coordinates'
                 "
             >
                 <svg
@@ -5498,7 +5544,7 @@ onUnmounted(() => {
                 type="button"
                 class="sky-pill-btn fov-ctrl-btn unpin-fov-btn"
                 @click="toggleFovPin"
-                title="Pinned sensor FOV is off-screen · Click to unpin and bring it to the center of the view"
+                title="Pinned sensor FOV is off-screen · Click to pan the sky view back onto the FOV and lock it to the center"
             >
                 <span>⌖ Unpin FOV (center)</span>
             </button>
