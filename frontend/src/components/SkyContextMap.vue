@@ -827,6 +827,7 @@ let targetFovOffset = computeOffsetFromTarget(
 const maxInitComposeOffset = Math.max((Number(props.baseImageFov) || 1.0) * 1.5, 2.0);
 if (
     skyTargetPinned.value &&
+    props.object?.is_solar_system &&
     Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg) > maxInitComposeOffset
 ) {
     targetFovOffset = { dEastDeg: 0, dNorthDeg: 0 };
@@ -4517,7 +4518,7 @@ const centerOnCoords = (rawRa, rawDec, nextFov = null, instant = false, opts = n
         }
 
         const startTime = performance.now();
-        const duration = 240;
+        const duration = 300;
         const step = (now) => {
             const t = Math.min(1, (now - startTime) / duration);
             const ease = 1 - Math.pow(1 - t, 3);
@@ -4553,7 +4554,7 @@ const centerOnCoords = (rawRa, rawDec, nextFov = null, instant = false, opts = n
     }
 
     const startTime = performance.now();
-    const duration = 240;
+    const duration = 300;
     const step = (now) => {
         const t = Math.min(1, (now - startTime) / duration);
         const ease = 1 - Math.pow(1 - t, 3);
@@ -5180,9 +5181,14 @@ watch(
         targetFovOffset = computeOffsetFromTarget(nextRa, nextDec, effectiveTimeMs.value);
         userDraggedFovOffTarget =
             Math.hypot(targetFovOffset.dEastDeg, targetFovOffset.dNorthDeg) > 0.03;
-        if (skyTargetPinned.value && props.object) {
+        if (
+            skyTargetPinned.value &&
+            props.object &&
+            !isCenteringToPinnedTarget &&
+            !isCenteringFovToScreen
+        ) {
             syncPinnedTargetState(effectiveTimeMs.value);
-        } else if (!fovPinned.value) {
+        } else if (!fovPinned.value && !isCenteringFovToScreen) {
             viewRa.value = nextRa;
             viewDec.value = nextDec;
             syncHorizFromRaDec(nextRa, nextDec, effectiveTimeMs.value);

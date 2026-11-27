@@ -93,6 +93,15 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def disable_html_cache(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.endswith(".html"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
+
 # --- Settings & Profiles Endpoints ---
 @app.get("/api/settings")
 def get_settings():

@@ -1127,12 +1127,6 @@ const currentSensorCenter = computed(() => {
     return getCurrentCenterCoordinates();
 });
 
-watch(skyTargetPinned, (pinned) => {
-    if (pinned && skyMapSensorOverride.value) {
-        skyMapSensorOverride.value = null;
-    }
-});
-
 let lastEmittedFramingCoords = null;
 watch(
     [currentSensorCenter, () => props.object?.name, () => props.object?.ra, () => props.object?.dec],
